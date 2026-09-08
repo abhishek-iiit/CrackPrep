@@ -109,6 +109,13 @@ describe("lessons", () => {
     expect(getLesson(COURSE, "foundations", "nope")).toBeNull();
   });
 
+  it("getLessons returns exactly the module's lesson list", () => {
+    expect(getLessons(COURSE, "foundations")).toEqual(
+      getModule(COURSE, "foundations")!.lessons,
+    );
+    expect(getLessons(COURSE, "nope")).toEqual([]);
+  });
+
   it("validates frontmatter on every one of the 179 files", () => {
     // getLesson throws on a schema violation, so touching all of them is the assertion.
     for (const mod of getModules(COURSE)) {

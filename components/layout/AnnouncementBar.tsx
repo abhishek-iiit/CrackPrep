@@ -1,37 +1,45 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import Link from "next/link";
 import { X } from "lucide-react";
+import { useMounted } from "@/lib/hooks/useMounted";
 
 type Props = { id: string; message: string; href?: string; cta?: string };
 
-export function AnnouncementBar({ id, message, href, cta }: Props) {
-  // Rendered only after mount so the dismissed state never flashes visible.
-  const [visible, setVisible] = useState(false);
+function readDismissed(id: string): boolean {
+  try {
+    return window.localStorage.getItem(`announce:${id}`) === "dismissed";
+  } catch {
+    // Private browsing or blocked site data: treat as not dismissed.
+    return false;
+  }
+}
 
-  useEffect(() => {
-    try {
-      setVisible(window.localStorage.getItem(`announce:${id}`) !== "dismissed");
-    } catch {
-      setVisible(true);
-    }
-  }, [id]);
+export function AnnouncementBar({ id, message, href, cta }: Props) {
+  const mounted = useMounted();
+  const [dismissedNow, setDismissedNow] = useState(false);
+
+  // Storage is read only after hydration, so the server HTML and the first
+  // client render agree. No effect, so no cascading render and no
+  // setState-in-effect lint error — setState happens in the click handler only.
+  const dismissed = dismissedNow || (mounted && readDismissed(id));
 
   function dismiss() {
-    setVisible(false);
+    setDismissedNow(true);
     try {
       window.localStorage.setItem(`announce:${id}`, "dismissed");
     } catch {
-      // Private browsing or blocked storage — dismissal simply will not persist.
+      // Storage unavailable — dismissal simply will not persist.
     }
   }
 
-  // The wrapper always occupies its slot in the layout, so mounting cannot
-  // shift the page. Only the contents toggle.
   return (
-    <div className="border-b-2 border-structural bg-card">
-      <div hidden={!visible} className="mx-auto flex max-w-[1200px] items-center gap-3 px-4 py-2">
+    <div
+      hidden={dismissed}
+      className="border-b-2 border-structural bg-card"
+    >
+      <div className="mx-auto flex max-w-[1200px] items-center gap-3 px-4 py-2">
         <p className="flex-1 text-center font-mono text-xs uppercase tracking-wider text-ink-muted">
           {message}
           {href && cta && (

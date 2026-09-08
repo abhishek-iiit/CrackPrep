@@ -13,7 +13,7 @@
     "test:e2e": "playwright test",
     "content:generate": "tsx scripts/generate-content.ts",
     "content:index": "tsx scripts/build-search-index.ts",
-    "verify": "npm run typecheck && npm run test && npm run build"
+    "verify": "npm run lint && npm run typecheck && npm run test && npm run build"
   },
   "dependencies": {
     "fuse.js": "^7.5.0",
