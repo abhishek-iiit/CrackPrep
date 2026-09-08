@@ -1,26 +1,125 @@
 @import "tailwindcss";
 
+/* Tailwind v4 defaults `dark:` to prefers-color-scheme. next-themes drives a
+   class instead, so the variant is redefined. */
+@custom-variant dark (&:where(.dark, .dark *));
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --paper: #FAF8F4;
+  --ink: #141414;
+  --card: #FFFFFF;
+  --ink-muted: #57534E;
+  --link: #2563EB;
+  --border-structural: #141414;
+  --border-hairline: #E5E0D8;
+  --destructive: #DC2626;
+
+  --shadow-hard: 4px 4px 0 var(--border-structural);
+  --shadow-hard-sm: 2px 2px 0 var(--border-structural);
+  --dur: 180ms;
+  --ease: cubic-bezier(0.2, 0, 0.2, 1);
+}
+
+.dark {
+  --paper: #0E0E0E;
+  --ink: #F5F3EF;
+  --card: #171716;
+  --ink-muted: #A8A29E;
+  --link: #93B4FF;
+  --border-structural: #F5F3EF;
+  --border-hairline: #2A2A28;
+  --destructive: #F87171;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-paper: var(--paper);
+  --color-ink: var(--ink);
+  --color-card: var(--card);
+  --color-ink-muted: var(--ink-muted);
+  --color-link: var(--link);
+  --color-structural: var(--border-structural);
+  --color-hairline: var(--border-hairline);
+  --color-destructive: var(--destructive);
+
+  --font-sans: var(--font-geist), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+  --font-pixel: var(--font-geist-pixel), var(--font-geist-mono), ui-monospace, monospace;
+
+  --radius-card: 4px;
+
+  /* Tailwind v4 ships --max-width-prose: 65ch. The spec fixes the measure at
+     68ch, so override it here: that keeps the `max-w-prose` utility and the
+     .prose-lesson class below on the same number instead of 65 vs 68. */
+  --max-width-prose: 68ch;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+@layer base {
+  html {
+    color-scheme: light;
+  }
+  html.dark {
+    color-scheme: dark;
+  }
+
+  body {
+    background-color: var(--paper);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Focus rings are never removed. 2px structural, offset so it reads on
+     both paper and coloured module surfaces. */
+  :focus-visible {
+    outline: 2px solid var(--border-structural);
+    outline-offset: 2px;
+  }
+
+  /* Long-form reading: 17px / 1.7, capped at 68ch. */
+  .prose-lesson {
+    font-size: 17px;
+    line-height: 1.7;
+    max-width: var(--max-width-prose);
+  }
+
+  /* Geist Pixel ships without font-override metrics, so Next cannot generate a
+     metric-matched fallback. An explicit line-height makes the box height
+     font-independent, which is what keeps CLS at zero while the face swaps. */
+  .font-pixel,
+  [class*="font-pixel"] {
+    font-family: var(--font-pixel);
+    line-height: 1.1;
+    letter-spacing: 0;
+  }
+
+  /* Wide content scrolls inside itself; the page never scrolls sideways. */
+  .scroll-x {
+    overflow-x: auto;
+    max-width: 100%;
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+@layer utilities {
+  .shadow-hard {
+    box-shadow: var(--shadow-hard);
+  }
+  .shadow-hard-sm {
+    box-shadow: var(--shadow-hard-sm);
+  }
+  .transition-brut {
+    transition-property: color, background-color, border-color, box-shadow, transform;
+    transition-duration: var(--dur);
+    transition-timing-function: var(--ease);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
+  }
 }

@@ -5,7 +5,8 @@ export type TokenName =
   | "inkMuted"
   | "link"
   | "borderStructural"
-  | "borderHairline";
+  | "borderHairline"
+  | "destructive";
 
 export type TokenSet = Record<TokenName, string>;
 
@@ -26,6 +27,7 @@ export const baseTokens: { light: TokenSet; dark: TokenSet } = {
     link: "#2563EB",
     borderStructural: "#141414",
     borderHairline: "#E5E0D8",
+    destructive: "#DC2626",
   },
   dark: {
     paper: "#0E0E0E",
@@ -35,11 +37,9 @@ export const baseTokens: { light: TokenSet; dark: TokenSet } = {
     link: "#93B4FF",
     borderStructural: "#F5F3EF",
     borderHairline: "#2A2A28",
+    destructive: "#F87171",
   },
 };
-
-/** Shared across both themes. */
-export const destructive = "#DC2626";
 
 /** CSS custom property name for a token, e.g. "inkMuted" -> "--ink-muted". */
 export function cssVarName(token: TokenName): string {

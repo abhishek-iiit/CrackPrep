@@ -76,6 +76,14 @@ describe("base tokens meet AA in both themes", () => {
     it(`${theme}: borderStructural on paper >= 3 (WCAG 1.4.11)`, () => {
       expect(contrastRatio(t.borderStructural, t.paper)).toBeGreaterThanOrEqual(AA_UI);
     });
+
+    it(`${theme}: destructive on paper >= 4.5`, () => {
+      expect(contrastRatio(t.destructive, t.paper)).toBeGreaterThanOrEqual(AA_TEXT);
+    });
+
+    it(`${theme}: destructive on card >= 4.5`, () => {
+      expect(contrastRatio(t.destructive, t.card)).toBeGreaterThanOrEqual(AA_TEXT);
+    });
   }
 
   it("documents that hairlines are decorative and below 3:1", () => {
