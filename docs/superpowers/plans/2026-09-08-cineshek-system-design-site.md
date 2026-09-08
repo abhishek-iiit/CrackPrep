@@ -3417,19 +3417,28 @@ export function extractHeadings(body: string): Heading[] {
   const slugger = new GithubSlugger();
   const headings: Heading[] = [];
 
-  // Tracks WHICH delimiter opened the current fence, not merely that one is
-  // open. CommonMark requires the closing fence to use the same character, so
-  // a boolean toggle would let a "~~~" line inside a ```-fenced block close it
-  // early and expose the shell comments inside as headings.
+  // Tracks BOTH which delimiter opened the current fence and how long it was.
+  // CommonMark requires the closing fence to use the same character AND be at
+  // least as long as the opening one. A boolean toggle would let a "~~~" line
+  // inside a ```-fenced block close it early; tracking only the character
+  // would let a 3-backtick line close a 4-backtick block. Either way the
+  // shell comments inside would be exposed as headings.
   let fenceChar: "`" | "~" | null = null;
+  let fenceLen = 0;
 
   for (const line of body.split(/\r?\n/)) {
     const fence = FENCE.exec(line.trim());
     if (fence) {
-      const char = fence[1][0] as "`" | "~";
-      if (fenceChar === null) fenceChar = char;
-      else if (fenceChar === char) fenceChar = null;
-      // A non-matching marker inside a fence is content — ignore it.
+      const marker = fence[1];
+      const char = marker[0] as "`" | "~";
+      if (fenceChar === null) {
+        fenceChar = char;
+        fenceLen = marker.length;
+      } else if (fenceChar === char && marker.length >= fenceLen) {
+        fenceChar = null;
+        fenceLen = 0;
+      }
+      // A non-matching or too-short marker inside a fence is content — ignore it.
       continue;
     }
     if (fenceChar !== null) continue;
