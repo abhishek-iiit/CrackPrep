@@ -30,3 +30,14 @@ export const moduleColors: Record<ColorKey, ModuleColor> = {
 };
 
 export const colorKeys = Object.keys(moduleColors) as ColorKey[];
+
+/**
+ * Opacity applied to a "planned" (not-yet-live) path card in PathCards.tsx.
+ * CSS `opacity` composites the surface AND the ink together onto the page
+ * background, so a token pair that clears 4.5:1 in isolation can still fail
+ * once composited — verified for all 14 colour keys, both themes, at this
+ * exact value by tests/design/contrast.test.ts. 0.92 is the tightest value
+ * where every key clears (worst case 4.50:1, too tight to rely on); 0.95
+ * leaves headroom (worst case 4.75:1, orange on dark paper).
+ */
+export const PLANNED_CARD_OPACITY = 0.95;

@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { ArrowRight } from "lucide-react";
 import { Pill } from "@/components/ui/Pill";
-import { moduleColors } from "@/lib/design/modules";
+import { PLANNED_CARD_OPACITY, moduleColors } from "@/lib/design/modules";
 import type { Course } from "@/lib/content";
 
 function Inner({ course }: { course: Course }) {
@@ -77,12 +77,16 @@ export function PathCards({ courses }: { courses: Course[] }) {
                 </Link>
               ) : (
                 // Planned paths are not links: there is nowhere to go yet.
-                // opacity-80 (not opacity-90) composited the cobalt pair's
-                // 6.70:1 white-on-blue token contrast down to 4.46:1 against
-                // the page background — under the 4.5:1 AA floor even though
-                // the token pair itself passes. opacity-90 keeps the muted
-                // look with margin to spare (5.49:1 for the tightest pair).
-                <div style={style} className={`${shell} opacity-90`}>
+                // Element `opacity` composites the ink as well as the
+                // surface onto the page background, so a token pair that
+                // passes contrastRatio() in isolation can still fail once
+                // it's actually rendered here — PLANNED_CARD_OPACITY is the
+                // one value both this component and
+                // tests/design/contrast.test.ts read, so they cannot drift.
+                <div
+                  style={{ ...style, opacity: PLANNED_CARD_OPACITY }}
+                  className={shell}
+                >
                   <Inner course={course} />
                 </div>
               )}

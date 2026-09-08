@@ -67,7 +67,15 @@ const MDX_OPTIONS = {
     [rehypeAutolinkHeadings, { behavior: "wrap" }],
     [
       rehypePrettyCode,
-      { theme: { light: "github-light", dark: "github-dark" }, keepBackground: false },
+      // `keepBackground: false` means every token colour renders against
+      // OUR --card surface, not the theme's own background — "github-dark"'s
+      // comment colour (#6A737D) is tuned for GitHub's near-black editor
+      // background and only clears 3.72:1 against our lighter dark --card
+      // (#171716), under the 4.5:1 AA floor. "github-dark-high-contrast" is
+      // GitHub's own accessibility-oriented variant and clears every token
+      // scope actually used in this content (>= 8.46:1); its one sub-4.5
+      // scope, markup.ignored/untracked, is diff-only syntax no lesson uses.
+      { theme: { light: "github-light", dark: "github-dark-high-contrast" }, keepBackground: false },
     ],
   ],
 } satisfies Partial<EvaluateOptions>;

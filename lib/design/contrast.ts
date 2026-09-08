@@ -26,3 +26,36 @@ export function contrastRatio(a: string, b: string): number {
 export function meetsAAText(a: string, b: string): boolean {
   return contrastRatio(a, b) >= 4.5;
 }
+
+/**
+ * Alpha-composites an already-opaque `fg` colour over `bg`, the way CSS
+ * `opacity` composites a whole element (background AND text together) onto
+ * whatever sits behind it. This is not a general translucent-colour blend —
+ * it models one fully-opaque layer rendered through an `opacity` multiplier,
+ * which is exactly what turns a token pair that passes `contrastRatio` in
+ * isolation into one that fails once it is actually painted on a page.
+ */
+export function compositeOver(fg: string, bg: string, alpha: number): string {
+  if (!Number.isFinite(alpha) || alpha < 0 || alpha > 1) {
+    throw new Error(`alpha out of range [0,1]: ${alpha}`);
+  }
+  const fgMatch = HEX.exec(fg.trim());
+  const bgMatch = HEX.exec(bg.trim());
+  if (!fgMatch) throw new Error(`invalid hex colour: ${fg}`);
+  if (!bgMatch) throw new Error(`invalid hex colour: ${bg}`);
+
+  const fgInt = Number.parseInt(fgMatch[1], 16);
+  const bgInt = Number.parseInt(bgMatch[1], 16);
+  const blend = (shift: number) => {
+    const f = (fgInt >> shift) & 255;
+    const b = (bgInt >> shift) & 255;
+    return Math.round(alpha * f + (1 - alpha) * b);
+  };
+  return (
+    "#" +
+    [blend(16), blend(8), blend(0)]
+      .map((c) => c.toString(16).padStart(2, "0"))
+      .join("")
+      .toUpperCase()
+  );
+}

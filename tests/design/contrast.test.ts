@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { contrastRatio, relativeLuminance } from "@/lib/design/contrast";
+import { compositeOver, contrastRatio, relativeLuminance } from "@/lib/design/contrast";
 import { baseTokens } from "@/lib/design/tokens";
-import { moduleColors } from "@/lib/design/modules";
+import { moduleColors, PLANNED_CARD_OPACITY } from "@/lib/design/modules";
 
 const AA_TEXT = 4.5;
 const AA_UI = 3;
@@ -47,6 +47,34 @@ describe("module surfaces meet AA for their ink", () => {
     const surfaces = entries.map(([, p]) => p.surface.toUpperCase());
     expect(new Set(surfaces).size).toBe(14);
   });
+});
+
+describe("planned-card compositing meets AA on the actual page", () => {
+  // PathCards.tsx renders a "planned" card at PLANNED_CARD_OPACITY, which
+  // composites BOTH the surface and the ink onto the page background before
+  // the browser paints it — a pair that clears 4.5:1 in isolation (the
+  // `it.each` block above) is not guaranteed to clear it once composited.
+  // This is what actually caught the cobalt regression the axe suite found:
+  // unit tests only ever saw the raw token pair, and the axe scan only ever
+  // saw whichever colour keys happened to be in content/courses.ts that day.
+  const entries = Object.entries(moduleColors);
+
+  for (const theme of ["light", "dark"] as const) {
+    const paper = baseTokens[theme].paper;
+
+    it.each(entries)(
+      `%s composited at PLANNED_CARD_OPACITY on ${theme} paper is at least 4.5:1`,
+      (key, pair) => {
+        const bg = compositeOver(pair.surface, paper, PLANNED_CARD_OPACITY);
+        const fg = compositeOver(pair.ink, paper, PLANNED_CARD_OPACITY);
+        const ratio = contrastRatio(bg, fg);
+        expect(
+          ratio,
+          `${key} composites to ${ratio.toFixed(3)}:1 on ${theme} paper at opacity ${PLANNED_CARD_OPACITY} — below the 4.5:1 AA floor`,
+        ).toBeGreaterThanOrEqual(AA_TEXT);
+      },
+    );
+  }
 });
 
 describe("base tokens meet AA in both themes", () => {

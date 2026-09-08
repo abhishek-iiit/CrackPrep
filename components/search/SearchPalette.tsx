@@ -162,31 +162,42 @@ export function SearchPalette({ topicCount }: { topicCount: number }) {
               autoComplete="off"
               role="combobox"
               aria-expanded
-              aria-controls={hasOptions ? "search-results" : undefined}
-              // Focus never leaves the input while arrows move the selection, so without
-              // this a screen reader is never told which option is active.
+              // combobox's aria-controls is a REQUIRED property (axe:
+              // aria-required-attr, critical), not merely nice-to-have, so it
+              // is always "search-results" now — never omitted. The element
+              // it points at is unconditionally rendered below, so this can
+              // never dangle the way the old hasOptions-gated version could.
+              aria-controls="search-results"
+              // aria-activedescendant is different: it names one specific
+              // *option*, which only exists in the DOM when hasOptions is
+              // true, so it still must be omitted otherwise or it would dangle.
               aria-activedescendant={
                 hasOptions ? `search-option-${safeActive}` : undefined
               }
               className="min-h-13 w-full border-b-2 border-structural bg-transparent px-4 text-base"
             />
 
-            {docs === null ? (
-              <p className="p-4 font-mono text-xs text-ink-muted">Loading index…</p>
-            ) : results.length === 0 ? (
-              <p className="p-4 font-mono text-xs text-ink-muted">
-                {docs.length === 0
-                  ? "No lessons are published yet."
-                  : `No lesson matches “${query}”.`}
-              </p>
-            ) : (
-              <div
-                id="search-results"
-                role="listbox"
-                aria-label="Search results"
-                className="max-h-80 overflow-y-auto p-2"
-              >
-                {results.map((doc, i) => (
+            {/* Always rendered — see aria-controls above — so the listbox
+                role and its "Search results" label are only applied while
+                option children actually exist. A listbox with a stray
+                loading/no-match paragraph instead of option children would
+                trip aria-required-children. */}
+            <div
+              id="search-results"
+              role={hasOptions ? "listbox" : undefined}
+              aria-label={hasOptions ? "Search results" : undefined}
+              className={hasOptions ? "max-h-80 overflow-y-auto p-2" : undefined}
+            >
+              {docs === null ? (
+                <p className="p-4 font-mono text-xs text-ink-muted">Loading index…</p>
+              ) : results.length === 0 ? (
+                <p className="p-4 font-mono text-xs text-ink-muted">
+                  {docs.length === 0
+                    ? "No lessons are published yet."
+                    : `No lesson matches “${query}”.`}
+                </p>
+              ) : (
+                results.map((doc, i) => (
                   <div key={doc.url}>
                     <button
                       type="button"
@@ -206,9 +217,9 @@ export function SearchPalette({ topicCount }: { topicCount: number }) {
                       </span>
                     </button>
                   </div>
-                ))}
-              </div>
-            )}
+                ))
+              )}
+            </div>
           </div>
         </div>
       )}
