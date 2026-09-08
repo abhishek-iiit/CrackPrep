@@ -1,6 +1,7 @@
 import Link from "next/link";
 import { ThemeToggle } from "./ThemeToggle";
 import { SearchPalette } from "@/components/search/SearchPalette";
+import { courseSlug, getCourseStats } from "@/lib/content";
 
 const NAV = [
   { href: "/system-design", label: "Course" },
@@ -9,6 +10,8 @@ const NAV = [
 ];
 
 export function Header() {
+  const stats = getCourseStats(courseSlug);
+
   return (
     <header className="sticky top-0 z-40 border-b-2 border-structural bg-paper/90 backdrop-blur">
       <div className="mx-auto flex max-w-[1200px] items-center gap-4 px-4 py-3">
@@ -32,7 +35,7 @@ export function Header() {
         </nav>
 
         <div className="ml-auto flex items-center gap-2">
-          <SearchPalette />
+          <SearchPalette topicCount={stats.topicCount} />
           <ThemeToggle />
         </div>
       </div>
