@@ -97,12 +97,12 @@ Files that change together live together: each component owns its markup and sty
 ## Task 1: Project scaffold and verification harness
 
 **Files:**
-- Create: `package.json`, `next.config.ts`, `postcss.config.mjs`, `tsconfig.json`, `vitest.config.ts`, `.gitignore`, `app/layout.tsx`, `app/page.tsx`, `app/globals.css`, `tests/setup.ts`, `tests/harness.test.tsx`
+- Create: `package.json`, `next.config.ts`, `postcss.config.mjs`, `tsconfig.json`, `vitest.config.mts`, `.gitignore`, `app/layout.tsx`, `app/page.tsx`, `app/globals.css`, `lib/cn.ts`, `tests/setup.ts`, `tests/harness.test.tsx`
 - Modify: none
 
 **Interfaces:**
 - Consumes: nothing.
-- Produces: a buildable app, `npm test` (Vitest), `npm run build`, `npm run typecheck`. Path alias `@/*` → `./*`.
+- Produces: a buildable app with **warning-free** test output, `npm test` (Vitest), `npm run build`, `npm run typecheck`. Path alias `@/*` → `./*`, resolving in both Next and Vitest. Also `lib/cn.ts` exporting `cn(...parts: Array<string | false | null | undefined>): string`, created here so the alias can be proven by a real assertion rather than assumed; Task 6 consumes it unchanged.
 
 - [ ] **Step 1: Scaffold the app in place**
 
@@ -128,7 +128,7 @@ npm install next-mdx-remote@^6 remark-gfm@^4 rehype-slug@^6 \
   gray-matter@^4 zod@^4 next-themes@^0.4 lucide-react@^1 fuse.js@^7
 npm install -D vitest@^5 @vitejs/plugin-react@^6 jsdom@^30 \
   @testing-library/react@^16 @testing-library/jest-dom@^7 \
-  vite-tsconfig-paths@^6 @playwright/test@^1.63 @axe-core/playwright@^4 tsx@^4
+  @playwright/test@^1.63 @axe-core/playwright@^4 tsx@^4
 ```
 
 `vitest@5` requires `@types/node@^22`, while `create-next-app` pins `^20`. Bump
@@ -162,15 +162,19 @@ Replace the `"name"` and `"scripts"` blocks:
 }
 ```
 
-- [ ] **Step 4: Create `vitest.config.ts`**
+- [ ] **Step 4: Create `vitest.config.mts`**
+
+The `.mts` extension is required, not cosmetic: `package.json` has no `"type": "module"`, so a `.ts` config is loaded as CommonJS and Vite warns on every single test run. Do NOT fix that by adding `"type": "module"` — that changes module resolution for the whole project, Next's own config files included, which is a far larger blast radius than the warning justifies.
+
+Path aliases come from Vite's native `resolve.tsconfigPaths`, not the `vite-tsconfig-paths` plugin; current Vite warns that the plugin is redundant. Verified: `@/*` resolves in Vitest with the native option and no plugin.
 
 ```ts
 import { defineConfig } from "vitest/config";
 import react from "@vitejs/plugin-react";
-import tsconfigPaths from "vite-tsconfig-paths";
 
 export default defineConfig({
-  plugins: [tsconfigPaths(), react()],
+  plugins: [react()],
+  resolve: { tsconfigPaths: true },
   test: {
     environment: "jsdom",
     setupFiles: ["./tests/setup.ts"],
@@ -191,9 +195,20 @@ import "@testing-library/jest-dom/vitest";
 
 Create `tests/harness.test.tsx` — the `.tsx` extension is required because the file contains JSX. This proves the runner, the path alias, and TSX transformation all work before any real code depends on them.
 
+First create `lib/cn.ts` — the alias assertion needs something real to import, and Task 6 needs this helper anyway:
+
 ```ts
+export function cn(...parts: Array<string | false | null | undefined>): string {
+  return parts.filter(Boolean).join(" ");
+}
+```
+
+Then the harness test:
+
+```tsx
 import { describe, expect, it } from "vitest";
 import { render, screen } from "@testing-library/react";
+import { cn } from "@/lib/cn";
 
 describe("verification harness", () => {
   it("runs vitest", () => {
@@ -204,13 +219,19 @@ describe("verification harness", () => {
     render(<span>harness ok</span>);
     expect(screen.getByText("harness ok")).toBeInTheDocument();
   });
+
+  // Proves resolve.tsconfigPaths actually maps @/* — every later task's
+  // tests import through this alias, so an assumption here is not enough.
+  it("resolves the @/ path alias", () => {
+    expect(cn("a", false, "b")).toBe("a b");
+  });
 });
 ```
 
 - [ ] **Step 7: Run the test to verify it passes**
 
 Run: `npm test`
-Expected: 2 passing tests. If the JSX test fails with a transform error, `@vitejs/plugin-react` is not wired into `vitest.config.ts`.
+Expected: 3 passing tests **and no warnings whatsoever**. Warning-free output is a requirement of this task, not a nicety — this suite runs on every one of the remaining 17 tasks, and recurring noise is what teaches a reader to stop reading output. Never silence a warning with a suppression flag such as `VITE_CONFIG_NATIVE_IGNORE_WARNING`; fix the cause. If the JSX test fails with a transform error, `@vitejs/plugin-react` is not wired into `vitest.config.mts`. If the `@/lib/cn` import fails to resolve, `resolve.tsconfigPaths` is not taking effect — reinstate `vite-tsconfig-paths@^6` as a plugin and accept its warning.
 
 - [ ] **Step 8: Append project ignores to `.gitignore`**
 
