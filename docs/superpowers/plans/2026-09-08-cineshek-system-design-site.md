@@ -833,6 +833,7 @@ Each of `:root`, `.dark`, and `@theme inline` must appear as a rule whose select
 import type { Metadata } from "next";
 import { Geist, Geist_Mono, Geist_Pixel } from "next/font/google";
 import { ThemeProvider } from "next-themes";
+import { courseSlug, getCourseStats } from "@/lib/content";
 import "./globals.css";
 
 const geist = Geist({
@@ -858,14 +859,19 @@ const geistPixel = Geist_Pixel({
   fallback: ["ui-monospace", "monospace"],
 });
 
-export const metadata: Metadata = {
-  title: {
-    default: "Cineshek — System design, in depth",
-    template: "%s · Cineshek",
-  },
-  description:
-    "A sequenced system design curriculum: 14 modules, 179 topics, from requirements clarification to storage engines.",
-};
+// Derived, not literal. Every user-facing count must come from the content
+// layer: this project adds curriculum over time, and a hardcoded number in a
+// meta description goes stale silently — nobody re-audits SEO text.
+export async function generateMetadata(): Promise<Metadata> {
+  const stats = getCourseStats(courseSlug);
+  return {
+    title: {
+      default: "Cineshek — System design, in depth",
+      template: "%s · Cineshek",
+    },
+    description: `A sequenced system design curriculum: ${stats.moduleCount} modules, ${stats.topicCount} topics, from requirements clarification to storage engines.`,
+  };
+}
 
 export default function RootLayout({
   children,
@@ -2725,6 +2731,7 @@ are excluded from CLS by definition, so clicking the close button costs nothing.
 import Link from "next/link";
 import { ThemeToggle } from "./ThemeToggle";
 import { SearchPalette } from "@/components/search/SearchPalette";
+import { courseSlug, getCourseStats } from "@/lib/content";
 
 const NAV = [
   { href: "/system-design", label: "Course" },
@@ -2733,6 +2740,10 @@ const NAV = [
 ];
 
 export function Header() {
+  // Passed to SearchPalette so its placeholder count derives from the content
+  // layer instead of being a literal that goes stale.
+  const stats = getCourseStats(courseSlug);
+
   return (
     <header className="sticky top-0 z-40 border-b-2 border-structural bg-paper/90 backdrop-blur">
       <div className="mx-auto flex max-w-[1200px] items-center gap-4 px-4 py-3">
@@ -2756,7 +2767,7 @@ export function Header() {
         </nav>
 
         <div className="ml-auto flex items-center gap-2">
-          <SearchPalette />
+          <SearchPalette topicCount={stats.topicCount} />
           <ThemeToggle />
         </div>
       </div>
@@ -2771,7 +2782,7 @@ export function Header() {
 "use client";
 
 /** Placeholder — replaced with the real ⌘K palette in Task 14. */
-export function SearchPalette() {
+export function SearchPalette(_props: { topicCount: number }) {
   return null;
 }
 ```
@@ -4631,7 +4642,7 @@ degrades to 'no progress recorded' instead of throwing."
 - Test: `tests/components/module-card.test.tsx`
 
 **Interfaces:**
-- Consumes: `getModules`, `getModule`, `getCourse`, `getCourseStats`, `courseSlug` from Task 5; `Card`, `Pill` from Task 6; `useProgress` from Task 10.
+- Consumes: `getModules`, `getModule`, `getCourse`, `getCourseStats`, `courseSlug` from Task 5; `Badge` from Task 6; `CourseProgress` from Task 10 (already built there — import, do not recreate). `ModuleCard` hand-rolls its own `Link` styling rather than wrapping `Card`, because it needs the whole card to be the anchor.
 - Produces: `<ModuleCard module />`, `<CourseProgress total />`, routes `/system-design` and `/system-design/[module]`.
 
 - [ ] **Step 1: Write the failing test**
@@ -4744,11 +4755,14 @@ import { ModuleCard } from "@/components/course/ModuleCard";
 import { CourseProgress } from "@/components/lesson/ProgressTracker";
 import { courseSlug, getCourse, getCourseStats, getModules } from "@/lib/content";
 
-export const metadata: Metadata = {
-  title: "System design in depth",
-  description:
-    "Fourteen modules and 179 topics, sequenced from requirements clarification through storage engines and reliability.",
-};
+// Derived, not literal — see the root layout for the reasoning.
+export async function generateMetadata(): Promise<Metadata> {
+  const stats = getCourseStats(courseSlug);
+  return {
+    title: "System design in depth",
+    description: `${stats.moduleCount} modules and ${stats.topicCount} topics, sequenced from requirements clarification through storage engines and reliability.`,
+  };
+}
 
 export default function CoursePage() {
   const course = getCourse(courseSlug);
@@ -4940,11 +4954,14 @@ import { Badge } from "@/components/ui/Badge";
 import { moduleColors } from "@/lib/design/modules";
 import { courseSlug, getCourseStats, getModules } from "@/lib/content";
 
-export const metadata: Metadata = {
-  title: "Syllabus",
-  description:
-    "Every topic in the system design curriculum: 14 modules, 179 topics, in order.",
-};
+// Derived, not literal — see the root layout for the reasoning.
+export async function generateMetadata(): Promise<Metadata> {
+  const stats = getCourseStats(courseSlug);
+  return {
+    title: "Syllabus",
+    description: `Every topic in the system design curriculum: ${stats.moduleCount} modules, ${stats.topicCount} topics, in order.`,
+  };
+}
 
 export default function SyllabusPage() {
   const modules = getModules(courseSlug);
@@ -5549,7 +5566,7 @@ export default function HomePage() {
     <>
       <AnnouncementBar
         id="launch-2026-09"
-        message="System design is live — 14 modules, 179 topics"
+        message={`System design is live — ${stats.moduleCount} modules, ${stats.topicCount} topics`}
         href="/system-design"
         cta="Start reading"
       />
@@ -5710,7 +5727,9 @@ import Fuse from "fuse.js";
 import { Search } from "lucide-react";
 import type { SearchDoc } from "@/lib/content";
 
-export function SearchPalette() {
+// topicCount is passed in by Header (a Server Component) rather than hardcoded,
+// so the placeholder cannot drift from the real curriculum size.
+export function SearchPalette({ topicCount }: { topicCount: number }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -5829,7 +5848,7 @@ export function SearchPalette() {
                 setQuery(event.target.value);
                 setActive(0);
               }}
-              placeholder="Search 179 topics…"
+              placeholder={`Search ${topicCount} topics…`}
               autoComplete="off"
               className="min-h-13 w-full border-b-2 border-structural bg-transparent px-4 text-base outline-none"
             />
@@ -6313,6 +6332,15 @@ for (const page_ of PAGES) {
 
 test("an unknown lesson returns the themed 404", async ({ page }) => {
   const response = await page.goto("/system-design/foundations/no-such-lesson");
+  expect(response?.status()).toBe(404);
+  await expect(page.getByText("That page is not here")).toBeVisible();
+});
+
+test("an unknown module returns the themed 404", async ({ page }) => {
+  // Both routes set dynamicParams = false, so an unlisted slug must 404 rather
+  // than render on demand. The lesson route was covered; the module route was
+  // not, and only a runtime request proves it.
+  const response = await page.goto("/system-design/no-such-module");
   expect(response?.status()).toBe(404);
   await expect(page.getByText("That page is not here")).toBeVisible();
 });
