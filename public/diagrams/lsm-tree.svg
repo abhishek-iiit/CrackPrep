@@ -10,6 +10,10 @@
     Level rows use a CONSTANT tile width: in a leveled LSM the per-level target
     file size stays roughly the same and it is the file COUNT that grows by the
     fan-out. Drawing deeper files smaller would contradict the annotation.
+
+    L1 and L2 are drawn truncated - tiles, an ellipsis, then more tiles - because
+    a literal 1:10:100 row would not fit the viewBox. Do not "correct" the drawn
+    counts to match the ~10x annotation; the ellipsis is what carries it.
   -->
   <style>
     svg { color: #141414; }
@@ -83,15 +87,16 @@
   <text class="sans sm" x="392" y="322">4 compact: merge sorted runs,</text>
   <text class="sans sm" x="392" y="342">drop overwrites and tombstones</text>
 
-  <!-- level 1: same file size, many more of them -->
+  <!-- level 1: same file size, many more of them (row runs on past the ellipsis) -->
   <text class="mono lg" x="326" y="382" text-anchor="end">L1</text>
   <text class="sans sm" x="326" y="402" text-anchor="end">non-overlapping runs</text>
   <rect class="tile" x="352" y="360" width="48" height="52" rx="3" />
   <rect class="tile" x="406" y="360" width="48" height="52" rx="3" />
   <rect class="tile" x="460" y="360" width="48" height="52" rx="3" />
   <rect class="tile" x="514" y="360" width="48" height="52" rx="3" />
-  <rect class="tile" x="568" y="360" width="48" height="52" rx="3" />
-  <rect class="tile" x="622" y="360" width="48" height="52" rx="3" />
+  <text class="mono lg" x="586" y="393" text-anchor="middle">...</text>
+  <rect class="tile" x="610" y="360" width="48" height="52" rx="3" />
+  <rect class="tile" x="664" y="360" width="48" height="52" rx="3" />
 
   <!-- compaction L1 -> L2 -->
   <path class="flow" d="M 376 412 V 464" marker-end="url(#arrow)" />

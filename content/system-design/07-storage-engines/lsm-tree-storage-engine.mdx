@@ -169,7 +169,7 @@ Every knob is one of the three amplifications traded for another:
 
 ## In an interview
 
-Reach for it by naming the write rate, not the acronym: "This is 50k writes a second of immutable events with occasional point lookups by id, so I want an engine whose write path is a sequential append — an LSM tree." Then price it in the same breath, because the tradeoff is the answer: "The costs are compaction bandwidth, which I have to provision, and read amplification on scans. Point reads for missing keys stay cheap because each file has a Bloom filter, and I would budget memory for those filters and the index blocks."
+Reach for it by naming the write rate, not the acronym: "This is 50k writes a second of immutable events with occasional point lookups by id, so I want an engine whose write path is a sequential append — an LSM tree." Then price it in the same breath, because the tradeoff is the answer: "The costs are compaction bandwidth, which I have to provision, and read amplification on scans. Point reads for missing keys stay cheap because I would keep Bloom filters on every level including the deepest, and I would budget memory for those filters and the index blocks."
 
 Name the failure mode before you are asked. Compaction debt turning into a write stall is the thing that actually pages someone at 3am, and knowing that it shows up as a latency spike rather than an error is what separates having read about LSM trees from having run one.
 
