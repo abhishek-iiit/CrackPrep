@@ -6281,13 +6281,19 @@ The diagram is an SVG file at `public/diagrams/lsm-tree.svg`, referenced through
 `<Figure>` with real `alt` text describing the flow and explicit
 `width`/`height` so space is reserved — `<Figure>` throws if `alt` is missing.
 
-**It cannot use `currentColor`.** `<Figure>` renders through `next/image`, which
+**It cannot *inherit* `currentColor` from the page.** `<Figure>` renders through `next/image`, which
 emits an `<img>`, and an externally-referenced SVG has no access to the host
 page's inherited colour. The project's theming is class-driven (`.dark` on
 `<html>`), which an `<img>`-loaded SVG also cannot see. So the file must theme
 *itself*: define its palette internally and flip it under
 `@media (prefers-color-scheme: dark)`, including its own background rect so it
 never renders dark-on-dark or light-on-light.
+
+`currentColor` inside the file is fine and idiomatic — set `color` on the root
+`<svg>` and reference `currentColor` from its children, so one media-query rule
+retints everything. What cannot work is relying on the *page* to supply that
+colour. Do not read a `currentColor` occurrence in the file as a violation of
+this rule.
 
 Known limitation, accepted: a reader who overrides the site theme against their
 OS preference gets a diagram keyed to the OS rather than the page. It stays
