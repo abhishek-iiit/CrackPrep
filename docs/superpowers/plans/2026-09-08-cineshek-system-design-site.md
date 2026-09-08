@@ -5803,10 +5803,20 @@ export function SearchPalette({ topicCount }: { topicCount: number }) {
     wasOpen.current = open;
   }, [open]);
 
+  // `active` is raw state and can drift out of range — ArrowDown's clamp
+  // evaluates Math.min(i + 1, -1) = -1 when there are no results yet, and
+  // nothing resets it when the index later loads. Everything downstream uses
+  // safeActive instead, so a dangling aria-activedescendant is impossible by
+  // construction rather than by remembering to guard each use.
   const results =
     query.trim().length > 0 && fuseRef.current
       ? fuseRef.current.search(query.trim(), { limit: 8 }).map((r) => r.item)
       : (docs ?? []).slice(0, 8);
+
+  const hasOptions = results.length > 0;
+  const safeActive = hasOptions
+    ? Math.min(Math.max(active, 0), results.length - 1)
+    : -1;
 
   const go = useCallback(
     (url: string) => {
@@ -5822,13 +5832,13 @@ export function SearchPalette({ topicCount }: { topicCount: number }) {
       setOpen(false);
     } else if (event.key === "ArrowDown") {
       event.preventDefault();
-      setActive((i) => Math.min(i + 1, results.length - 1));
+      setActive((i) => Math.min(i + 1, Math.max(0, results.length - 1)));
     } else if (event.key === "ArrowUp") {
       event.preventDefault();
       setActive((i) => Math.max(i - 1, 0));
-    } else if (event.key === "Enter" && results[active]) {
+    } else if (event.key === "Enter" && results[safeActive]) {
       event.preventDefault();
-      go(results[active].url);
+      go(results[safeActive].url);
     } else if (event.key === "Tab") {
       // aria-modal="true" promises focus stays inside. Only the input and the
       // option buttons are focusable and arrows already drive selection, so
@@ -5878,11 +5888,11 @@ export function SearchPalette({ topicCount }: { topicCount: number }) {
               autoComplete="off"
               role="combobox"
               aria-expanded
-              aria-controls="search-results"
+              aria-controls={hasOptions ? "search-results" : undefined}
               // Focus never leaves the input while arrows move the selection, so without
               // this a screen reader is never told which option is active.
               aria-activedescendant={
-                results.length > 0 ? `search-option-${active}` : undefined
+                hasOptions ? `search-option-${safeActive}` : undefined
               }
               className="min-h-13 w-full border-b-2 border-structural bg-transparent px-4 text-base"
             />
@@ -5903,11 +5913,11 @@ export function SearchPalette({ topicCount }: { topicCount: number }) {
                       type="button"
                       role="option"
                       id={`search-option-${i}`}
-                      aria-selected={i === active}
+                      aria-selected={i === safeActive}
                       onMouseEnter={() => setActive(i)}
                       onClick={() => go(doc.url)}
                       className={`flex w-full min-h-11 items-center gap-3 rounded-card px-3 text-left text-sm transition-brut ${
-                        i === active ? "bg-card shadow-hard-sm" : ""
+                        i === safeActive ? "bg-card shadow-hard-sm" : ""
                       }`}
                     >
                       <span className="font-mono text-xs text-ink-muted">{doc.number}</span>
@@ -6405,6 +6415,35 @@ const PAGES = [
   "/system-design/storage-engines",
   "/system-design/storage-engines/lsm-tree-storage-engine",
 ];
+
+test("the open search dialog has no critical or serious axe violations", async ({ page }) => {
+  // The page-level scans below never open the palette, so they cannot see the
+  // combobox at all. Both of its ARIA IDREFs (aria-controls,
+  // aria-activedescendant) are only present while it is open, and a dangling
+  // IDREF is exactly what axe's aria-valid-attr-value catches — so the dialog
+  // needs its own scan. Scanned in the zero-results state too, because with no
+  // lessons published yet that is the state every open lands in.
+  await page.goto("/system-design");
+  await page.keyboard.press("ControlOrMeta+k");
+  await expect(page.getByRole("dialog", { name: /search lessons/i })).toBeVisible();
+
+  const empty = await new AxeBuilder({ page })
+    .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
+    .analyze();
+  const emptyBlocking = empty.violations.filter(
+    (v) => v.impact === "critical" || v.impact === "serious",
+  );
+  expect(emptyBlocking, emptyBlocking.map((v) => `${v.id}: ${v.help}`).join("\n")).toEqual([]);
+
+  await page.keyboard.type("bloom");
+  const matched = await new AxeBuilder({ page })
+    .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"])
+    .analyze();
+  const matchedBlocking = matched.violations.filter(
+    (v) => v.impact === "critical" || v.impact === "serious",
+  );
+  expect(matchedBlocking, matchedBlocking.map((v) => `${v.id}: ${v.help}`).join("\n")).toEqual([]);
+});
 
 for (const path of PAGES) {
   test(`${path} has no critical or serious axe violations (light)`, async ({ page }) => {
