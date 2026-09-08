@@ -6558,8 +6558,21 @@ test("escape closes the palette and returns focus to the trigger", async ({ page
 });
 
 test("theme choice survives a reload without a flash of the wrong theme", async ({ page }) => {
+  // Pin the media preference. ThemeToggle's accessible name is derived from the
+  // RESOLVED theme — "Switch to dark theme" when light is active, "Switch to
+  // light theme" when dark is. With defaultTheme="system", a host that prefers
+  // dark would flip the label and this locator would never match, failing on
+  // timeout rather than for a real reason. Pinning it makes the test
+  // deterministic instead of dependent on a Playwright default or the CI OS.
+  await page.emulateMedia({ colorScheme: "light" });
   await page.goto("/");
-  await page.getByRole("button", { name: /switch to dark theme/i }).click();
+
+  // The label is "Switch theme" in the server HTML, because useMounted() is
+  // false during SSR, and only becomes the directional label after hydration.
+  // Playwright's locators auto-wait, so asserting on it also waits for hydrate.
+  const toggle = page.getByRole("button", { name: /switch to dark theme/i });
+  await expect(toggle).toBeVisible();
+  await toggle.click();
   await expect(page.locator("html")).toHaveClass(/dark/);
 
   await page.reload();
