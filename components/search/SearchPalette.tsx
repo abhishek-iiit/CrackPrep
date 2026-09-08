@@ -82,6 +82,16 @@ export function SearchPalette({ topicCount }: { topicCount: number }) {
     [trimmedQuery, fuse, docs],
   );
 
+  // `active` is raw state and can drift out of range — ArrowDown's clamp
+  // evaluates Math.min(i + 1, -1) = -1 when there are no results yet, and
+  // nothing resets it when the index later loads. Everything downstream uses
+  // safeActive instead, so a dangling aria-activedescendant is impossible by
+  // construction rather than by remembering to guard each use.
+  const hasOptions = results.length > 0;
+  const safeActive = hasOptions
+    ? Math.min(Math.max(active, 0), results.length - 1)
+    : -1;
+
   const go = useCallback(
     (url: string) => {
       setOpen(false);
@@ -96,13 +106,13 @@ export function SearchPalette({ topicCount }: { topicCount: number }) {
       setOpen(false);
     } else if (event.key === "ArrowDown") {
       event.preventDefault();
-      setActive((i) => Math.min(i + 1, results.length - 1));
+      setActive((i) => Math.min(i + 1, Math.max(0, results.length - 1)));
     } else if (event.key === "ArrowUp") {
       event.preventDefault();
       setActive((i) => Math.max(i - 1, 0));
-    } else if (event.key === "Enter" && results[active]) {
+    } else if (event.key === "Enter" && results[safeActive]) {
       event.preventDefault();
-      go(results[active].url);
+      go(results[safeActive].url);
     } else if (event.key === "Tab") {
       // aria-modal="true" promises focus stays inside. Only the input and the
       // option buttons are focusable and arrows already drive selection, so
@@ -152,11 +162,11 @@ export function SearchPalette({ topicCount }: { topicCount: number }) {
               autoComplete="off"
               role="combobox"
               aria-expanded
-              aria-controls="search-results"
+              aria-controls={hasOptions ? "search-results" : undefined}
               // Focus never leaves the input while arrows move the selection, so without
               // this a screen reader is never told which option is active.
               aria-activedescendant={
-                results.length > 0 ? `search-option-${active}` : undefined
+                hasOptions ? `search-option-${safeActive}` : undefined
               }
               className="min-h-13 w-full border-b-2 border-structural bg-transparent px-4 text-base"
             />
@@ -182,11 +192,11 @@ export function SearchPalette({ topicCount }: { topicCount: number }) {
                       type="button"
                       role="option"
                       id={`search-option-${i}`}
-                      aria-selected={i === active}
+                      aria-selected={i === safeActive}
                       onMouseEnter={() => setActive(i)}
                       onClick={() => go(doc.url)}
                       className={`flex w-full min-h-11 items-center gap-3 rounded-card px-3 text-left text-sm transition-brut ${
-                        i === active ? "bg-card shadow-hard-sm" : ""
+                        i === safeActive ? "bg-card shadow-hard-sm" : ""
                       }`}
                     >
                       <span className="font-mono text-xs text-ink-muted">{doc.number}</span>
