@@ -63,6 +63,8 @@ Every task's requirements implicitly include this section. Values are copied ver
 
 **Commits.** Conventional Commits. Commit at the end of every task.
 
+**Lint.** `npm run lint` must exit 0 and is part of the `verify` gate. Never silence a rule with a disable comment or by relaxing config — fix the cause. In particular `react-hooks/set-state-in-effect` is an error here: read browser-only state through `useMounted()` / `useSyncExternalStore`, not `useState` + `useEffect`.
+
 ---
 
 ## File structure
@@ -159,7 +161,7 @@ Replace the `"name"` and `"scripts"` blocks:
     "test:e2e": "playwright test",
     "content:generate": "tsx scripts/generate-content.ts",
     "content:index": "tsx scripts/build-search-index.ts",
-    "verify": "npm run typecheck && npm run test && npm run build"
+    "verify": "npm run lint && npm run typecheck && npm run test && npm run build"
   }
 }
 ```
@@ -538,7 +540,7 @@ they are decorative-only."
 ## Task 3: Theme layer — CSS tokens, fonts, dark mode
 
 **Files:**
-- Create: `components/layout/ThemeToggle.tsx`, `tests/design/css-tokens.test.ts`
+- Create: `lib/hooks/useMounted.ts`, `components/layout/ThemeToggle.tsx`, `tests/design/css-tokens.test.ts`
 - Modify: `app/globals.css` (replace entirely), `app/layout.tsx` (replace entirely), `lib/design/tokens.ts` (promote `destructive` into `TokenSet` — Step 0), `tests/design/contrast.test.ts` (cover it — Step 0b)
 
 **Interfaces:**
@@ -852,18 +854,44 @@ export default function RootLayout({
 
 Client leaf 1 of 6.
 
+First create the shared hook at `lib/hooks/useMounted.ts`. Both this component
+and Task 6's `AnnouncementBar` need "has hydration happened yet", and the
+`useState` + `useEffect` version of it trips the `react-hooks/set-state-in-effect`
+lint rule and causes a cascading render. This is the mechanism the rule's own
+message recommends, and the same one Task 10 uses for progress:
+
+```ts
+import { useSyncExternalStore } from "react";
+
+// Module-level constants so the store identity never changes between renders.
+const subscribe = () => () => {};
+const getSnapshot = () => true;
+const getServerSnapshot = () => false;
+
+/**
+ * False during server render and the first client render, true afterwards.
+ *
+ * Use this to gate reads of browser-only state (localStorage, matchMedia) so
+ * the server HTML and the first client render agree. No effect is involved, so
+ * there is no cascading render and no setState-in-effect lint error.
+ */
+export function useMounted(): boolean {
+  return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+}
+```
+
+Then the toggle:
+
 ```tsx
 "use client";
 
-import { useEffect, useState } from "react";
 import { useTheme } from "next-themes";
 import { Moon, Sun } from "lucide-react";
+import { useMounted } from "@/lib/hooks/useMounted";
 
 export function ThemeToggle() {
   const { resolvedTheme, setTheme } = useTheme();
-  const [mounted, setMounted] = useState(false);
-
-  useEffect(() => setMounted(true), []);
+  const mounted = useMounted();
 
   const isDark = mounted && resolvedTheme === "dark";
   const label = mounted
@@ -886,7 +914,7 @@ export function ThemeToggle() {
 }
 ```
 
-`size-11` is 44px, meeting the touch-target minimum.
+`size-11` is 44px, meeting the touch-target minimum. There is no `useEffect` here by design — see `useMounted` above.
 
 - [ ] **Step 6: Run the test to verify it passes**
 
@@ -1667,6 +1695,13 @@ describe("lessons", () => {
     expect(getLesson(COURSE, "foundations", "nope")).toBeNull();
   });
 
+  it("getLessons returns exactly the module's lesson list", () => {
+    expect(getLessons(COURSE, "foundations")).toEqual(
+      getModule(COURSE, "foundations")!.lessons,
+    );
+    expect(getLessons(COURSE, "nope")).toEqual([]);
+  });
+
   it("validates frontmatter on every one of the 179 files", () => {
     // getLesson throws on a schema violation, so touching all of them is the assertion.
     for (const mod of getModules(COURSE)) {
@@ -2320,7 +2355,7 @@ appears only in the six named leaf components."
 - Test: `tests/components/ui.test.tsx`
 
 **Interfaces:**
-- Consumes: `ThemeToggle` from Task 3; `getCourseStats`, `Status` from Task 5; `cn` from `lib/cn.ts`, which **Task 1 already created** while proving the path alias.
+- Consumes: `ThemeToggle` and `useMounted` (`lib/hooks/useMounted.ts`) from Task 3; `getCourseStats`, `Status` from Task 5; `cn` from `lib/cn.ts`, which **Task 1 already created** while proving the path alias.
 - Produces: `cn(...)`; `<Button variant href? size?>`, `<Card as? colorKey? interactive?>`, `<Pill tone?>`, `<Badge status>`, `<Header />`, `<Footer />`, `<AnnouncementBar id message href? cta? />`.
 
 - [ ] **Step 1: Write the failing test**
@@ -2562,38 +2597,46 @@ Client leaf 2 of 6.
 ```tsx
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import Link from "next/link";
 import { X } from "lucide-react";
+import { useMounted } from "@/lib/hooks/useMounted";
 
 type Props = { id: string; message: string; href?: string; cta?: string };
 
-export function AnnouncementBar({ id, message, href, cta }: Props) {
-  // Rendered only after mount so the dismissed state never flashes visible.
-  const [visible, setVisible] = useState(false);
+function readDismissed(id: string): boolean {
+  try {
+    return window.localStorage.getItem(`announce:${id}`) === "dismissed";
+  } catch {
+    // Private browsing or blocked site data: treat as not dismissed.
+    return false;
+  }
+}
 
-  useEffect(() => {
-    try {
-      setVisible(window.localStorage.getItem(`announce:${id}`) !== "dismissed");
-    } catch {
-      setVisible(true);
-    }
-  }, [id]);
+export function AnnouncementBar({ id, message, href, cta }: Props) {
+  const mounted = useMounted();
+  const [dismissedNow, setDismissedNow] = useState(false);
+
+  // Storage is read only after hydration, so the server HTML and the first
+  // client render agree. No effect, so no cascading render and no
+  // setState-in-effect lint error — setState happens in the click handler only.
+  const dismissed = dismissedNow || (mounted && readDismissed(id));
 
   function dismiss() {
-    setVisible(false);
+    setDismissedNow(true);
     try {
       window.localStorage.setItem(`announce:${id}`, "dismissed");
     } catch {
-      // Private browsing or blocked storage — dismissal simply will not persist.
+      // Storage unavailable — dismissal simply will not persist.
     }
   }
 
-  // The wrapper always occupies its slot in the layout, so mounting cannot
-  // shift the page. Only the contents toggle.
   return (
-    <div className="border-b-2 border-structural bg-card">
-      <div hidden={!visible} className="mx-auto flex max-w-[1200px] items-center gap-3 px-4 py-2">
+    <div
+      hidden={dismissed}
+      className="border-b-2 border-structural bg-card"
+    >
+      <div className="mx-auto flex max-w-[1200px] items-center gap-3 px-4 py-2">
         <p className="flex-1 text-center font-mono text-xs uppercase tracking-wider text-ink-muted">
           {message}
           {href && cta && (
@@ -2616,7 +2659,18 @@ export function AnnouncementBar({ id, message, href, cta }: Props) {
 }
 ```
 
-Toggling with the `hidden` attribute rather than conditional rendering keeps the bar's slot stable, which is what protects the CLS budget.
+`hidden` sits on the outer element, and the bar renders **visible** on the
+server. Two consequences, both deliberate:
+
+- The bar is in the server HTML, so it works with JavaScript disabled, and the
+  common case — a visitor who has not dismissed it — sees no shift at all.
+- A returning visitor who previously dismissed it sees the bar collapse once
+  after hydration. That is the minority case, and it is the better trade: the
+  alternative (hidden until mount) makes the bar appear for *everyone*, which is
+  a shift for the majority rather than the minority.
+
+Dismissal itself is user-initiated, and layout shifts within 500ms of user input
+are excluded from CLS by definition, so clicking the close button costs nothing.
 
 - [ ] **Step 9: Create `components/layout/Header.tsx`**
 
@@ -6171,7 +6225,7 @@ Must document: what the project is; `npm install` then `npm run dev`; the full s
 - [ ] **Step 3: Add the aggregate verification script**
 
 ```json
-"verify:all": "npm run typecheck && npm run test && npm run build && npm run test:e2e",
+"verify:all": "npm run lint && npm run typecheck && npm run test && npm run build && npm run test:e2e",
 ```
 
 - [ ] **Step 4: Run the full verification**
