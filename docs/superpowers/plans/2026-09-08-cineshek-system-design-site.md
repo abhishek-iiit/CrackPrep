@@ -2595,6 +2595,7 @@ import { Callout } from "@/components/mdx/Callout";
 import { Figure } from "@/components/mdx/Figure";
 import { KeyTakeaways } from "@/components/mdx/KeyTakeaways";
 import { Tradeoff } from "@/components/mdx/Tradeoff";
+import { InlineCode } from "@/components/mdx/CodeBlock";
 import { mdxComponents } from "@/components/mdx";
 
 describe("Callout", () => {
@@ -2661,6 +2662,24 @@ describe("Figure", () => {
     render(<Figure src="/d.svg" alt="LSM write path" caption="Writes land in the memtable" width={640} height={360} />);
     expect(screen.getByRole("img", { name: "LSM write path" })).toBeInTheDocument();
     expect(screen.getByText("Writes land in the memtable")).toBeInTheDocument();
+  });
+});
+
+describe("InlineCode vs block code", () => {
+  it("styles inline code as a pill", () => {
+    const { container } = render(<InlineCode>npm test</InlineCode>);
+    expect(container.querySelector("code")?.className).toMatch(/border-hairline/);
+  });
+
+  it("leaves block code untouched so the pill does not wrap a whole block", () => {
+    // rehype-pretty-code sets data-language on the <code> inside <pre>;
+    // MDX routes that element through this same component.
+    const { container } = render(
+      <InlineCode data-language="ts">{"const x = 1;"}</InlineCode>,
+    );
+    const code = container.querySelector("code")!;
+    expect(code.className).toBe("");
+    expect(code).toHaveAttribute("data-language", "ts");
   });
 });
 
@@ -2874,7 +2893,16 @@ export function Formula({ children, label }: { children: React.ReactNode; label?
 
 - [ ] **Step 9: Create `components/mdx/CodeBlock.tsx`**
 
-`rehype-pretty-code` produces the highlighted markup, so this only supplies the scroll container and the language label.
+`rehype-pretty-code` produces the highlighted markup, so this only supplies the scroll container and the language label. Its output was captured from the installed version and has this exact shape:
+
+```html
+<figure data-rehype-pretty-code-figure="">
+  <pre tabindex="0" data-language="ts" data-theme="github-light github-dark">
+    <code data-language="ts" style="display: grid;">
+      <span data-line=""><span style="--shiki-light:#D73A49;--shiki-dark:#F97583">const</span>…</span>
+```
+
+Three things follow from it: `data-language` is available on the `pre` props; the `tabindex="0"` it adds must be preserved by spreading `...props`, since it is what makes an overflowing block keyboard-scrollable; and the nested `<code>` carries `data-language`, which is how `InlineCode` below tells block code from inline code.
 
 ```tsx
 import { cn } from "@/lib/cn";
@@ -2899,7 +2927,24 @@ export function Pre({ children, className, ...props }: PreProps) {
   );
 }
 
-export function InlineCode({ children, ...props }: React.ComponentPropsWithoutRef<"code">) {
+type CodeProps = React.ComponentPropsWithoutRef<"code"> & {
+  "data-language"?: string;
+};
+
+/**
+ * MDX maps EVERY `code` element to this component — both inline `code` spans
+ * and the `<code>` that rehype-pretty-code nests inside `<pre>`. Block code
+ * must pass through untouched, or the inline pill styling (border, background,
+ * padding) wraps the whole highlighted block.
+ *
+ * rehype-pretty-code sets `data-language` on the block `<code>`; inline code
+ * has no such attribute, which is what distinguishes the two.
+ */
+export function InlineCode({ children, ...props }: CodeProps) {
+  if (props["data-language"] !== undefined) {
+    return <code {...props}>{children}</code>;
+  }
+
   return (
     <code
       {...props}
