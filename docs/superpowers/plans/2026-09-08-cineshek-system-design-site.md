@@ -6462,6 +6462,30 @@ test("search palette is fully keyboard operable", async ({ page }) => {
   await expect(page.locator("h1")).toContainText(/Bloom Filters/i);
 });
 
+test("the search palette does not steal focus on page load", async ({ page }) => {
+  // Regression guard. The palette's focus-restore effect originally had no
+  // open->closed guard, and React runs every effect once on mount regardless
+  // of its dependency array — so it focused the trigger on every one of the
+  // 193 pages. Only a real app-router context reproduces this, which is why it
+  // lives here rather than in a unit test: SearchPalette calls useRouter(),
+  // so a bare jsdom render cannot mount it.
+  await page.goto("/system-design");
+  const trigger = page.getByRole("button", { name: /search lessons/i });
+  await expect(trigger).not.toBeFocused();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+});
+
+test("the search input keeps a visible focus ring", async ({ page }) => {
+  // Tailwind v4's `outline-none` emits outline-style: none and outranks the
+  // base :focus-visible rule, which silently removed the ring here once.
+  await page.goto("/system-design");
+  await page.keyboard.press("ControlOrMeta+k");
+  const input = page.getByPlaceholder(/search 179 topics/i);
+  await expect(input).toBeFocused();
+  const outlineStyle = await input.evaluate((el) => getComputedStyle(el).outlineStyle);
+  expect(outlineStyle).not.toBe("none");
+});
+
 test("escape closes the palette and returns focus to the trigger", async ({ page }) => {
   await page.goto("/system-design");
   const trigger = page.getByRole("button", { name: /search lessons/i });
