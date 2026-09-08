@@ -3248,7 +3248,7 @@ the page never scrolls sideways."
 ## Task 8: Lesson route and MDX pipeline
 
 **Files:**
-- Create: `lib/content/headings.ts`, `components/lesson/LessonHeader.tsx`, `components/lesson/LessonNav.tsx`, `app/system-design/[module]/[topic]/page.tsx`, `app/system-design/layout.tsx`, `tests/content/headings.test.ts`
+- Create: `lib/content/headings.ts`, `components/lesson/LessonHeader.tsx`, `components/lesson/LessonNav.tsx`, `components/lesson/SidebarTree.tsx` (placeholder), `components/lesson/TableOfContents.tsx` (placeholder), `components/lesson/ProgressTracker.tsx` (placeholder), `app/system-design/[module]/[topic]/page.tsx`, `app/system-design/layout.tsx`, `tests/content/headings.test.ts`
 - Modify: `app/globals.css` (append the Shiki dual-theme block)
 - Test: `tests/content/headings.test.ts`
 
@@ -3504,6 +3504,80 @@ export function LessonNav({ prev, next }: { prev: LessonRef | null; next: Lesson
 }
 ```
 
+- [ ] **Step 7b: Create typed placeholders for the three components Tasks 9 and 10 own**
+
+The lesson page imports `SidebarTree` and `TableOfContents` (Task 9) and
+`ProgressTracker` (Task 10). Without these, Task 8 cannot build on its own.
+Create them now as placeholders carrying the EXACT final signatures, so Tasks 9
+and 10 replace the bodies without touching any call site — the same approach
+Task 6 used for `SearchPalette`.
+
+`components/lesson/SidebarTree.tsx`:
+
+```tsx
+"use client";
+
+import type { ColorKey } from "@/lib/design/modules";
+
+export type SidebarLesson = {
+  slug: string;
+  number: string;
+  title: string;
+  url: string;
+  status: "published" | "draft";
+};
+
+export type SidebarModule = {
+  id: string;
+  slug: string;
+  title: string;
+  colorKey: ColorKey;
+  lessons: SidebarLesson[];
+};
+
+/** Placeholder — Task 9 implements the real collapsible tree. */
+export function SidebarTree(_props: {
+  modules: SidebarModule[];
+  currentModule: string;
+  currentLesson: string;
+}) {
+  return null;
+}
+```
+
+`components/lesson/TableOfContents.tsx`:
+
+```tsx
+"use client";
+
+import type { Heading } from "@/lib/content/headings";
+
+/** Placeholder — Task 9 implements the real scroll-spy list. */
+export function TableOfContents(_props: { headings: Heading[]; className?: string }) {
+  return null;
+}
+```
+
+`components/lesson/ProgressTracker.tsx`:
+
+```tsx
+"use client";
+
+/** Placeholder — Task 10 implements the real localStorage-backed tracker. */
+export function ProgressTracker(_props: { lessonKey: string }) {
+  return null;
+}
+
+/** Placeholder — Task 10 implements this; Task 11's course page consumes it. */
+export function CourseProgress(_props: { total: number }) {
+  return null;
+}
+```
+
+All three are on the six-component `'use client'` allow-list already, so the
+boundary test accepts them. Prefixing the unused props with `_` keeps
+`npm run lint` at exit 0.
+
 - [ ] **Step 8: Create `app/system-design/layout.tsx`**
 
 ```tsx
@@ -3703,7 +3777,8 @@ so shell comments are not mistaken for headings."
 ## Task 9: Sidebar tree and table of contents
 
 **Files:**
-- Create: `components/lesson/SidebarTree.tsx`, `components/lesson/TableOfContents.tsx`, `tests/components/lesson-nav.test.tsx`
+- Replace (Task 8 created typed placeholders): `components/lesson/SidebarTree.tsx`, `components/lesson/TableOfContents.tsx`
+- Create: `tests/components/lesson-nav.test.tsx`
 - Test: `tests/components/lesson-nav.test.tsx`
 
 **Interfaces:**
@@ -4037,7 +4112,8 @@ sticky header so headings activate after clearing the chrome."
 ## Task 10: Progress tracking
 
 **Files:**
-- Create: `lib/progress/store.ts`, `lib/progress/useProgress.ts`, `components/lesson/ProgressTracker.tsx`, `tests/components/progress.test.tsx`
+- Create: `lib/progress/store.ts`, `lib/progress/useProgress.ts`, `tests/components/progress.test.tsx`
+- Replace (Task 8 created a typed placeholder, including the `CourseProgress` export Task 11 consumes): `components/lesson/ProgressTracker.tsx`
 - Test: `tests/components/progress.test.tsx`
 
 **Interfaces:**
