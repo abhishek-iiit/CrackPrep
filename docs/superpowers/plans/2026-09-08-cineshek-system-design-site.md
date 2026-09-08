@@ -6210,6 +6210,13 @@ boundary is on the client allow-list because Next requires it to be one."
 
 ## Task 16: Write the three sample lessons
 
+**Frontmatter dates must be quoted.** `updated: 2026-09-08` unquoted is parsed
+by YAML as a `Date` object, which `frontmatterSchema`'s
+`z.string().regex(/^\d{4}-\d{2}-\d{2}$/)` rejects — and because the content
+layer throws on invalid frontmatter, that failure surfaces as three test files
+failing at import rather than as a readable message. Always write
+`updated: "2026-09-08"`.
+
 **Files:**
 - Modify: `content/system-design/01-foundations/requirements-clarification.mdx`, `content/system-design/04-nosql-partitioning-ids/bloom-filters.mdx`, `content/system-design/07-storage-engines/lsm-tree-storage-engine.mdx`
 - Test: existing content-layer tests cover them; one new assertion is added.
@@ -6254,23 +6261,40 @@ Expected: FAIL — the three lessons are still `status: draft` stubs.
 
 - [ ] **Step 3: Write `01.01 Requirements Clarification`**
 
-Frontmatter to set: `status: published`, `difficulty: intro`, `estMinutes: 9`, `updated: 2026-09-08`, `summary: "The questions that turn a vague prompt into a bounded problem, and why guessing scale early is the most expensive mistake."`, `tags: [requirements, process, scoping]`.
+Frontmatter to set: `status: published`, `difficulty: intro`, `estMinutes: 9`, `updated: "2026-09-08"`, `summary: "The questions that turn a vague prompt into a bounded problem, and why guessing scale early is the most expensive mistake."`, `tags: [requirements, process, scoping]`.
 
 Body structure — prose, lists, one `<Callout type="gotcha">`, one `<Tradeoff>`, one `<KeyTakeaways>`. No diagram. Content must cover: functional versus non-functional split; who the actors are; the read/write ratio question; the four numbers worth asking for (DAU, requests per second at peak, payload size, retention); what to do when the interviewer will not give numbers; and the distinction between clarifying and stalling.
 
 - [ ] **Step 4: Write `04.13 Bloom Filters`**
 
-Frontmatter: `status: published`, `difficulty: core`, `estMinutes: 14`, `updated: 2026-09-08`, `summary: "A probabilistic set membership test that answers 'definitely not present' with certainty and 'probably present' with a tunable error rate."`, `tags: [probabilistic, filters, storage]`.
+Frontmatter: `status: published`, `difficulty: core`, `estMinutes: 14`, `updated: "2026-09-08"`, `summary: "A probabilistic set membership test that answers 'definitely not present' with certainty and 'probably present' with a tunable error rate."`, `tags: [probabilistic, filters, storage]`.
 
 Body must include a `<Formula label="False positive probability">` carrying `p ≈ (1 − e^(−kn/m))^k`, a worked numeric example (n = 1,000,000, p = 1%, giving m ≈ 9.6 Mbit ≈ 1.2 MB and k ≈ 7), a `<Steps>` walkthrough of insert and query, a `<Tradeoff>` on Bloom versus an exact set, a `<Callout type="gotcha">` on the impossibility of deletion without a counting variant, and a GFM table of operation costs. Cover where it is actually used: LSM read paths and cache-miss avoidance.
 
 - [ ] **Step 5: Write `07.09 LSM Tree Storage Engine`**
 
-Frontmatter: `status: published`, `difficulty: deep`, `estMinutes: 22`, `updated: 2026-09-08`, `summary: "Why write-optimised engines buffer in memory and merge on disk, and what that costs on the read path."`, `tags: [storage, lsm, compaction]`.
+Frontmatter: `status: published`, `difficulty: deep`, `estMinutes: 22`, `updated: "2026-09-08"`, `summary: "Why write-optimised engines buffer in memory and merge on disk, and what that costs on the read path."`, `tags: [storage, lsm, compaction]`.
 
 Body must include an inline-SVG diagram via `<Figure>` showing memtable → WAL → SSTable levels → compaction, a `<Steps>` write path and a separate `<Steps>` read path, a `<Tradeoff>` of LSM versus B-tree, a table of write/read/space amplification, and a `<Callout type="note">` cross-referencing `04.13 Bloom Filters` for the read-path filter.
 
-The diagram must be an inline SVG using `currentColor` for strokes so it works in both themes, saved to `public/diagrams/lsm-tree.svg`, and referenced with real `alt` text describing the flow — `<Figure>` throws otherwise.
+The diagram is an SVG file at `public/diagrams/lsm-tree.svg`, referenced through
+`<Figure>` with real `alt` text describing the flow and explicit
+`width`/`height` so space is reserved — `<Figure>` throws if `alt` is missing.
+
+**It cannot use `currentColor`.** `<Figure>` renders through `next/image`, which
+emits an `<img>`, and an externally-referenced SVG has no access to the host
+page's inherited colour. The project's theming is class-driven (`.dark` on
+`<html>`), which an `<img>`-loaded SVG also cannot see. So the file must theme
+*itself*: define its palette internally and flip it under
+`@media (prefers-color-scheme: dark)`, including its own background rect so it
+never renders dark-on-dark or light-on-light.
+
+Known limitation, accepted: a reader who overrides the site theme against their
+OS preference gets a diagram keyed to the OS rather than the page. It stays
+legible either way, which is the reason this is acceptable rather than a defect.
+Fixing it properly would mean inlining diagrams as React components instead of
+files — a change to how every diagram in the curriculum works, not worth it for
+one lesson.
 
 - [ ] **Step 6: Run the tests to verify they pass**
 
