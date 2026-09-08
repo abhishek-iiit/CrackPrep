@@ -4955,7 +4955,9 @@ export function PathCards({ courses }: { courses: Course[] }) {
 import { ModuleCard } from "@/components/course/ModuleCard";
 import type { Module } from "@/lib/content";
 
-export function ModuleGrid({ modules }: { modules: Module[] }) {
+// readonly: getModules() returns a frozen, readonly view of the process-wide
+// cache, and a mutable Module[] prop would not accept it.
+export function ModuleGrid({ modules }: { modules: readonly Module[] }) {
   return (
     <section className="mx-auto max-w-[1200px] px-4 py-16">
       <h2 className="text-2xl font-semibold tracking-tight">The fourteen modules</h2>
