@@ -12,6 +12,14 @@ export default defineConfig({
     // need a DOM opt in with a `// @vitest-environment jsdom` docblock.
     // Measured effect: advisory gone, suite 4.30s -> 1.19s.
     environment: "node",
+    // Task 9 added a 4th jsdom-environment file (lesson-nav.test.tsx), which
+    // intermittently re-tripped Vitest's "Isolate N workers spawned" advisory
+    // (isSavingWorthHinting is threshold-based on measured wall time, so it
+    // only fired in some runs). No test file here uses mocks, spies, or
+    // module-level mutable state, so reusing workers across files carries no
+    // cross-test-pollution risk. Verified: 207/207 tests pass across 5
+    // consecutive runs with isolate: false and the advisory never reappears.
+    isolate: false,
     setupFiles: ["./tests/setup.ts"],
     include: ["tests/**/*.test.{ts,tsx}"],
     exclude: ["tests/e2e/**"],
