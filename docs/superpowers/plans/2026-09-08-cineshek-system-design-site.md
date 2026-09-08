@@ -49,9 +49,9 @@ Every task's requirements implicitly include this section. Values are copied ver
 
 **Typography.** `Geist Pixel` display accent only, never body text. `Geist` headings and UI. `Geist Mono` code, numbers, `NN.NN` labels. Long-form body **17px at line-height 1.7**. Prose column capped at **68ch** — Tailwind v4's built-in `--max-width-prose` is 65ch, so it is overridden in `@theme`; every use of the measure, the `max-w-prose` utility included, must resolve to 68ch.
 
-**Style.** Refined neo-brutalism: 0–4px radius, 2px visible borders, hard offset shadows `4px 4px 0 var(--border-structural)`, bold display type. Transitions **150–200ms** on hover/focus/colour — never `0s`. Never animate `width` or `height`; transforms and opacity only.
+**Style.** Refined neo-brutalism: 0–4px radius, 2px visible borders, hard offset shadows `4px 4px 0 var(--border-structural)`, bold display type. Transitions **150–200ms** on hover/focus/colour — never `0s`. Never transition or animate a property that forces layout: `width`, `height`, `top`/`right`/`bottom`/`left`, `margin`, `padding`. Express movement with `transform` and fades with `opacity`. Paint-only properties — `color`, `background-color`, `border-color`, `box-shadow`, `outline-color` — **may** be transitioned, and are what hover and focus feedback is made of.
 
-**Motion.** Every non-essential animation guarded by `prefers-reduced-motion: reduce` rendering the final state immediately.
+**Motion.** Every non-essential animation guarded by `prefers-reduced-motion: reduce` rendering the final state immediately. The `.transition-brut` utility transitions `color`, `background-color`, `border-color`, `box-shadow` and `transform` — every one of them paint-only or compositor-only, none reflow-inducing. That is correct and intended; do not narrow it.
 
 **Accessibility.** Text contrast ≥4.5:1 everywhere. Visible focus rings, never removed. Interactive targets ≥44×44px with ≥8px spacing. Icons are SVG (`lucide-react`) — **never emoji**. Icon-only buttons carry `aria-label`. One `<h1>` per page. `alt` required on every meaningful image; decorative art `aria-hidden`.
 

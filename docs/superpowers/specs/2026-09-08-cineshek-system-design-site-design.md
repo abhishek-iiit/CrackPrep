@@ -298,7 +298,16 @@ result, not an oversight.
 Standard tier. Card grids reveal on scroll with a ~60ms stagger,
 300–450ms duration. Every non-essential animation is wrapped in a
 `prefers-reduced-motion: reduce` guard that renders the final state
-immediately. Nothing animates `width` or `height`; transforms and opacity only.
+immediately.
+
+Nothing transitions or animates a property that forces layout — `width`,
+`height`, `top`/`right`/`bottom`/`left`, `margin`, `padding`. Movement is
+expressed with `transform`, fades with `opacity`. Paint-only properties
+(`color`, `background-color`, `border-color`, `box-shadow`, `outline-color`)
+**may** be transitioned: they cause no reflow, and the 150–200ms hover and focus
+feedback required above is built from them. The signature hard-offset shadow on
+hover depends specifically on transitioning `box-shadow`, so this is not a
+"transform and opacity only" allowlist.
 
 ### 4.6 Spacing and layout
 
