@@ -13,7 +13,14 @@ export function Pre({ children, className, ...props }: PreProps) {
           {language}
         </p>
       )}
-      <pre {...props} className={cn("scroll-x p-4 text-sm leading-relaxed", className)}>
+      {/* tabIndex makes the overflow-x:auto block reachable by keyboard when a
+          code sample is wider than the viewport — same fix as the table
+          wrapper (axe scrollable-region-focusable, WCAG 2.1.1). */}
+      <pre
+        {...props}
+        tabIndex={0}
+        className={cn("scroll-x p-4 text-sm leading-relaxed", className)}
+      >
         {children}
       </pre>
     </div>

@@ -8,6 +8,9 @@ export function Formula({ children, label }: { children: React.ReactNode; label?
     <div
       role="math"
       aria-label={label}
+      // tabIndex makes the overflow-x:auto box reachable by keyboard when a
+      // formula is wider than the viewport — same fix as the table wrapper.
+      tabIndex={0}
       className="scroll-x my-6 rounded-card border-2 border-structural bg-card p-4 text-center font-mono text-base"
     >
       {children}

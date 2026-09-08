@@ -59,7 +59,7 @@ export default function SyllabusPage() {
 
               <ol className="mt-4 grid gap-x-8 gap-y-1 sm:grid-cols-2">
                 {mod.lessons.map((lesson) => (
-                  <li key={lesson.slug} className="flex items-center gap-2 py-1">
+                  <li key={lesson.slug} className="flex min-w-0 items-center gap-2 py-1">
                     <span className="w-12 shrink-0 font-mono text-xs text-ink-muted">
                       {lesson.number}
                     </span>

@@ -36,7 +36,10 @@ export const mdxComponents = {
     <blockquote {...p} className="my-6 border-l-2 border-structural pl-4 italic" />
   ),
   table: (p: React.ComponentPropsWithoutRef<"table">) => (
-    <div className="scroll-x my-6 rounded-card border-2 border-structural">
+    // tabIndex makes the overflow-x:auto wrapper reachable by keyboard when a
+    // wide table needs to scroll — axe's scrollable-region-focusable (WCAG
+    // 2.1.1) flags a scrollable region a keyboard user cannot reach otherwise.
+    <div tabIndex={0} className="scroll-x my-6 rounded-card border-2 border-structural">
       <table {...p} className="w-full border-collapse text-sm" />
     </div>
   ),

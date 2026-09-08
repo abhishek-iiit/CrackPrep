@@ -77,7 +77,12 @@ export function PathCards({ courses }: { courses: Course[] }) {
                 </Link>
               ) : (
                 // Planned paths are not links: there is nowhere to go yet.
-                <div style={style} className={`${shell} opacity-80`}>
+                // opacity-80 (not opacity-90) composited the cobalt pair's
+                // 6.70:1 white-on-blue token contrast down to 4.46:1 against
+                // the page background — under the 4.5:1 AA floor even though
+                // the token pair itself passes. opacity-90 keeps the muted
+                // look with margin to spare (5.49:1 for the tightest pair).
+                <div style={style} className={`${shell} opacity-90`}>
                   <Inner course={course} />
                 </div>
               )}
