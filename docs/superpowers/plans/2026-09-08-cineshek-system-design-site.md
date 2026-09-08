@@ -526,27 +526,43 @@ import { baseTokens, cssVarName, type TokenName } from "@/lib/design/tokens";
 const css = readFileSync("app/globals.css", "utf8");
 const tokenNames = Object.keys(baseTokens.light) as TokenName[];
 
+/**
+ * Returns the declarations inside a CSS rule, matched by a selector anchored
+ * at the start of a line.
+ *
+ * Do NOT slice on `css.indexOf(".dark")` instead: the file opens with
+ * `@custom-variant dark (&:where(.dark, .dark *))`, whose `.dark` occurs
+ * BEFORE `:root`, so an indexOf-based light-token slice comes out empty and
+ * every light assertion fails. Anchoring on a selector followed by `{` also
+ * skips the indented `html.dark {` rule inside `@layer base`.
+ */
+function ruleBody(source: string, selector: string): string {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = new RegExp(`^${escaped}\\s*\\{([^}]*)\\}`, "m").exec(source);
+  if (!match) throw new Error(`no "${selector}" rule found in app/globals.css`);
+  return match[1];
+}
+
+const rootBlock = ruleBody(css, ":root");
+const darkBlock = ruleBody(css, ".dark");
+const themeBlock = ruleBody(css, "@theme inline");
+
 describe("globals.css mirrors lib/design/tokens.ts", () => {
   it("uses the class strategy for dark mode", () => {
     expect(css).toMatch(/@custom-variant\s+dark/);
   });
 
   it.each(tokenNames)("declares %s in :root with the light value", (token) => {
-    const name = cssVarName(token);
-    const root = css.slice(css.indexOf(":root"), css.indexOf(".dark"));
-    expect(root).toContain(`${name}: ${baseTokens.light[token]};`);
+    expect(rootBlock).toContain(`${cssVarName(token)}: ${baseTokens.light[token]};`);
   });
 
   it.each(tokenNames)("declares %s in .dark with the dark value", (token) => {
-    const name = cssVarName(token);
-    const dark = css.slice(css.indexOf(".dark"), css.indexOf("@theme"));
-    expect(dark).toContain(`${name}: ${baseTokens.dark[token]};`);
+    expect(darkBlock).toContain(`${cssVarName(token)}: ${baseTokens.dark[token]};`);
   });
 
   it("exposes every token to Tailwind via @theme inline", () => {
-    const theme = css.slice(css.indexOf("@theme"));
     for (const token of tokenNames) {
-      expect(theme).toContain(`var(${cssVarName(token)})`);
+      expect(themeBlock).toContain(`var(${cssVarName(token)})`);
     }
   });
 
@@ -567,7 +583,7 @@ Expected: FAIL — the scaffolded `globals.css` has none of these declarations.
 
 - [ ] **Step 3: Replace `app/globals.css`**
 
-The `:root` / `.dark` / `@theme` ordering matters — the test slices the file at those markers.
+Each of `:root`, `.dark`, and `@theme inline` must appear as a rule whose selector starts a line — that is what the test's `ruleBody()` matches on. Their order does not matter.
 
 ```css
 @import "tailwindcss";
@@ -3342,7 +3358,7 @@ The sidebar receives a mapped, plain-object projection rather than the `Module[]
 
 - [ ] **Step 10: Append the Shiki dual-theme block to `app/globals.css`**
 
-`rehype-pretty-code` with two themes emits both colours as custom properties on every token; CSS chooses which one applies. Append at the end of the file so Task 3's marker-based slicing still works.
+`rehype-pretty-code` with two themes emits both colours as custom properties on every token; CSS chooses which one applies. Append at the end of the file; Task 3's `ruleBody()` matcher is order-independent, so this cannot disturb it.
 
 ```css
 /* rehype-pretty-code dual themes: tokens carry both colours, CSS picks one. */
