@@ -1941,7 +1941,7 @@ describe("filesystem access is confined to the content source", () => {
   });
 });
 
-describe("client components are limited to the six named leaves", () => {
+describe("client components are limited to the named leaves", () => {
   const ALLOWED_CLIENT = new Set([
     "ThemeToggle", "AnnouncementBar", "SidebarTree",
     "TableOfContents", "ProgressTracker", "SearchPalette",
@@ -6126,7 +6126,6 @@ import { CourseJsonLd } from "@/components/seo/CourseJsonLd";
 - [ ] **Step 7: Create `app/not-found.tsx`**
 
 ```tsx
-import Link from "next/link";
 import { Button } from "@/components/ui/Button";
 
 export default function NotFound() {
