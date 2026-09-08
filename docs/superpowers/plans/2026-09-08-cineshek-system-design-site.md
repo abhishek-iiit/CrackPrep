@@ -1886,9 +1886,15 @@ describe("filesystem access is confined to the content source", () => {
     expect(src).not.toMatch(/require\(["'](node:)?fs["']\)/);
   });
 
+  // Matches IMPORTS, not any mention. A blind `not.toContain("gray-matter")`
+  // also fires on comments, which forces contributors to weaken accurate
+  // documentation to satisfy the guard — the exact opposite of what it is for.
+  // Kept symmetrical with the node:fs check above.
   it("keeps gray-matter out of pages and components", () => {
     for (const file of [...walk("app"), ...walk("components")]) {
-      expect(readFileSync(file, "utf8")).not.toContain("gray-matter");
+      const src = readFileSync(file, "utf8");
+      expect(src).not.toMatch(/from\s+["']gray-matter["']/);
+      expect(src).not.toMatch(/require\(["']gray-matter["']\)/);
     }
   });
 });
@@ -3471,7 +3477,9 @@ import Link from "next/link";
 import { ArrowLeft, ArrowRight } from "lucide-react";
 import type { LessonRef } from "@/lib/content";
 
-function NavCard({ ref: target, direction }: { ref: LessonRef; direction: "prev" | "next" }) {
+// The prop is `item`, NOT `ref`: eslint's react-hooks/refs rule treats any
+// prop literally named `ref` as a React ref and errors on it.
+function NavCard({ item: target, direction }: { item: LessonRef; direction: "prev" | "next" }) {
   const isNext = direction === "next";
   return (
     <Link
@@ -3497,8 +3505,8 @@ export function LessonNav({ prev, next }: { prev: LessonRef | null; next: Lesson
 
   return (
     <nav aria-label="Lesson navigation" className="mt-12 flex flex-col gap-4 sm:flex-row">
-      {prev ? <NavCard ref={prev} direction="prev" /> : <div className="flex-1" aria-hidden />}
-      {next ? <NavCard ref={next} direction="next" /> : <div className="flex-1" aria-hidden />}
+      {prev ? <NavCard item={prev} direction="prev" /> : <div className="flex-1" aria-hidden />}
+      {next ? <NavCard item={next} direction="next" /> : <div className="flex-1" aria-hidden />}
     </nav>
   );
 }
