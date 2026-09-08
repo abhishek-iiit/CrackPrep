@@ -33,6 +33,13 @@ export function ProgressTracker({ lessonKey }: { lessonKey: string }) {
 export function CourseProgress({ total }: { total: number }) {
   const { completed } = useProgress();
   const done = completed.size;
+
+  // Render nothing until there is progress. A "0 / 179 complete" bar on a first
+  // visit is noise, and it would announce a progressbar at aria-valuenow=0 to
+  // screen-reader users for no information gain. Same reasoning as ModuleCard
+  // hiding its written-count at zero.
+  if (done === 0) return null;
+
   const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
 
   return (

@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, render, screen } from "@testing-library/react";
-import { ProgressTracker } from "@/components/lesson/ProgressTracker";
+import { CourseProgress, ProgressTracker } from "@/components/lesson/ProgressTracker";
 import { progressStore } from "@/lib/progress/store";
 
-const KEY = "cineshek:progress:v1";
+// Imported, not duplicated: a hardcoded literal would silently desync
+// from the implementation if the key were ever versioned up.
+import { STORAGE_KEY as KEY } from "@/lib/progress/store";
 
 beforeEach(() => {
   window.localStorage.clear();
@@ -104,5 +106,22 @@ describe("ProgressTracker", () => {
     expect(button).toHaveAttribute("aria-pressed", "false");
     act(() => button.click());
     expect(button).toHaveAttribute("aria-pressed", "true");
+  });
+});
+
+describe("CourseProgress", () => {
+  it("renders nothing before any lesson is complete", () => {
+    const { container } = render(<CourseProgress total={179} />);
+    expect(container).toBeEmptyDOMElement();
+  });
+
+  it("reports progress once a lesson is complete", () => {
+    progressStore.toggle("foundations/requirements-clarification");
+    render(<CourseProgress total={179} />);
+    const bar = screen.getByRole("progressbar");
+    expect(bar).toHaveAttribute("aria-valuenow", "1");
+    expect(bar).toHaveAttribute("aria-valuemin", "0");
+    expect(bar).toHaveAttribute("aria-valuemax", "179");
+    expect(screen.getByText("1 / 179 complete")).toBeInTheDocument();
   });
 });
