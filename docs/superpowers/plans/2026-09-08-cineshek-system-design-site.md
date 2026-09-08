@@ -1886,7 +1886,10 @@ export const moduleRecordSchema = z.object({
   dir: z.string().min(1),
   title: z.string().min(1),
   blurb: z.string().min(1),
-  colorKey: z.enum(colorKeys as [string, ...string[]]),
+  // No cast: z.enum accepts ColorKey[] directly and narrows colorKey to
+  // ColorKey. Casting to [string, ...string[]] would widen it to string and
+  // force a second cast where the Module is built.
+  colorKey: z.enum(colorKeys),
   topicCount: z.number().int().positive(),
 });
 ```
@@ -1963,7 +1966,7 @@ export function loadModules(): Module[] {
       slug: validated.slug,
       title: validated.title,
       blurb: validated.blurb,
-      colorKey: validated.colorKey as Module["colorKey"],
+      colorKey: validated.colorKey,
       url: `/${COURSE_SLUG}/${validated.slug}`,
       lessons,
       publishedCount: lessons.filter((l) => l.status === "published").length,
