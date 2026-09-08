@@ -216,7 +216,8 @@ cat >> .gitignore <<'EOF'
 /test-results/
 /playwright-report/
 /public/search-index.json
-EOF```
+EOF
+```
 
 `.superpowers/` must be re-added here: Step 1's `cp` of the scaffold `.gitignore` overwrites the root file, and that directory holds this plan's execution scratch.
 
