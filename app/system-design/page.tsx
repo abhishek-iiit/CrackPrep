@@ -4,11 +4,14 @@ import { ModuleCard } from "@/components/course/ModuleCard";
 import { CourseProgress } from "@/components/lesson/ProgressTracker";
 import { courseSlug, getCourse, getCourseStats, getModules } from "@/lib/content";
 
-export const metadata: Metadata = {
-  title: "System design in depth",
-  description:
-    "Fourteen modules and 179 topics, sequenced from requirements clarification through storage engines and reliability.",
-};
+// Derived, not literal — see the root layout for the reasoning.
+export async function generateMetadata(): Promise<Metadata> {
+  const stats = getCourseStats(courseSlug);
+  return {
+    title: "System design in depth",
+    description: `${stats.moduleCount} modules and ${stats.topicCount} topics, sequenced from requirements clarification through storage engines and reliability.`,
+  };
+}
 
 export default function CoursePage() {
   const course = getCourse(courseSlug);

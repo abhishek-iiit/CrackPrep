@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono, Geist_Pixel } from "next/font/google";
 import { ThemeProvider } from "next-themes";
+import { courseSlug, getCourseStats } from "@/lib/content";
 import "./globals.css";
 
 const geist = Geist({
@@ -26,14 +27,19 @@ const geistPixel = Geist_Pixel({
   fallback: ["ui-monospace", "monospace"],
 });
 
-export const metadata: Metadata = {
-  title: {
-    default: "Cineshek — System design, in depth",
-    template: "%s · Cineshek",
-  },
-  description:
-    "A sequenced system design curriculum: 14 modules, 179 topics, from requirements clarification to storage engines.",
-};
+// Derived, not literal. Every user-facing count must come from the content
+// layer: this project adds curriculum over time, and a hardcoded number in a
+// meta description goes stale silently — nobody re-audits SEO text.
+export async function generateMetadata(): Promise<Metadata> {
+  const stats = getCourseStats(courseSlug);
+  return {
+    title: {
+      default: "Cineshek — System design, in depth",
+      template: "%s · Cineshek",
+    },
+    description: `A sequenced system design curriculum: ${stats.moduleCount} modules, ${stats.topicCount} topics, from requirements clarification to storage engines.`,
+  };
+}
 
 export default function RootLayout({
   children,
