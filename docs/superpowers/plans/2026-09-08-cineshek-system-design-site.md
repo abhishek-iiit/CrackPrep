@@ -1541,9 +1541,9 @@ type SearchDoc = { number: string; title: string; summary: string; module: strin
 
 getCourses(): Course[]
 getCourse(courseSlug: string): Course | null
-getModules(courseSlug: string): Module[]
+getModules(courseSlug: string): readonly Module[]
 getModule(courseSlug: string, moduleSlug: string): Module | null
-getLessons(courseSlug: string, moduleSlug: string): LessonMeta[]
+getLessons(courseSlug: string, moduleSlug: string): readonly LessonMeta[]
 getLesson(courseSlug: string, moduleSlug: string, lessonSlug: string): Lesson | null
 getLessonNeighbours(courseSlug, moduleSlug, lessonSlug): { prev: LessonRef | null; next: LessonRef | null }
 getSearchIndex(courseSlug: string): SearchDoc[]
@@ -1561,6 +1561,7 @@ import { describe, expect, it } from "vitest";
 import {
   getAllLessonParams, getCourse, getCourses, getCourseStats, getLesson,
   getLessonNeighbours, getLessons, getModule, getModules, getSearchIndex,
+  type LessonMeta, type Module,
 } from "@/lib/content";
 import { parseSyllabus } from "@/scripts/lib/parse-syllabus";
 
@@ -1743,6 +1744,42 @@ describe("getLessonNeighbours forms one unbroken chain", () => {
       if (prev) expect(draftNumbers.has(prev.number)).toBe(false);
       if (next) expect(draftNumbers.has(next.number)).toBe(false);
     }
+  });
+});
+
+describe("the cached module tree is immutable", () => {
+  // The cache is a process-wide singleton reused across static generation, so
+  // an in-place mutation by any caller would corrupt every later page. These
+  // assert the freeze holds at every level — a shallow freeze leaves the
+  // nested lessons arrays mutable, which would be the easy mistake.
+  it("rejects mutation of the modules array", () => {
+    const mods = getModules(COURSE);
+    expect(() => (mods as Module[]).push(mods[0])).toThrow(TypeError);
+    expect(() => (mods as Module[]).sort()).toThrow(TypeError);
+  });
+
+  it("rejects mutation of a module object", () => {
+    const mod = getModules(COURSE)[0];
+    expect(() => {
+      (mod as { title: string }).title = "hacked";
+    }).toThrow(TypeError);
+  });
+
+  it("rejects mutation of a module's lessons array", () => {
+    const lessons = getModules(COURSE)[0].lessons;
+    expect(() => (lessons as LessonMeta[]).push(lessons[0])).toThrow(TypeError);
+    expect(() => (lessons as LessonMeta[]).reverse()).toThrow(TypeError);
+  });
+
+  it("rejects mutation of a lesson object", () => {
+    const lesson = getModules(COURSE)[0].lessons[0];
+    expect(() => {
+      (lesson as { title: string }).title = "hacked";
+    }).toThrow(TypeError);
+  });
+
+  it("still returns the same cached reference on repeated calls", () => {
+    expect(getModules(COURSE)).toBe(getModules(COURSE));
   });
 });
 
@@ -2043,13 +2080,34 @@ function readLessonFile(dir: string, file: string) {
   return { frontmatter: result.data, body: parsed.content };
 }
 
-let cache: Module[] | null = null;
+let cache: readonly Module[] | null = null;
+
+/**
+ * Recursively freezes the module tree.
+ *
+ * The cache is a process-wide singleton and Next reuses one process across many
+ * static-generation calls, so handing it out by reference would let any caller
+ * corrupt it for every later page with one in-place `.sort()`. Freezing costs
+ * nothing per call (unlike copying on every read) and turns that silent
+ * corruption into an immediate TypeError at the offending call site.
+ *
+ * A shallow freeze is NOT enough — the nested `lessons` arrays and the lesson
+ * objects inside them stay mutable unless frozen individually.
+ */
+function freezeModules(modules: Module[]): readonly Module[] {
+  for (const mod of modules) {
+    for (const lesson of mod.lessons) Object.freeze(lesson);
+    Object.freeze(mod.lessons);
+    Object.freeze(mod);
+  }
+  return Object.freeze(modules);
+}
 
 /** Builds the full module tree once per process. Metadata only — no bodies. */
-export function loadModules(): Module[] {
+export function loadModules(): readonly Module[] {
   if (cache) return cache;
 
-  cache = moduleRecords.map((record) => {
+  const built: Module[] = moduleRecords.map((record) => {
     const validated = moduleRecordSchema.parse(record);
 
     const files = readdirSync(join(CONTENT_ROOT, validated.dir))
@@ -2090,6 +2148,7 @@ export function loadModules(): Module[] {
     };
   });
 
+  cache = freezeModules(built);
   return cache;
 }
 
@@ -2145,7 +2204,10 @@ export function getCourse(slug: string): Course | null {
   return getCourses().find((c) => c.slug === slug) ?? null;
 }
 
-export function getModules(course: string): Module[] {
+// Returns readonly views: the underlying tree is a frozen process-wide cache,
+// so the types tell callers to copy before sorting rather than discovering it
+// as a TypeError at runtime.
+export function getModules(course: string): readonly Module[] {
   return isLive(course) ? loadModules() : [];
 }
 
@@ -2153,7 +2215,7 @@ export function getModule(course: string, moduleSlug: string): Module | null {
   return getModules(course).find((m) => m.slug === moduleSlug) ?? null;
 }
 
-export function getLessons(course: string, moduleSlug: string): LessonMeta[] {
+export function getLessons(course: string, moduleSlug: string): readonly LessonMeta[] {
   return getModule(course, moduleSlug)?.lessons ?? [];
 }
 
