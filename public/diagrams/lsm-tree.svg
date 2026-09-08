@@ -6,6 +6,10 @@
     on prefers-color-scheme; the ground rect flips with it, which keeps the
     diagram legible even when a reader's explicit theme choice disagrees with
     their OS setting.
+
+    Level rows use a CONSTANT tile width: in a leveled LSM the per-level target
+    file size stays roughly the same and it is the file COUNT that grows by the
+    fan-out. Drawing deeper files smaller would contradict the annotation.
   -->
   <style>
     svg { color: #141414; }
@@ -62,44 +66,47 @@
   <text class="sans sm" x="155" y="202" text-anchor="middle">append-only, fsynced</text>
 
   <!-- flush -->
-  <path class="flow" d="M 461 86 V 244" marker-end="url(#arrow)" />
-  <text class="sans sm" x="476" y="152">3 flush when full:</text>
-  <text class="sans sm" x="476" y="172">write one immutable SSTable</text>
+  <path class="flow" d="M 376 86 V 244" marker-end="url(#arrow)" />
+  <text class="sans sm" x="392" y="152">3 flush when full:</text>
+  <text class="sans sm" x="392" y="172">write one immutable SSTable</text>
+  <text class="sans sm" x="420" y="240">each tile = one SSTable</text>
 
-  <!-- level 0 -->
+  <!-- level 0: a few files, ranges overlap -->
   <text class="mono lg" x="326" y="272" text-anchor="end">L0</text>
-  <text class="sans sm" x="326" y="292" text-anchor="end">key ranges overlap</text>
-  <rect class="tile" x="340" y="250" width="112" height="52" rx="3" />
-  <rect class="tile" x="464" y="250" width="112" height="52" rx="3" />
-  <rect class="tile" x="588" y="250" width="112" height="52" rx="3" />
-  <text class="mono sm" x="396" y="281" text-anchor="middle">SSTable</text>
-  <text class="mono sm" x="520" y="281" text-anchor="middle">SSTable</text>
-  <text class="mono sm" x="644" y="281" text-anchor="middle">SSTable</text>
+  <text class="sans sm" x="326" y="292" text-anchor="end">recent flushes, ranges overlap</text>
+  <rect class="tile" x="352" y="250" width="48" height="52" rx="3" />
+  <rect class="tile" x="406" y="250" width="48" height="52" rx="3" />
+  <rect class="tile" x="460" y="250" width="48" height="52" rx="3" />
 
   <!-- compaction L0 -> L1 -->
-  <path class="flow" d="M 370 302 V 354" marker-end="url(#arrow)" />
-  <text class="sans sm" x="386" y="322">4 compact: merge sorted runs,</text>
-  <text class="sans sm" x="386" y="342">drop overwrites and tombstones</text>
+  <path class="flow" d="M 376 302 V 354" marker-end="url(#arrow)" />
+  <text class="sans sm" x="392" y="322">4 compact: merge sorted runs,</text>
+  <text class="sans sm" x="392" y="342">drop overwrites and tombstones</text>
 
-  <!-- level 1 -->
+  <!-- level 1: same file size, many more of them -->
   <text class="mono lg" x="326" y="382" text-anchor="end">L1</text>
-  <text class="sans sm" x="326" y="402" text-anchor="end">non-overlapping</text>
-  <rect class="tile" x="340" y="360" width="84" height="52" rx="3" />
-  <rect class="tile" x="432" y="360" width="84" height="52" rx="3" />
-  <rect class="tile" x="524" y="360" width="84" height="52" rx="3" />
-  <rect class="tile" x="616" y="360" width="84" height="52" rx="3" />
+  <text class="sans sm" x="326" y="402" text-anchor="end">non-overlapping runs</text>
+  <rect class="tile" x="352" y="360" width="48" height="52" rx="3" />
+  <rect class="tile" x="406" y="360" width="48" height="52" rx="3" />
+  <rect class="tile" x="460" y="360" width="48" height="52" rx="3" />
+  <rect class="tile" x="514" y="360" width="48" height="52" rx="3" />
+  <rect class="tile" x="568" y="360" width="48" height="52" rx="3" />
+  <rect class="tile" x="622" y="360" width="48" height="52" rx="3" />
 
   <!-- compaction L1 -> L2 -->
-  <path class="flow" d="M 370 412 V 464" marker-end="url(#arrow)" />
-  <text class="sans sm" x="386" y="442">each level holds roughly 10x the one above</text>
+  <path class="flow" d="M 376 412 V 464" marker-end="url(#arrow)" />
+  <text class="sans sm" x="392" y="432">each level holds ~10x as many files</text>
+  <text class="sans sm" x="392" y="452">of roughly the same target size</text>
 
-  <!-- level 2 -->
+  <!-- level 2: same file size again, more still (row runs on past the ellipsis) -->
   <text class="mono lg" x="326" y="492" text-anchor="end">L2</text>
-  <text class="sans sm" x="326" y="512" text-anchor="end">largest, coldest</text>
-  <rect class="tile" x="340" y="470" width="55" height="52" rx="3" />
-  <rect class="tile" x="401" y="470" width="55" height="52" rx="3" />
-  <rect class="tile" x="462" y="470" width="55" height="52" rx="3" />
-  <rect class="tile" x="523" y="470" width="55" height="52" rx="3" />
-  <rect class="tile" x="584" y="470" width="55" height="52" rx="3" />
-  <rect class="tile" x="645" y="470" width="55" height="52" rx="3" />
+  <text class="sans sm" x="326" y="512" text-anchor="end">10x again, largest and coldest</text>
+  <rect class="tile" x="352" y="470" width="48" height="52" rx="3" />
+  <rect class="tile" x="406" y="470" width="48" height="52" rx="3" />
+  <rect class="tile" x="460" y="470" width="48" height="52" rx="3" />
+  <rect class="tile" x="514" y="470" width="48" height="52" rx="3" />
+  <rect class="tile" x="568" y="470" width="48" height="52" rx="3" />
+  <text class="mono lg" x="640" y="503" text-anchor="middle">...</text>
+  <rect class="tile" x="664" y="470" width="48" height="52" rx="3" />
+  <rect class="tile" x="718" y="470" width="48" height="52" rx="3" />
 </svg>

@@ -78,7 +78,7 @@ Take `n` = 1,000,000 keys and a target `p` = 0.01.
 
 Check the rounding by putting the numbers back through the first formula, with `m` rounded up to 9.6 Mbit and `k` = 7: `kn/m` = 7,000,000 / 9,600,000 = 0.7292, `e^(−0.7292)` = 0.4823, so `1 − 0.4823` = 0.5177, and `0.5177^7` = 0.00996. That is 1.0% — rounding 6.64 probes up to 7 costs nothing, and the extra bits from rounding `m` up pay for it.
 
-Now compare with the exact answer. Storing a million keys in a hash set means storing the keys: 16-byte ids plus per-entry slot and pointer overhead runs to something like 40–60 bytes an entry in a typical runtime, so tens of megabytes. Those figures are order-of-magnitude, not a benchmark, but the ratio is the point — the filter is roughly thirty times smaller than the thing it stands in for, which is what lets you keep one per file resident while the data itself stays on disk.
+Now compare with the exact answer. Storing a million keys in a hash set means storing the keys: 16-byte ids plus per-entry slot and pointer overhead runs to something like 40–60 bytes an entry in a typical runtime, so tens of megabytes. Those figures are order-of-magnitude, not a benchmark, but the ratio is the point — across that range the filter is thirty to fifty times smaller than the thing it stands in for, which is what lets you keep one per file resident while the data itself stays on disk.
 
 The accuracy/space curve is worth internalising, because it is unusually friendly: each factor of ten in accuracy costs a flat 4.8 bits per key.
 
@@ -99,7 +99,7 @@ Going from 1% to 0.1% is another 0.6 MB per million keys. That is usually a triv
 | Lookup, key absent | `k` bit probes, short-circuiting on the first zero; no I/O at all | Constant — but only while the entire set is resident |
 | Lookup, key present | `k` bit probes, then the authoritative lookup you were guarding | Constant and authoritative on its own |
 | Delete | Not supported — rebuild the filter, or use a counting variant | Constant |
-| Merge two sets | Bitwise OR, provided `m` and `k` match | Set union, proportional to the smaller set |
+| Merge two sets | Bitwise OR — but only if both filters share the same `m`, the same `k`, and the same hash functions | Set union, proportional to the smaller set |
 | Space per key | `m/n` bits — 9.6 at `p` = 1%, regardless of key length | Key bytes plus slot overhead: tens of bytes |
 | Wrong answers | False positives at rate `p`; false negatives impossible | None |
 | Resident size at 1M keys | ≈ 1.2 MB | Tens of MB (order of magnitude) |
@@ -114,7 +114,9 @@ You cannot delete from a Bloom filter. Clearing a key's `k` bits would also clea
 
 ### The read path of a log-structured engine
 
-Every immutable file in an LSM engine carries a Bloom filter over the keys it contains, built once when the file is written and held in memory. A point lookup consults each candidate file's filter first; a "definitely not present" skips the file entirely for the cost of a few memory probes. Without the filters, a lookup for a key that does not exist pays an I/O per candidate file. With them, it usually pays none.
+Immutable files in an LSM engine usually carry a Bloom filter over the keys they hold, built once when the file is written and kept in memory. A point lookup consults each candidate file's filter first; a "definitely not present" skips the file entirely for the cost of a few memory probes. Without the filters, a lookup for a key that does not exist pays an I/O per candidate file. With them, it usually pays none.
+
+"Usually" is doing real work in that sentence: filters are a configuration choice per level, and the one engines most often switch off is the deepest level's. That level holds the bulk of the keys, so its filters dominate the memory bill, and when most lookups are for keys that do exist the filter rarely saves an I/O there anyway — a key missing from every level above is very likely to be in this one.
 
 The fit is unusually clean: these files never change after they are written, so the no-deletion constraint above costs nothing, and the filter can be sized exactly — the writer knows `n` before it builds the filter. It also explains a budget surprise on large instances: filter and index blocks, not data blocks, are often what the memory is actually spent on. 07.09 LSM Tree Storage Engine walks the write and read paths, and 07.11 LSM Read Path Bloom And Sparse Index takes the read side apart in detail.
 

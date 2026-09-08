@@ -33,7 +33,7 @@ That is a log-structured merge tree. It does not make the work disappear; it mov
 
 <Figure
   src="/diagrams/lsm-tree.svg"
-  alt="An incoming write splits two ways: it is appended to a write-ahead log on disk and inserted into the sorted in-memory memtable. When the memtable fills, it is flushed as one immutable SSTable into level 0, whose files have overlapping key ranges. Compaction merges level 0 files into level 1 as sorted, non-overlapping runs, dropping overwritten values and tombstones, and repeats into level 2, with each level holding roughly ten times the data of the one above."
+  alt="An incoming write splits two ways: it is appended to a write-ahead log on disk and inserted into the sorted in-memory memtable. When the memtable fills, it is flushed as one immutable SSTable into level 0, whose files have overlapping key ranges. Compaction merges level 0 files into level 1 as sorted, non-overlapping runs, dropping overwritten values and tombstones, and repeats into level 2. Files are drawn the same size at every level because the target file size stays roughly constant; each level holds about ten times as many of them as the level above."
   width={820}
   height={560}
   caption="The write side of an LSM engine. Only the WAL append is synchronous; the flush and the compactions run behind it."
@@ -56,7 +56,7 @@ The sparse index holds one entry per block rather than per key, so it stays smal
 
 <Steps>
   <Step title="1 — Append the record to the WAL">
-    Serialise the key, the value or tombstone, and the sequence number, then append to the log. If the write must survive a crash, this is where the fsync happens — the only synchronous device touch on the whole path, and a sequential append. Group commit amortises it: many concurrent writers land in one log buffer and share a single fsync, which is what lets a single engine acknowledge tens of thousands of durable writes a second.
+    Serialise the key, the value or tombstone, and the sequence number, then append to the log. If the write must survive a crash, this is where the fsync happens — the only synchronous device touch on the whole path, and a sequential append. Group commit amortises it: many concurrent writers land in one log buffer and share a single fsync, so the durable write rate is bounded by fsyncs per second times batch size rather than by writes per second. That is what puts a single engine in the tens of thousands of durable writes a second — a ballpark to reason with, not a benchmark, since it moves with the device, the batch size, and how many writers are in flight.
   </Step>
   <Step title="2 — Insert into the memtable">
     A sorted insert into an in-memory structure, logarithmic in the number of entries it holds. An update to an existing key does not overwrite anything: it is a new entry with a higher sequence number, sitting alongside the old one. That is what makes the design append-only end to end rather than only at the file level.
@@ -93,7 +93,7 @@ A read has to answer "what is the newest version of this key" when the key's ver
     Same structure, next-newest data. Under a heavy write load there may be several waiting for flush.
   </Step>
   <Step title="3 — Search every L0 file, newest first">
-    L0 key ranges overlap, so every L0 file is a candidate and there is no way to narrow by range. This is why an L0 file count is a read-latency metric: each file costs at least a Bloom filter probe, and each filter that says "maybe" costs an index lookup and a block read.
+    L0 key ranges overlap, so L0 cannot be narrowed to a single file by range, and in the worst case every L0 file is a candidate. Each file still carries its own minimum and maximum key, so a lookup skips any file whose range excludes the key — which prunes most of L0 for time-ordered keys and almost none of it for hashed ones. Either way an L0 file count is a read-latency metric: every surviving candidate costs at least a filter probe, and each filter that says "maybe" costs an index lookup and a block read.
   </Step>
   <Step title="4 — Search at most one file per level below L0">
     Within L1 and deeper, runs are non-overlapping, so the manifest's key ranges identify exactly one candidate file per level. Probe its filter; if it says maybe, binary search the sparse index, read the one block that could hold the key, and search inside it. A point read therefore costs at most one block read per level, and usually zero for keys that are not there.
@@ -107,7 +107,7 @@ A read has to answer "what is the newest version of this key" when the key's ver
 </Steps>
 
 <Callout type="note">
-Steps 3 and 4 lean entirely on the per-file Bloom filter. Every SSTable carries one over its own keys, built when the file is written and held in memory; a negative answer skips the file for the cost of a few memory probes. That is the whole difference between a lookup for a missing key costing an I/O per candidate file and costing none — which matters because in a write-heavy system most point lookups are for keys that were never written. The fit is unusually clean: an SSTable never changes after it is written, so the filter needs no deletion support and can be sized exactly, since the writer knows the key count up front. 04.13 Bloom Filters has the sizing arithmetic — roughly 10 bits per key for a 1% false positive rate, so about a megabyte per million keys. Two limits worth remembering: a filter cannot help a range scan, because a scan has no single key to probe, and it never tells you *where* in the file a key is. That is the sparse index's job. 07.11 LSM Read Path Bloom And Sparse Index takes the pair apart together.
+Steps 3 and 4 lean on the per-file Bloom filter. An SSTable usually carries one over its own keys, built when the file is written and held in memory; a negative answer skips the file for the cost of a few memory probes. Usually, not always — filters are configurable per level, and the deepest level's are the ones most often turned off, since they hold the most keys and so cost the most memory. That is the whole difference between a lookup for a missing key costing an I/O per candidate file and costing none — which matters because in a write-heavy system most point lookups are for keys that were never written. The fit is unusually clean: an SSTable never changes after it is written, so the filter needs no deletion support and can be sized exactly, since the writer knows the key count up front. 04.13 Bloom Filters has the sizing arithmetic — roughly 10 bits per key for a 1% false positive rate, so about a megabyte per million keys. Two limits worth remembering: a filter cannot help a range scan, because a scan has no single key to probe, and it never tells you *where* in the file a key is. That is the sparse index's job. 07.11 LSM Read Path Bloom And Sparse Index takes the pair apart together.
 </Callout>
 
 ## Amplification is how you price the design

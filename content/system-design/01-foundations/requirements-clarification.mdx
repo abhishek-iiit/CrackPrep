@@ -24,7 +24,7 @@ What this step produces is not a document. It is a short list both of you can se
 
 **Non-functional requirements** are the qualities constraining how those verbs may be implemented — latency target, availability, durability, consistency, freshness, cost ceiling. 01.03 Non-Functional Requirements covers the full taxonomy; here it only matters that they are a separate list, gathered by separate questions.
 
-The split matters because the two lists drive different parts of the design. Functional requirements decide the data model and the endpoints. Non-functional requirements decide the architecture. Two systems with identical functional requirements and different latency targets look nothing alike: "the feed loads in 200 ms at p99" forces the feed to be computed before it is asked for, while "the feed loads in about two seconds" lets you query at read time and skip an entire subsystem. Nobody volunteers that sentence. You have to ask for it.
+The split matters because the two lists drive different parts of the design. Functional requirements decide the data model and the endpoints. Non-functional requirements decide the architecture. Two systems with identical functional requirements and different latency targets look nothing alike: "the feed loads in 200 ms at p99" pushes you toward precomputing the feed once fan-out is large enough that a read-time merge cannot hit that budget, while "the feed loads in about two seconds" lets you query at read time and skip an entire subsystem. Nobody volunteers that sentence. You have to ask for it.
 
 A quick filter when you are unsure which list something belongs on: could you write a test that passes or fails? If the test needs a threshold to be decidable, it is non-functional — and you are missing the threshold.
 
@@ -99,7 +99,9 @@ Both look like asking questions. The difference is whether the answer changes wh
 
 A clarifying question has a decision attached, and you can name the decision: "Do users need to see their own posts immediately after publishing? If yes, I will route an author's own reads around the cache." A stalling question enumerates features — hashtags, emoji, threading — where each answer adds a box and none of them changes the structure.
 
-In practice:
+The test is cheap to apply mid-sentence: if you cannot say what you would draw differently under each answer, you are filling time. And the cost is asymmetric — a stalling question spends the minutes you will want back later, while a clarifying question you skipped gets discovered at the point where it invalidates a diagram.
+
+## In an interview
 
 - **Time-box it.** Three to five minutes of a forty-five minute session. Roughly a tenth.
 - **Ask in priority order:** actors and core verbs, then scale, then the non-functional targets, then what is explicitly out of scope. Then stop.
