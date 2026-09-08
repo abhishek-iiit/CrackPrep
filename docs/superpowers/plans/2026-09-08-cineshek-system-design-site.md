@@ -5782,15 +5782,25 @@ export function SearchPalette({ topicCount }: { topicCount: number }) {
           ignoreLocation: true,
         });
       })
-      .catch(() => setDocs([]));
+      .catch(() => {
+        // Guard the failure path too: a stale rejection arriving after a fresher
+        // request succeeded would otherwise clobber an already-loaded index.
+        if (!cancelled) setDocs([]);
+      });
     return () => {
       cancelled = true;
     };
   }, [open, docs]);
 
+  // React runs every effect once on mount regardless of its dependency array,
+  // so an unguarded `else` here would call triggerRef.focus() on EVERY page
+  // load and steal focus onto the search button. wasOpen makes the restore
+  // fire only on a real open -> closed transition.
+  const wasOpen = useRef(false);
   useEffect(() => {
     if (open) inputRef.current?.focus();
-    else triggerRef.current?.focus(); // focus returns to the trigger on close
+    else if (wasOpen.current) triggerRef.current?.focus();
+    wasOpen.current = open;
   }, [open]);
 
   const results =
@@ -5819,6 +5829,11 @@ export function SearchPalette({ topicCount }: { topicCount: number }) {
     } else if (event.key === "Enter" && results[active]) {
       event.preventDefault();
       go(results[active].url);
+    } else if (event.key === "Tab") {
+      // aria-modal="true" promises focus stays inside. Only the input and the
+      // option buttons are focusable and arrows already drive selection, so
+      // trapping Tab on the input keeps that contract honest.
+      event.preventDefault();
     }
   }
 
@@ -5861,7 +5876,15 @@ export function SearchPalette({ topicCount }: { topicCount: number }) {
               }}
               placeholder={`Search ${topicCount} topics…`}
               autoComplete="off"
-              className="min-h-13 w-full border-b-2 border-structural bg-transparent px-4 text-base outline-none"
+              role="combobox"
+              aria-expanded
+              aria-controls="search-results"
+              // Focus never leaves the input while arrows move the selection, so without
+              // this a screen reader is never told which option is active.
+              aria-activedescendant={
+                results.length > 0 ? `search-option-${active}` : undefined
+              }
+              className="min-h-13 w-full border-b-2 border-structural bg-transparent px-4 text-base"
             />
 
             {docs === null ? (
@@ -5873,12 +5896,13 @@ export function SearchPalette({ topicCount }: { topicCount: number }) {
                   : `No lesson matches “${query}”.`}
               </p>
             ) : (
-              <ul role="listbox" aria-label="Search results" className="max-h-80 overflow-y-auto p-2">
+              <div id="search-results" role="listbox" aria-label="Search results" className="max-h-80 overflow-y-auto p-2">
                 {results.map((doc, i) => (
-                  <li key={doc.url}>
+                  <div key={doc.url}>
                     <button
                       type="button"
                       role="option"
+                      id={`search-option-${i}`}
                       aria-selected={i === active}
                       onMouseEnter={() => setActive(i)}
                       onClick={() => go(doc.url)}
@@ -5892,9 +5916,9 @@ export function SearchPalette({ topicCount }: { topicCount: number }) {
                         <span className="block truncate text-xs text-ink-muted">{doc.module}</span>
                       </span>
                     </button>
-                  </li>
+                  </div>
                 ))}
-              </ul>
+              </div>
             )}
           </div>
         </div>
