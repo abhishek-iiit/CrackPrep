@@ -37,9 +37,15 @@ describe("filesystem access is confined to the content source", () => {
     expect(src).not.toMatch(/require\(["'](node:)?fs["']\)/);
   });
 
+  // Matches IMPORTS, not any mention. A blind `not.toContain("gray-matter")`
+  // also fires on comments, which forces contributors to weaken accurate
+  // documentation to satisfy the guard — the exact opposite of what it is for.
+  // Kept symmetrical with the node:fs check above.
   it("keeps gray-matter out of pages and components", () => {
     for (const file of [...walk("app"), ...walk("components")]) {
-      expect(readFileSync(file, "utf8")).not.toContain("gray-matter");
+      const src = readFileSync(file, "utf8");
+      expect(src).not.toMatch(/from\s+["']gray-matter["']/);
+      expect(src).not.toMatch(/require\(["']gray-matter["']\)/);
     }
   });
 });
