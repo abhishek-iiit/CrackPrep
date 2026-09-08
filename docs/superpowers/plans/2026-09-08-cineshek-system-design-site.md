@@ -6,7 +6,7 @@
 
 **Architecture:** Next.js App Router, fully static. Content is MDX in `content/`, read only through the `lib/content` adapter so the storage backend is swappable. Design tokens live in TypeScript and are mirrored into CSS custom properties; a test enforces WCAG contrast on all of them. Server Components everywhere except six named client leaves.
 
-**Tech Stack:** Next.js 16.3.4, React 19.2.8, TypeScript 5, Tailwind CSS 4.3.3 (CSS-first `@theme`, no config file), `next-mdx-remote@6` (`/rsc`), Zod 4, Vitest 5, Playwright 1.63, `next-themes` 0.4, `lucide-react` 1.42.
+**Tech Stack:** Next.js 16.3.4, React 19.2.8, TypeScript 5, Tailwind CSS 4.3.3 (CSS-first `@theme`, no config file), `@mdx-js/mdx@3` (`evaluate`), Zod 4, Vitest 5, Playwright 1.63, `next-themes` 0.4, `lucide-react` 1.42.
 
 **Spec:** `docs/superpowers/specs/2026-09-08-cineshek-system-design-site-design.md`
 
@@ -19,7 +19,11 @@ A throwaway probe app was built end-to-end before this plan was written. These a
 1. **`next@16.3.4` / `react@19.2.8`** are current. `create-next-app` scaffolds Turbopack builds by default.
 2. **Tailwind v4 has no `tailwind.config.ts`.** Configuration is CSS-first: `@import "tailwindcss";` plus an `@theme` block in `globals.css`, with `@tailwindcss/postcss` as the only PostCSS plugin.
 3. **`PageProps<T>` / `LayoutProps<T>` are build-generated globals** written to `.next/types/`. They do not exist before the first `next build` or `next dev`, so `tsc --noEmit` fails on a clean checkout that uses them. **This plan therefore declares explicit local prop types**, which typecheck on a clean clone and in CI without a prior build.
-4. **`compileMDX` from `next-mdx-remote/rsc` works in Server Components** with `parseFrontmatter: true`, `remarkGfm`, and custom components, and prerenders to static HTML. Verified output included parsed frontmatter, a GFM table, and a custom `<Callout>` rendered as `<aside data-type="note">`.
+4. **`next-mdx-remote@6` SILENTLY DROPS every MDX expression attribute, and must not be used.** My first probe of it looked fine because the only custom component I passed took just `children`. Re-probed properly with attributes: `<T str="a" num={1} arr={["x"]} obj={{k:1}} tmpl={`a`} />` delivers only `{"str":"a"}` — numbers, booleans, arrays, objects and template literals are all dropped, with no error. Passing `format: "mdx"` or `development: false` changes nothing. Since `Tradeoff` and `KeyTakeaways` take array props and appear in all 179 generated stubs, every lesson page would have thrown `items.filter is not a function`.
+
+   **`@mdx-js/mdx`'s `evaluate()` handles them correctly** — the same input delivers `{"str":"a","num":1,"arr":["x","y"],"obj":{"k":1}}`. Verified end-to-end by rendering a real generated stub body through `evaluate()` with the full plugin chain and the real `mdxComponents` map: all components rendered, array props arrived intact, and the empty-item filtering behaved. Task 8 therefore uses `@mdx-js/mdx` directly.
+
+   Frontmatter parsing is not needed from the MDX layer at all: `lib/content/source.ts` already strips it with gray-matter and returns a clean `body`.
 5. **`Geist`, `Geist_Mono`, and `Geist_Pixel` are all live on Google Fonts** and importable from `next/font/google`. `Geist_Pixel` is single-weight and **requires `weight: "400"`**.
 6. **`Geist_Pixel` has no font-override metrics.** The build warns `Failed to find font override values for font 'Geist Pixel'. Skipping generating a fallback font.` Next cannot auto-generate a metric-matched fallback, so it is a CLS risk. Mitigation is mandatory and specified in Task 3.
 
@@ -127,7 +131,7 @@ rm -rf cineshek-scaffold-tmp
 - [ ] **Step 2: Install dependencies**
 
 ```bash
-npm install next-mdx-remote@^6 remark-gfm@^4 rehype-slug@^6 \
+npm install @mdx-js/mdx@^3 remark-gfm@^4 rehype-slug@^6 \
   rehype-autolink-headings@^7 rehype-pretty-code@^0.14 shiki@^4 \
   gray-matter@^4 zod@^4 next-themes@^0.4 lucide-react@^1 fuse.js@^7
 npm install -D vitest@^5 @vitejs/plugin-react@^6 jsdom@^30 \
@@ -2791,7 +2795,7 @@ with [hidden] so its layout slot stays stable."
 
 **Interfaces:**
 - Consumes: `cn` from Task 6.
-- Produces: `mdxComponents` — the component map passed to `compileMDX`; each component individually exported.
+- Produces: `mdxComponents` — the component map handed to the compiled MDX component at render time (Task 8); each component individually exported.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -3176,7 +3180,7 @@ import { KeyTakeaways } from "./KeyTakeaways";
 import { Step, Steps } from "./Steps";
 import { Tradeoff } from "./Tradeoff";
 
-/** Passed to compileMDX. Element overrides keep wide content inside its box. */
+/** Given to the compiled MDX body. Element overrides keep wide content inside its box. */
 export const mdxComponents = {
   Callout,
   Tradeoff,
@@ -3255,11 +3259,21 @@ the page never scrolls sideways."
   - `<LessonHeader lesson module />`, `<LessonNav prev next />`
   - 179 statically generated lesson routes.
 
-- [ ] **Step 1: Install the slugger**
+- [ ] **Step 1: Install the slugger and swap the MDX compiler**
+
+Task 1 installed `next-mdx-remote`, which must be replaced: it silently drops
+every MDX expression attribute, so `<Tradeoff forItems={[...]}>` and
+`<KeyTakeaways items={[...]}>` — present in all 179 stubs — would receive
+`undefined` and throw `items.filter is not a function`. `@mdx-js/mdx` (which
+`next-mdx-remote` merely wraps) passes them through correctly; I verified this
+end-to-end against a real generated stub.
 
 ```bash
-npm install github-slugger@^2
+npm install github-slugger@^2 @mdx-js/mdx@^3
+npm uninstall next-mdx-remote
 ```
+
+`github-slugger@2` ships its own `index.d.ts`, so no `@types` package is needed. It is the same slugger `rehype-slug` uses, which is why the table-of-contents ids will match the rendered heading ids exactly.
 
 `github-slugger@2` ships its own `index.d.ts`, so no `@types` package is needed. It is the same slugger `rehype-slug` uses, which is why the table of contents ids will match the rendered heading ids exactly.
 
@@ -3512,7 +3526,8 @@ export default function CourseLayout({ children }: { children: React.ReactNode }
 ```tsx
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
-import { compileMDX } from "next-mdx-remote/rsc";
+import { evaluate } from "@mdx-js/mdx";
+import * as jsxRuntime from "react/jsx-runtime";
 import rehypeAutolinkHeadings from "rehype-autolink-headings";
 import rehypePrettyCode from "rehype-pretty-code";
 import rehypeSlug from "rehype-slug";
@@ -3554,21 +3569,32 @@ export async function generateMetadata({
   };
 }
 
-// Deliberately not `as const`: that would make the plugin arrays readonly
-// tuples, and compileMDX expects a mutable PluggableList.
+/**
+ * MDX evaluation options.
+ *
+ * Uses `@mdx-js/mdx` directly rather than `next-mdx-remote`: that package
+ * silently drops every MDX expression attribute, so `<Tradeoff forItems={[...]}>`
+ * and `<KeyTakeaways items={[...]}>` — which appear in all 179 stubs — would
+ * receive `undefined` and throw. Verified: `evaluate()` passes arrays, numbers
+ * and objects through intact.
+ *
+ * No frontmatter option is needed. `lib/content/source.ts` already strips
+ * frontmatter with gray-matter, so `lesson.body` is clean MDX.
+ *
+ * Deliberately not `as const`: that would make the plugin arrays readonly
+ * tuples, and the plugin options expect a mutable PluggableList.
+ */
 const MDX_OPTIONS = {
-  parseFrontmatter: true,
-  mdxOptions: {
-    remarkPlugins: [remarkGfm],
-    rehypePlugins: [
-      rehypeSlug,
-      [rehypeAutolinkHeadings, { behavior: "wrap" }],
-      [
-        rehypePrettyCode,
-        { theme: { light: "github-light", dark: "github-dark" }, keepBackground: false },
-      ],
+  development: false,
+  remarkPlugins: [remarkGfm],
+  rehypePlugins: [
+    rehypeSlug,
+    [rehypeAutolinkHeadings, { behavior: "wrap" }],
+    [
+      rehypePrettyCode,
+      { theme: { light: "github-light", dark: "github-dark" }, keepBackground: false },
     ],
-  },
+  ],
 };
 
 export default async function LessonPage({ params }: { params: Promise<Params> }) {
@@ -3578,11 +3604,12 @@ export default async function LessonPage({ params }: { params: Promise<Params> }
   const lesson = getLesson(courseSlug, moduleSlug, topic);
   if (!mod || !lesson) notFound();
 
-  const { content } = await compileMDX({
-    source: lesson.body,
-    components: mdxComponents,
-    options: MDX_OPTIONS,
-  });
+  // evaluate() compiles and evaluates the MDX at build time and returns a
+  // component; `components` is supplied at render, not compile, time.
+  const { default: MDXBody } = await evaluate(lesson.body, {
+    ...jsxRuntime,
+    ...MDX_OPTIONS,
+  } as Parameters<typeof evaluate>[1]);
 
   const headings = extractHeadings(lesson.body);
   const { prev, next } = getLessonNeighbours(courseSlug, moduleSlug, topic);
@@ -3609,7 +3636,9 @@ export default async function LessonPage({ params }: { params: Promise<Params> }
 
       <article className="min-w-0">
         <LessonHeader lesson={lesson} module={mod} />
-        <div className="prose-lesson mt-8">{content}</div>
+        <div className="prose-lesson mt-8">
+          <MDXBody components={mdxComponents} />
+        </div>
         <ProgressTracker lessonKey={`${moduleSlug}/${topic}`} />
         <LessonNav prev={prev} next={next} />
       </article>
