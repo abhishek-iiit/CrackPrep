@@ -61,9 +61,19 @@ describe("TableOfContents", () => {
     expect(screen.getByRole("link", { name: "A detail" })).toHaveAttribute("href", "#a-detail");
   });
 
-  it("indents level-3 headings", () => {
+  it("indents level-3 headings further than level-2", () => {
+    // Asserting only /pl-/ would pass even if both levels collapsed to the
+    // same padding, which is the failure this test exists to catch.
     render(<TableOfContents headings={HEADINGS} />);
-    expect(screen.getByRole("link", { name: "A detail" }).className).toMatch(/pl-/);
+    expect(screen.getByRole("link", { name: "The problem" }).className).toMatch(/\bpl-3\b/);
+    expect(screen.getByRole("link", { name: "A detail" }).className).toMatch(/\bpl-6\b/);
+  });
+
+  it("bounds its own height so a long contents list stays reachable", () => {
+    render(<TableOfContents headings={HEADINGS} />);
+    const nav = screen.getByRole("navigation", { name: /on this page/i });
+    expect(nav.className).toMatch(/overflow-y-auto/);
+    expect(nav.className).toMatch(/max-h-/);
   });
 
   it("renders nothing when there are no headings", () => {

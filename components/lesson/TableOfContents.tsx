@@ -44,7 +44,14 @@ export function TableOfContents({
   return (
     <nav
       aria-label="On this page"
-      className={cn("self-start xl:sticky xl:top-20", className)}
+      // max-h + overflow mirrors SidebarTree. Without it a lesson with many
+      // headings runs past the sticky viewport with no way to reach the tail —
+      // currently masked because stubs have at most 4 headings, but Task 16
+      // writes real lessons with far more.
+      className={cn(
+        "self-start xl:sticky xl:top-20 xl:max-h-[calc(100dvh-6rem)] xl:overflow-y-auto",
+        className,
+      )}
     >
       <p className="font-mono text-xs uppercase tracking-wider text-ink-muted">
         On this page
@@ -56,7 +63,9 @@ export function TableOfContents({
               href={`#${heading.id}`}
               aria-current={activeId === heading.id ? "location" : undefined}
               className={cn(
-                "-ml-0.5 block border-l-2 py-1 pr-2 text-sm transition-brut hover:text-ink",
+                // py-2 gives a 36px target: comfortably past WCAG 2.5.8's
+                // 24px minimum without the density cost of forcing 44px.
+                "-ml-0.5 block border-l-2 py-2 pr-2 text-sm transition-brut hover:text-ink",
                 heading.level === 3 ? "pl-6" : "pl-3",
                 activeId === heading.id
                   ? "border-structural font-medium text-ink"
