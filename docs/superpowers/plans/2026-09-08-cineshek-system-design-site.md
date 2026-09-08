@@ -131,6 +131,14 @@ npm install -D vitest@^5 @vitejs/plugin-react@^6 jsdom@^30 \
   vite-tsconfig-paths@^6 @playwright/test@^1.63 @axe-core/playwright@^4 tsx@^4
 ```
 
+`vitest@5` requires `@types/node@^22`, while `create-next-app` pins `^20`. Bump
+the existing devDependency rather than passing `--legacy-peer-deps`, which
+"resolves" the peer conflict by skipping the install of `vite` itself:
+
+```bash
+npm install -D @types/node@^22
+```
+
 - [ ] **Step 3: Set `package.json` name and scripts**
 
 Replace the `"name"` and `"scripts"` blocks:
