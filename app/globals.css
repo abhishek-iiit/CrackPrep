@@ -123,3 +123,19 @@
     scroll-behavior: auto !important;
   }
 }
+
+/* rehype-pretty-code dual themes: tokens carry both colours, CSS picks one. */
+html:not(.dark) [data-rehype-pretty-code-figure] span {
+  color: var(--shiki-light);
+}
+html.dark [data-rehype-pretty-code-figure] span {
+  color: var(--shiki-dark);
+}
+[data-rehype-pretty-code-figure] pre {
+  background: transparent;
+}
+/* Autolinked headings must not look like body links. */
+.prose-lesson :is(h2, h3) a {
+  color: inherit;
+  text-decoration: none;
+}
