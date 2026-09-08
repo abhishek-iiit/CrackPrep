@@ -106,18 +106,18 @@ Files that change together live together: each component owns its markup and sty
 
 - [ ] **Step 1: Scaffold the app in place**
 
-The repo root already contains `SDsyllabus.md` and `docs/`, so scaffold into a temp directory and move the files in. Run from the repo root:
+The repo root already contains `SDsyllabus.md` and `docs/`, so scaffold into a temp directory and move the files in. The directory name must not begin with a dot — `create-next-app` validates it as an npm package name and rejects leading dots. Run from the repo root:
 
 ```bash
-npx --yes create-next-app@latest .cineshek-scaffold \
+npx --yes create-next-app@latest cineshek-scaffold-tmp \
   --typescript --tailwind --app --no-src-dir --no-import-alias \
   --use-npm --skip-install --disable-git --yes
-cp -R .cineshek-scaffold/app .cineshek-scaffold/public .
-cp .cineshek-scaffold/package.json .cineshek-scaffold/next.config.ts \
-   .cineshek-scaffold/postcss.config.mjs .cineshek-scaffold/tsconfig.json \
-   .cineshek-scaffold/eslint.config.mjs .cineshek-scaffold/next-env.d.ts \
-   .cineshek-scaffold/.gitignore .
-rm -rf .cineshek-scaffold
+cp -R cineshek-scaffold-tmp/app cineshek-scaffold-tmp/public .
+cp cineshek-scaffold-tmp/package.json cineshek-scaffold-tmp/next.config.ts \
+   cineshek-scaffold-tmp/postcss.config.mjs cineshek-scaffold-tmp/tsconfig.json \
+   cineshek-scaffold-tmp/eslint.config.mjs cineshek-scaffold-tmp/next-env.d.ts \
+   cineshek-scaffold-tmp/.gitignore .
+rm -rf cineshek-scaffold-tmp
 ```
 
 - [ ] **Step 2: Install dependencies**
