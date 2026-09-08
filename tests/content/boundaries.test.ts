@@ -50,10 +50,11 @@ describe("filesystem access is confined to the content source", () => {
   });
 });
 
-describe("client components are limited to the six named leaves", () => {
+describe("client components are limited to the seven named leaves", () => {
   const ALLOWED_CLIENT = new Set([
     "ThemeToggle", "AnnouncementBar", "SidebarTree",
     "TableOfContents", "ProgressTracker", "SearchPalette",
+    "error", // Next.js requires error boundaries to be client components
   ]);
 
   it("declares 'use client' only in allowed files", () => {

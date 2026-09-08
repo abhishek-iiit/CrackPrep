@@ -23,6 +23,7 @@ type Props = {
   className?: string;
   type?: "button" | "submit";
   "aria-label"?: string;
+  onClick?: () => void;
 };
 
 export function Button({

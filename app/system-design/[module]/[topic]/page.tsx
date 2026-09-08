@@ -7,6 +7,7 @@ import rehypePrettyCode from "rehype-pretty-code";
 import rehypeSlug from "rehype-slug";
 import remarkGfm from "remark-gfm";
 import { mdxComponents } from "@/components/mdx";
+import { CourseJsonLd } from "@/components/seo/CourseJsonLd";
 import { LessonHeader } from "@/components/lesson/LessonHeader";
 import { LessonNav } from "@/components/lesson/LessonNav";
 import { ProgressTracker } from "@/components/lesson/ProgressTracker";
@@ -109,6 +110,7 @@ export default async function LessonPage({ params }: { params: Promise<Params> }
       />
 
       <article className="min-w-0">
+        <CourseJsonLd lesson={lesson} module={mod} />
         <LessonHeader lesson={lesson} module={mod} />
         <div className="prose-lesson mt-8">
           <MDXBody components={mdxComponents} />
