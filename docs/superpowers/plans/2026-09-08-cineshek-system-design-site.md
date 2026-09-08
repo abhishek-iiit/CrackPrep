@@ -45,7 +45,7 @@ Every task's requirements implicitly include this section. Values are copied ver
 
 **Border rule.** Hairline tokens are decorative separators **only** — they fail 3:1 by design. Every boundary conveying a UI component (card edge, button, input, focus ring) uses `--border-structural` at 2px.
 
-**Typography.** `Geist Pixel` display accent only, never body text. `Geist` headings and UI. `Geist Mono` code, numbers, `NN.NN` labels. Long-form body **17px at line-height 1.7**. Prose column capped at **68ch**.
+**Typography.** `Geist Pixel` display accent only, never body text. `Geist` headings and UI. `Geist Mono` code, numbers, `NN.NN` labels. Long-form body **17px at line-height 1.7**. Prose column capped at **68ch** — Tailwind v4's built-in `--max-width-prose` is 65ch, so it is overridden in `@theme`; every use of the measure, the `max-w-prose` utility included, must resolve to 68ch.
 
 **Style.** Refined neo-brutalism: 0–4px radius, 2px visible borders, hard offset shadows `4px 4px 0 var(--border-structural)`, bold display type. Transitions **150–200ms** on hover/focus/colour — never `0s`. Never animate `width` or `height`; transforms and opacity only.
 
@@ -642,7 +642,11 @@ Each of `:root`, `.dark`, and `@theme inline` must appear as a rule whose select
   --font-pixel: var(--font-geist-pixel), var(--font-geist-mono), ui-monospace, monospace;
 
   --radius-card: 4px;
-  --spacing-prose: 68ch;
+
+  /* Tailwind v4 ships --max-width-prose: 65ch. The spec fixes the measure at
+     68ch, so override it here: that keeps the `max-w-prose` utility and the
+     .prose-lesson class below on the same number instead of 65 vs 68. */
+  --max-width-prose: 68ch;
 }
 
 @layer base {
@@ -671,7 +675,7 @@ Each of `:root`, `.dark`, and `@theme inline` must appear as a rule whose select
   .prose-lesson {
     font-size: 17px;
     line-height: 1.7;
-    max-width: var(--spacing-prose);
+    max-width: var(--max-width-prose);
   }
 
   /* Geist Pixel ships without font-override metrics, so Next cannot generate a
