@@ -184,7 +184,13 @@ export default defineConfig({
   plugins: [react()],
   resolve: { tsconfigPaths: true },
   test: {
-    environment: "jsdom",
+    // "node", not "jsdom". Only 3 of the suite's test files need a DOM, and a
+    // global jsdom environment gets constructed once per file — measured at 9
+    // constructions consuming 75% of total test time, which also makes Vitest
+    // print an advisory that violates the warning-free-output gate. Files that
+    // need a DOM opt in with a `// @vitest-environment jsdom` docblock.
+    // Measured effect: advisory gone, suite 4.30s -> 1.19s.
+    environment: "node",
     setupFiles: ["./tests/setup.ts"],
     include: ["tests/**/*.test.{ts,tsx}"],
     exclude: ["tests/e2e/**"],
@@ -201,7 +207,7 @@ import "@testing-library/jest-dom/vitest";
 
 - [ ] **Step 6: Write the harness test**
 
-Create `tests/harness.test.tsx` — the `.tsx` extension is required because the file contains JSX. This proves the runner, the path alias, and TSX transformation all work before any real code depends on them.
+Create `tests/harness.test.tsx` — the `.tsx` extension is required because the file contains JSX. It needs a DOM, so it opens with a `// @vitest-environment jsdom` docblock (the suite default is `node`). This proves the runner, the path alias, and TSX transformation all work before any real code depends on them.
 
 First create `lib/cn.ts` — the alias assertion needs something real to import, and Task 6 needs this helper anyway:
 
@@ -214,6 +220,7 @@ export function cn(...parts: Array<string | false | null | undefined>): string {
 Then the harness test:
 
 ```tsx
+// @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { cn } from "@/lib/cn";
@@ -2370,9 +2377,10 @@ appears only in the six named leaf components."
 
 - [ ] **Step 1: Write the failing test**
 
-Create `tests/components/ui.test.tsx`:
+Create `tests/components/ui.test.tsx`. It renders components, so it must open with a `// @vitest-environment jsdom` docblock:
 
 ```tsx
+// @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { Badge } from "@/components/ui/Badge";
@@ -2805,9 +2813,10 @@ with [hidden] so its layout slot stays stable."
 
 - [ ] **Step 1: Write the failing test**
 
-Create `tests/components/mdx.test.tsx`:
+Create `tests/components/mdx.test.tsx`. It renders components, so it must open with a `// @vitest-environment jsdom` docblock:
 
 ```tsx
+// @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { Callout } from "@/components/mdx/Callout";
@@ -3327,6 +3336,30 @@ describe("extractHeadings", () => {
     expect(extractHeadings(body).map((h) => h.text)).toEqual(["visible"]);
   });
 
+  it("does not let a tilde line close a backtick fence", () => {
+    // CommonMark requires a matching delimiter. A boolean toggle would treat
+    // the "~~~" as a close and expose "## not a heading" below it.
+    const body = [
+      "```bash",
+      "~~~",
+      "## not a heading",
+      "```",
+      "",
+      "## real heading",
+    ].join("\n");
+    expect(extractHeadings(body).map((h) => h.text)).toEqual(["real heading"]);
+  });
+
+  it("does not let a backtick line close a tilde fence", () => {
+    const body = ["~~~", "```", "## not a heading", "~~~", "", "## real heading"].join("\n");
+    expect(extractHeadings(body).map((h) => h.text)).toEqual(["real heading"]);
+  });
+
+  it("handles fences longer than three characters", () => {
+    const body = ["````", "```", "## not a heading", "````", "", "## real heading"].join("\n");
+    expect(extractHeadings(body).map((h) => h.text)).toEqual(["real heading"]);
+  });
+
   it("strips inline markdown from heading text", () => {
     const body = "## The `memtable` and **WAL**\n";
     const [heading] = extractHeadings(body);
@@ -3358,7 +3391,7 @@ import GithubSlugger from "github-slugger";
 
 export type Heading = { id: string; text: string; level: 2 | 3 };
 
-const FENCE = /^(```|~~~)/;
+const FENCE = /^(`{3,}|~{3,})/;
 const HEADING = /^(#{2,3})\s+(.*\S)\s*$/;
 
 /** Removes inline code, emphasis, and link syntax from heading text. */
@@ -3383,14 +3416,23 @@ function plain(text: string): string {
 export function extractHeadings(body: string): Heading[] {
   const slugger = new GithubSlugger();
   const headings: Heading[] = [];
-  let inFence = false;
+
+  // Tracks WHICH delimiter opened the current fence, not merely that one is
+  // open. CommonMark requires the closing fence to use the same character, so
+  // a boolean toggle would let a "~~~" line inside a ```-fenced block close it
+  // early and expose the shell comments inside as headings.
+  let fenceChar: "`" | "~" | null = null;
 
   for (const line of body.split(/\r?\n/)) {
-    if (FENCE.test(line.trim())) {
-      inFence = !inFence;
+    const fence = FENCE.exec(line.trim());
+    if (fence) {
+      const char = fence[1][0] as "`" | "~";
+      if (fenceChar === null) fenceChar = char;
+      else if (fenceChar === char) fenceChar = null;
+      // A non-matching marker inside a fence is content — ignore it.
       continue;
     }
-    if (inFence) continue;
+    if (fenceChar !== null) continue;
 
     const match = HEADING.exec(line);
     if (!match) continue;
@@ -3608,7 +3650,7 @@ export default function CourseLayout({ children }: { children: React.ReactNode }
 ```tsx
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
-import { evaluate } from "@mdx-js/mdx";
+import { evaluate, type EvaluateOptions } from "@mdx-js/mdx";
 import * as jsxRuntime from "react/jsx-runtime";
 import rehypeAutolinkHeadings from "rehype-autolink-headings";
 import rehypePrettyCode from "rehype-pretty-code";
@@ -3677,7 +3719,7 @@ const MDX_OPTIONS = {
       { theme: { light: "github-light", dark: "github-dark" }, keepBackground: false },
     ],
   ],
-};
+} satisfies Partial<EvaluateOptions>;
 
 export default async function LessonPage({ params }: { params: Promise<Params> }) {
   const { module: moduleSlug, topic } = await params;
@@ -3691,7 +3733,7 @@ export default async function LessonPage({ params }: { params: Promise<Params> }
   const { default: MDXBody } = await evaluate(lesson.body, {
     ...jsxRuntime,
     ...MDX_OPTIONS,
-  } as Parameters<typeof evaluate>[1]);
+  } as EvaluateOptions);
 
   const headings = extractHeadings(lesson.body);
   const { prev, next } = getLessonNeighbours(courseSlug, moduleSlug, topic);
@@ -3797,9 +3839,10 @@ so shell comments are not mistaken for headings."
 
 - [ ] **Step 1: Write the failing test**
 
-Create `tests/components/lesson-nav.test.tsx`:
+Create `tests/components/lesson-nav.test.tsx`. It renders components, so it must open with a `// @vitest-environment jsdom` docblock:
 
 ```tsx
+// @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { SidebarTree } from "@/components/lesson/SidebarTree";
@@ -4133,9 +4176,10 @@ sticky header so headings activate after clearing the chrome."
 
 - [ ] **Step 1: Write the failing test**
 
-Create `tests/components/progress.test.tsx`:
+Create `tests/components/progress.test.tsx`. It renders components and touches `window.localStorage`, so it must open with a `// @vitest-environment jsdom` docblock:
 
 ```tsx
+// @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, render, screen } from "@testing-library/react";
 import { ProgressTracker } from "@/components/lesson/ProgressTracker";
@@ -4437,9 +4481,10 @@ degrades to 'no progress recorded' instead of throwing."
 
 - [ ] **Step 1: Write the failing test**
 
-Create `tests/components/module-card.test.tsx`:
+Create `tests/components/module-card.test.tsx`. It renders components, so it must open with a `// @vitest-environment jsdom` docblock:
 
 ```tsx
+// @vitest-environment jsdom
 import { describe, expect, it } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { ModuleCard } from "@/components/course/ModuleCard";
@@ -4851,9 +4896,10 @@ git commit -m "feat: add full syllabus index with module jump links"
 
 - [ ] **Step 1: Write the failing test**
 
-Create `tests/components/landing.test.tsx`:
+Create `tests/components/landing.test.tsx`. It renders components, so it must open with a `// @vitest-environment jsdom` docblock:
 
 ```tsx
+// @vitest-environment jsdom
 import { describe, expect, it, vi, afterEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { PathCards } from "@/components/landing/PathCards";
