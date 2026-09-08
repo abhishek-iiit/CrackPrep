@@ -8,6 +8,10 @@ const PAGES = [
   "/system-design",
   "/system-design/storage-engines",
   "/system-design/storage-engines/lsm-tree-storage-engine",
+  // Only page in PAGES with a Formula (role="math") block — two of them, plus
+  // a second code sample — so this is the only coverage for the tabIndex fix
+  // made on components/mdx/Formula.tsx and CodeBlock.tsx's scroll-x wrappers.
+  "/system-design/nosql-partitioning-ids/bloom-filters",
 ];
 
 const WCAG_AA = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"];
@@ -40,15 +44,35 @@ test("the open search dialog has no critical or serious axe violations", async (
   // combobox at all. Both of its ARIA IDREFs (aria-controls,
   // aria-activedescendant) are only present while it is open, and a dangling
   // IDREF is exactly what axe's aria-valid-attr-value catches — so the dialog
-  // needs its own scan. Scanned in the zero-results state too, because with no
-  // query typed that is the state every open lands in.
+  // needs its own scan, across all three states it can render.
   await page.goto("/system-design");
+  // Wait for hydration before dispatching Cmd+K: the shortcut listener is
+  // attached in a useEffect on `window`, outside React's delegated root, so a
+  // keydown that arrives before the effect runs is silently dropped and never
+  // retried (unlike a click, which React replays against the pre-hydration DOM).
+  await expect(
+    page.getByRole("button", { name: /switch to (dark|light) theme/i }),
+  ).toBeVisible();
   await page.keyboard.press("ControlOrMeta+k");
   await expect(page.getByRole("dialog", { name: /search lessons/i })).toBeVisible();
+
+  // Empty query, index already loaded: results = docs.slice(0, 8) — a
+  // POPULATED listbox with both IDREFs present. (This is not the
+  // zero-results state; an earlier version of this comment claimed it was.)
+  await expect(page.getByRole("option").first()).toBeVisible();
   await expectClean(page);
 
   await page.keyboard.type("bloom");
   await expect(page.getByRole("option").first()).toBeVisible();
+  await expectClean(page);
+
+  // The actual zero-results state: hasOptions === false, so aria-controls and
+  // aria-activedescendant are both omitted from the combobox. Never scanned
+  // before this — a dangling IDREF can't occur here, but a missing one that
+  // should be present could.
+  await page.keyboard.press("ControlOrMeta+a");
+  await page.keyboard.type("zzzzzz");
+  await expect(page.getByText(/No lesson matches/)).toBeVisible();
   await expectClean(page);
 });
 

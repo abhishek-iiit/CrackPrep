@@ -49,7 +49,10 @@ test("all 14 module cards link somewhere real", async ({ page }) => {
   await page.goto("/system-design");
   const links = page.locator("ul li a[href^='/system-design/']");
   await expect(links).toHaveCount(14);
-  for (const href of await links.evaluateAll((els) => els.map((e) => e.getAttribute("href")))) {
+  const hrefs = await links.evaluateAll((els) => els.map((e) => e.getAttribute("href")));
+  // 14 cards pointing at the same href would also satisfy toHaveCount(14).
+  expect(new Set(hrefs).size).toBe(14);
+  for (const href of hrefs) {
     const response = await page.request.get(href!);
     expect(response.status(), `${href} should resolve`).toBe(200);
   }
