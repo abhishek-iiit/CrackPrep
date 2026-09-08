@@ -69,6 +69,33 @@ Every task's requirements implicitly include this section. Values are copied ver
 
 **Lint.** `npm run lint` must exit 0 and is part of the `verify` gate. Never silence a rule with a disable comment or by relaxing config — fix the cause. In particular `react-hooks/set-state-in-effect` is an error here: read browser-only state through `useMounted()` / `useSyncExternalStore`, not `useState` + `useEffect`.
 
+**Warning-free test output — scope of the rule.** `npm test` must be free of
+warnings *about the code and its correctness*: React warnings, deprecation
+notices, unhandled rejections, act() warnings, duplicate-key warnings. It does
+**not** extend to Vitest's own performance hints about how the runner is
+configured, and those must never be silenced by weakening test isolation.
+
+Specifically, this advisory is **accepted and must be left alone**:
+
+```
+Isolate  N workers spawned · ~690ms startup each (spawn + environment, per file)
+         at least ~296ms faster with isolate: false — reuses workers across files
+```
+
+Do NOT set `isolate: false` or `pool: "vmThreads"` to remove it. Isolation is
+load-bearing here: `tests/components/progress.test.tsx` uses
+`vi.spyOn(window.localStorage, …)` and `vi.restoreAllMocks()` against a
+module-level mutable store (`let completed`, `let snapshot`, `const listeners`),
+and `tests/components/landing.test.tsx` uses `vi.stubEnv` / `vi.unstubAllEnvs`.
+Sharing workers across files puts that state at risk of leaking between files
+for a measured saving of ~296ms on a ~2s suite — a bad trade.
+
+The contrast with the jsdom advisory is the point: that one had a legitimate
+fix (right-size the environment per file), which removed it *and* made the
+suite 3.6x faster. This one's only lever is weakening isolation semantics. A
+constraint that can only be satisfied by giving up a correctness guarantee is a
+badly written constraint, so it is scoped out here rather than obeyed.
+
 ---
 
 ## File structure
