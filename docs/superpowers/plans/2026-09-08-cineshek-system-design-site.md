@@ -3837,6 +3837,7 @@ so shell comments are not mistaken for headings."
 
 **Files:**
 - Replace (Task 8 created typed placeholders): `components/lesson/SidebarTree.tsx`, `components/lesson/TableOfContents.tsx`
+- Modify: `tests/setup.ts` (add the IntersectionObserver stub — Step 0)
 - Create: `tests/components/lesson-nav.test.tsx`
 - Test: `tests/components/lesson-nav.test.tsx`
 
@@ -3845,6 +3846,46 @@ so shell comments are not mistaken for headings."
 - Produces:
   - `<SidebarTree modules currentModule currentLesson />` with `SidebarModule = { id, slug, title, colorKey, lessons: SidebarLesson[] }` and `SidebarLesson = { slug, number, title, url, status }`
   - `<TableOfContents headings className? />`
+
+- [ ] **Step 0: Add the `IntersectionObserver` stub to `tests/setup.ts`**
+
+Mandatory, not conditional. jsdom 30 ships no `IntersectionObserver` (verified),
+and `TableOfContents` constructs one. `setupFiles` runs for every test file
+including node-environment ones, so the stub touches only `globalThis` and
+never `window`, and it is guarded so a future jsdom that provides the real
+thing wins.
+
+Replace `tests/setup.ts` with:
+
+```ts
+import "@testing-library/jest-dom/vitest";
+
+// jsdom 30 has no IntersectionObserver, and TableOfContents constructs one.
+// Guarded so a jsdom release that provides the real implementation wins.
+if (!("IntersectionObserver" in globalThis)) {
+  class IntersectionObserverStub implements IntersectionObserver {
+    readonly root = null;
+    readonly rootMargin = "";
+    readonly thresholds: readonly number[] = [];
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+    takeRecords(): IntersectionObserverEntry[] {
+      return [];
+    }
+  }
+  Object.defineProperty(globalThis, "IntersectionObserver", {
+    value: IntersectionObserverStub,
+    writable: true,
+    configurable: true,
+  });
+}
+```
+
+The stub deliberately never fires a callback: the scroll-spy's *active* heading
+is browser behaviour and is covered by the Playwright test in Task 17
+("table of contents jumps to the matching heading"). These unit tests cover the
+markup, the anchors, the indentation and the landmark — not scroll position.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -4137,24 +4178,15 @@ export function TableOfContents({
 - [ ] **Step 5: Run the test to verify it passes**
 
 Run: `npx vitest run tests/components/lesson-nav.test.tsx`
-Expected: PASS — 9 tests. jsdom has no `IntersectionObserver`, but the effect returns early only when there are no headings; if a test errors on the constructor, add a stub to `tests/setup.ts`:
+Expected: PASS — 9 tests.
 
-```ts
-import "@testing-library/jest-dom/vitest";
+This only passes because of Step 0 below. **jsdom 30 does not implement
+`IntersectionObserver`** — I verified this directly: asserting
+`"IntersectionObserver" in globalThis` inside a jsdom-environment test fails.
+`TableOfContents` constructs one in an effect, so without a stub the test
+throws on the constructor. Do Step 0 first, not "if a test errors".
 
-if (!("IntersectionObserver" in globalThis)) {
-  class Stub {
-    observe() {}
-    unobserve() {}
-    disconnect() {}
-    takeRecords() { return []; }
-    root = null;
-    rootMargin = "";
-    thresholds: number[] = [];
-  }
-  Object.defineProperty(globalThis, "IntersectionObserver", { value: Stub, writable: true });
-}
-```
+
 
 - [ ] **Step 6: Commit**
 
