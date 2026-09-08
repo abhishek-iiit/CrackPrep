@@ -4542,7 +4542,7 @@ The helper text is not decoration — it is the honest statement that there is n
 - [ ] **Step 6: Run the test to verify it passes**
 
 Run: `npx vitest run tests/components/progress.test.tsx`
-Expected: PASS — 11 tests.
+Expected: PASS — 13 tests (the brief previously said 11; the code below yields 13).
 
 - [ ] **Step 7: Commit**
 
