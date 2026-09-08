@@ -8,6 +8,20 @@ const EXPECTED_COUNTS: Record<string, number> = {
   "08": 10, "09": 17, "10": 13, "11": 12, "12": 8, "13": 11, "14": 15,
 };
 
+/**
+ * The required module order, written out literally.
+ *
+ * Do NOT derive this from `Object.keys(EXPECTED_COUNTS)`. In JavaScript,
+ * "10".."14" are canonical array indices and are enumerated BEFORE the
+ * non-canonical string keys "01".."09", so Object.keys returns
+ * ["10","11","12","13","14","01",...,"09"]. Asserting against that would
+ * demand the curriculum start at module 10.
+ */
+const EXPECTED_ORDER = [
+  "01", "02", "03", "04", "05", "06", "07",
+  "08", "09", "10", "11", "12", "13", "14",
+];
+
 describe("slugify", () => {
   it("lowercases and hyphenates", () => {
     expect(slugify("Requirements Clarification")).toBe("requirements-clarification");
@@ -38,8 +52,16 @@ describe("parseSyllabus on the real curriculum", () => {
     expect(parsed.totalTopics).toBe(179);
   });
 
-  it("returns modules in id order", () => {
-    expect(parsed.modules.map((m) => m.id)).toEqual(Object.keys(EXPECTED_COUNTS));
+  it("returns modules in ascending id order, starting at Foundations", () => {
+    expect(parsed.modules.map((m) => m.id)).toEqual(EXPECTED_ORDER);
+  });
+
+  it("puts module 01 first and module 14 last", () => {
+    // The curriculum's whole value is that it is sequenced, so this is a
+    // product requirement, not a tidiness preference.
+    expect(parsed.modules[0].id).toBe("01");
+    expect(parsed.modules[0].title).toBe("Foundations");
+    expect(parsed.modules[13].id).toBe("14");
   });
 
   it.each(Object.entries(EXPECTED_COUNTS))(

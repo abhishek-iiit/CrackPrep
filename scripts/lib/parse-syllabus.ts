@@ -137,19 +137,7 @@ export function parseSyllabus(raw: string): ParsedSyllabus {
   }
 
   const modules: ParsedModule[] = Array.from(drafts.values())
-    .sort((a, b) => {
-      // Replicate JavaScript's Object.keys behavior: canonical numeric keys (e.g., "10")
-      // are array indices and sort first numerically, then string keys (e.g., "01") sort by number.
-      const aNum = Number(a.id);
-      const bNum = Number(b.id);
-      const aIsCanonicalNumeric = String(aNum) === a.id;
-      const bIsCanonicalNumeric = String(bNum) === b.id;
-
-      if (aIsCanonicalNumeric !== bIsCanonicalNumeric) {
-        return aIsCanonicalNumeric ? -1 : 1;
-      }
-      return aNum - bNum;
-    })
+    .sort((a, b) => a.id.localeCompare(b.id)) // Ascending order: "01" < "02" < ... < "14"
     .map((d) => {
       const topics = [...d.topics.values()].sort((a, b) =>
         a.number.localeCompare(b.number),
