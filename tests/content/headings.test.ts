@@ -37,6 +37,30 @@ describe("extractHeadings", () => {
     expect(extractHeadings(body).map((h) => h.text)).toEqual(["visible"]);
   });
 
+  it("does not let a tilde line close a backtick fence", () => {
+    // CommonMark requires a matching delimiter. A boolean toggle would treat
+    // the "~~~" as a close and expose "## not a heading" below it.
+    const body = [
+      "```bash",
+      "~~~",
+      "## not a heading",
+      "```",
+      "",
+      "## real heading",
+    ].join("\n");
+    expect(extractHeadings(body).map((h) => h.text)).toEqual(["real heading"]);
+  });
+
+  it("does not let a backtick line close a tilde fence", () => {
+    const body = ["~~~", "```", "## not a heading", "~~~", "", "## real heading"].join("\n");
+    expect(extractHeadings(body).map((h) => h.text)).toEqual(["real heading"]);
+  });
+
+  it("handles fences longer than three characters", () => {
+    const body = ["````", "```", "## not a heading", "````", "", "## real heading"].join("\n");
+    expect(extractHeadings(body).map((h) => h.text)).toEqual(["real heading"]);
+  });
+
   it("strips inline markdown from heading text", () => {
     const body = "## The `memtable` and **WAL**\n";
     const [heading] = extractHeadings(body);

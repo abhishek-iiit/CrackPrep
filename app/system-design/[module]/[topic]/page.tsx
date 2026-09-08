@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
-import { evaluate } from "@mdx-js/mdx";
+import { evaluate, type EvaluateOptions } from "@mdx-js/mdx";
 import * as jsxRuntime from "react/jsx-runtime";
 import rehypeAutolinkHeadings from "rehype-autolink-headings";
 import rehypePrettyCode from "rehype-pretty-code";
@@ -69,7 +69,7 @@ const MDX_OPTIONS = {
       { theme: { light: "github-light", dark: "github-dark" }, keepBackground: false },
     ],
   ],
-};
+} satisfies Partial<EvaluateOptions>;
 
 export default async function LessonPage({ params }: { params: Promise<Params> }) {
   const { module: moduleSlug, topic } = await params;
@@ -83,7 +83,7 @@ export default async function LessonPage({ params }: { params: Promise<Params> }
   const { default: MDXBody } = await evaluate(lesson.body, {
     ...jsxRuntime,
     ...MDX_OPTIONS,
-  } as Parameters<typeof evaluate>[1]);
+  } as EvaluateOptions);
 
   const headings = extractHeadings(lesson.body);
   const { prev, next } = getLessonNeighbours(courseSlug, moduleSlug, topic);

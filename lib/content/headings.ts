@@ -2,7 +2,7 @@ import GithubSlugger from "github-slugger";
 
 export type Heading = { id: string; text: string; level: 2 | 3 };
 
-const FENCE = /^(```|~~~)/;
+const FENCE = /^(`{3,}|~{3,})/;
 const HEADING = /^(#{2,3})\s+(.*\S)\s*$/;
 
 /** Removes inline code, emphasis, and link syntax from heading text. */
@@ -27,14 +27,31 @@ function plain(text: string): string {
 export function extractHeadings(body: string): Heading[] {
   const slugger = new GithubSlugger();
   const headings: Heading[] = [];
-  let inFence = false;
+
+  // Tracks WHICH delimiter opened the current fence and HOW LONG it was, not
+  // merely that one is open. CommonMark requires the closing fence to use the
+  // same character AND be at least as long as the opening one — a character-only
+  // check would let a shorter "```" line inside a "````"-opened block close it
+  // early and expose the shell comments inside as headings.
+  let fenceChar: "`" | "~" | null = null;
+  let fenceLen = 0;
 
   for (const line of body.split(/\r?\n/)) {
-    if (FENCE.test(line.trim())) {
-      inFence = !inFence;
+    const fence = FENCE.exec(line.trim());
+    if (fence) {
+      const marker = fence[1];
+      const char = marker[0] as "`" | "~";
+      if (fenceChar === null) {
+        fenceChar = char;
+        fenceLen = marker.length;
+      } else if (fenceChar === char && marker.length >= fenceLen) {
+        fenceChar = null;
+        fenceLen = 0;
+      }
+      // A non-matching or too-short marker inside a fence is content — ignore it.
       continue;
     }
-    if (inFence) continue;
+    if (fenceChar !== null) continue;
 
     const match = HEADING.exec(line);
     if (!match) continue;
