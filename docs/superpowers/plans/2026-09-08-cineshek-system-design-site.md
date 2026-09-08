@@ -2186,11 +2186,12 @@ appears only in the six named leaf components."
 ## Task 6: UI primitives and layout chrome
 
 **Files:**
-- Create: `lib/cn.ts`, `components/ui/Button.tsx`, `components/ui/Card.tsx`, `components/ui/Pill.tsx`, `components/ui/Badge.tsx`, `components/layout/Header.tsx`, `components/layout/Footer.tsx`, `components/layout/AnnouncementBar.tsx`, `tests/components/ui.test.tsx`
+- Create: `components/ui/Button.tsx`, `components/ui/Card.tsx`, `components/ui/Pill.tsx`, `components/ui/Badge.tsx`, `components/layout/Header.tsx`, `components/layout/Footer.tsx`, `components/layout/AnnouncementBar.tsx`, `components/search/SearchPalette.tsx` (placeholder), `tests/components/ui.test.tsx`
+- Already exists from Task 1: `lib/cn.ts` — verify, do not recreate
 - Test: `tests/components/ui.test.tsx`
 
 **Interfaces:**
-- Consumes: `ThemeToggle` from Task 3; `getCourseStats` from Task 5.
+- Consumes: `ThemeToggle` from Task 3; `getCourseStats`, `Status` from Task 5; `cn` from `lib/cn.ts`, which **Task 1 already created** while proving the path alias.
 - Produces: `cn(...)`; `<Button variant href? size?>`, `<Card as? colorKey? interactive?>`, `<Pill tone?>`, `<Badge status>`, `<Header />`, `<Footer />`, `<AnnouncementBar id message href? cta? />`.
 
 - [ ] **Step 1: Write the failing test**
@@ -2269,13 +2270,17 @@ The Badge tests encode the "never rely on colour alone" rule: a draft is identif
 Run: `npx vitest run tests/components/ui.test.tsx`
 Expected: FAIL — unresolved imports.
 
-- [ ] **Step 3: Create `lib/cn.ts`**
+- [ ] **Step 3: Verify `lib/cn.ts` already exists**
+
+Task 1 created this file to prove the `@/*` alias resolves in Vitest. Do not recreate it — confirm it reads exactly:
 
 ```ts
 export function cn(...parts: Array<string | false | null | undefined>): string {
   return parts.filter(Boolean).join(" ");
 }
 ```
+
+If it differs, reconcile to the above, since the `cn` test in Step 1 asserts this behaviour.
 
 - [ ] **Step 4: Create `components/ui/Button.tsx`**
 
