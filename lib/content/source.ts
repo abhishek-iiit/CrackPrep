@@ -26,13 +26,34 @@ function readLessonFile(dir: string, file: string) {
   return { frontmatter: result.data, body: parsed.content };
 }
 
-let cache: Module[] | null = null;
+let cache: readonly Module[] | null = null;
+
+/**
+ * Recursively freezes the module tree.
+ *
+ * The cache is a process-wide singleton and Next reuses one process across many
+ * static-generation calls, so handing it out by reference would let any caller
+ * corrupt it for every later page with one in-place `.sort()`. Freezing costs
+ * nothing per call (unlike copying on every read) and turns that silent
+ * corruption into an immediate TypeError at the offending call site.
+ *
+ * A shallow freeze is NOT enough — the nested `lessons` arrays and the lesson
+ * objects inside them stay mutable unless frozen individually.
+ */
+function freezeModules(modules: Module[]): readonly Module[] {
+  for (const mod of modules) {
+    for (const lesson of mod.lessons) Object.freeze(lesson);
+    Object.freeze(mod.lessons);
+    Object.freeze(mod);
+  }
+  return Object.freeze(modules);
+}
 
 /** Builds the full module tree once per process. Metadata only — no bodies. */
-export function loadModules(): Module[] {
+export function loadModules(): readonly Module[] {
   if (cache) return cache;
 
-  cache = moduleRecords.map((record) => {
+  const built: Module[] = moduleRecords.map((record) => {
     const validated = moduleRecordSchema.parse(record);
 
     const files = readdirSync(join(CONTENT_ROOT, validated.dir))
@@ -73,6 +94,7 @@ export function loadModules(): Module[] {
     };
   });
 
+  cache = freezeModules(built);
   return cache;
 }
 

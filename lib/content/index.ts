@@ -30,7 +30,10 @@ export function getCourse(slug: string): Course | null {
   return getCourses().find((c) => c.slug === slug) ?? null;
 }
 
-export function getModules(course: string): Module[] {
+// Returns readonly views: the underlying tree is a frozen process-wide cache,
+// so the types tell callers to copy before sorting rather than discovering it
+// as a TypeError at runtime.
+export function getModules(course: string): readonly Module[] {
   return isLive(course) ? loadModules() : [];
 }
 
@@ -38,7 +41,7 @@ export function getModule(course: string, moduleSlug: string): Module | null {
   return getModules(course).find((m) => m.slug === moduleSlug) ?? null;
 }
 
-export function getLessons(course: string, moduleSlug: string): LessonMeta[] {
+export function getLessons(course: string, moduleSlug: string): readonly LessonMeta[] {
   return getModule(course, moduleSlug)?.lessons ?? [];
 }
 

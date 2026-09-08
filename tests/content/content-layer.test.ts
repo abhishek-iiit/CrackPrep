@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   getAllLessonParams, getCourse, getCourses, getCourseStats, getLesson,
   getLessonNeighbours, getLessons, getModule, getModules, getSearchIndex,
+  type LessonMeta, type Module,
 } from "@/lib/content";
 import { parseSyllabus } from "@/scripts/lib/parse-syllabus";
 
@@ -185,6 +186,42 @@ describe("getLessonNeighbours forms one unbroken chain", () => {
       if (prev) expect(draftNumbers.has(prev.number)).toBe(false);
       if (next) expect(draftNumbers.has(next.number)).toBe(false);
     }
+  });
+});
+
+describe("the cached module tree is immutable", () => {
+  // The cache is a process-wide singleton reused across static generation, so
+  // an in-place mutation by any caller would corrupt every later page. These
+  // assert the freeze holds at every level — a shallow freeze leaves the
+  // nested lessons arrays mutable, which would be the easy mistake.
+  it("rejects mutation of the modules array", () => {
+    const mods = getModules(COURSE);
+    expect(() => (mods as Module[]).push(mods[0])).toThrow(TypeError);
+    expect(() => (mods as Module[]).sort()).toThrow(TypeError);
+  });
+
+  it("rejects mutation of a module object", () => {
+    const mod = getModules(COURSE)[0];
+    expect(() => {
+      (mod as { title: string }).title = "hacked";
+    }).toThrow(TypeError);
+  });
+
+  it("rejects mutation of a module's lessons array", () => {
+    const lessons = getModules(COURSE)[0].lessons;
+    expect(() => (lessons as LessonMeta[]).push(lessons[0])).toThrow(TypeError);
+    expect(() => (lessons as LessonMeta[]).reverse()).toThrow(TypeError);
+  });
+
+  it("rejects mutation of a lesson object", () => {
+    const lesson = getModules(COURSE)[0].lessons[0];
+    expect(() => {
+      (lesson as { title: string }).title = "hacked";
+    }).toThrow(TypeError);
+  });
+
+  it("still returns the same cached reference on repeated calls", () => {
+    expect(getModules(COURSE)).toBe(getModules(COURSE));
   });
 });
 
