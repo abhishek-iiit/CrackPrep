@@ -384,7 +384,17 @@ pill and suppresses the link.
 
 ## 7. Lesson page
 
-Three-column at ≥1280px, collapsing to single column with a drawer at <1024px.
+Three-column at ≥1280px, two-column at ≥1024px, single column below that.
+
+**Below 1024px there is no sidebar drawer, and this is a deliberate scope
+reduction from an earlier draft of this document.** The course tree is reached
+instead by three routes that exist and are tested: the module page
+(`/system-design/[module]`) lists that module's lessons, `/syllabus` lists all
+179 topics with per-module jump links, and every lesson carries previous/next
+navigation. A drawer would add a seventh `'use client'` component — against a
+six-component limit that a test enforces — plus a focus trap, escape handling,
+and scroll locking. It remains additive later without rework, since the
+sidebar's data projection already exists.
 
 - **Left, sticky** — module tree; current lesson marked with `aria-current`;
   other modules collapsed; completed lessons ticked.
@@ -437,8 +447,25 @@ the trigger on close.
 **Accessibility (priority 1).** Text contrast ≥4.5:1 everywhere — enforced by
 test. Visible focus rings, never removed. Full keyboard reachability. Semantic
 landmarks and one `h1` per page. `alt` on every meaningful image; decorative
-art `aria-hidden`. Interactive targets ≥44×44px with ≥8px spacing. Icons are
+art `aria-hidden`. Icons are
 SVG (Lucide) — never emoji. Icon-only buttons carry `aria-label`.
+
+**Target sizes.** The verified source rule — 44×44px with ≥8px spacing — sits
+under *Touch & Interaction*, and applies to controls a touch user can reach:
+every control in the header, the announcement bar, buttons, form fields, and
+the lesson sidebar's rows, all of which are ≥44px.
+
+Dense navigation that renders only at pointer widths is held to **WCAG 2.5.8
+Target Size (Minimum), AA — 24×24 CSS px**, which is what this document commits
+to. The table of contents renders only at ≥1280px and its links are 36px tall,
+clearing that with margin. Forcing 44px there would make a twenty-heading
+contents list 880px long, trading a real regression for a AAA criterion the
+project does not claim.
+
+Full-width stacked rows count as contiguous targets: a miss between two
+44px-tall, full-width sidebar rows lands on another valid row, so inter-row
+gaps below 8px are not a mis-tap risk. The ≥8px rule applies to targets with
+dead space around them.
 
 **Performance (priority 3).** Fully static; no runtime data fetching. Fonts
 self-hosted and preloaded. CLS <0.1 — the announcement bar and any async

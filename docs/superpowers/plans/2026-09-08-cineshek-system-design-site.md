@@ -57,7 +57,9 @@ Every task's requirements implicitly include this section. Values are copied ver
 
 **Motion.** Every non-essential animation guarded by `prefers-reduced-motion: reduce` rendering the final state immediately. The `.transition-brut` utility transitions `color`, `background-color`, `border-color`, `box-shadow` and `transform` — every one of them paint-only or compositor-only, none reflow-inducing. That is correct and intended; do not narrow it.
 
-**Accessibility.** Text contrast ≥4.5:1 everywhere. Visible focus rings, never removed. Interactive targets ≥44×44px with ≥8px spacing. Icons are SVG (`lucide-react`) — **never emoji**. Icon-only buttons carry `aria-label`. One `<h1>` per page. `alt` required on every meaningful image; decorative art `aria-hidden`.
+**Accessibility.** Text contrast ≥4.5:1 everywhere. Visible focus rings, never removed. Icons are SVG (`lucide-react`) — **never emoji**. Icon-only buttons carry `aria-label`. One `<h1>` per page. `alt` required on every meaningful image; decorative art `aria-hidden`.
+
+**Target sizes.** ≥44×44px with ≥8px spacing for anything a touch user can reach — header controls, buttons, form fields, sidebar rows. Dense navigation that renders only at pointer widths is held to **WCAG 2.5.8 AA (24×24 CSS px)**, the level this project claims; the `xl:`-only table of contents qualifies. Full-width stacked rows are contiguous targets, so gaps under 8px between them are not a mis-tap risk.
 
 **Rendering.** Server Components by default. `'use client'` is permitted in exactly six leaf components and nowhere else: `ThemeToggle`, `AnnouncementBar`, `SidebarTree`, `TableOfContents`, `ProgressTracker`, `SearchPalette`. No layout, page, or content component is a client component.
 
@@ -3982,9 +3984,19 @@ describe("TableOfContents", () => {
     expect(screen.getByRole("link", { name: "A detail" })).toHaveAttribute("href", "#a-detail");
   });
 
-  it("indents level-3 headings", () => {
+  it("indents level-3 headings further than level-2", () => {
+    // Asserting only /pl-/ would pass even if both levels collapsed to the
+    // same padding, which is the failure this test exists to catch.
     render(<TableOfContents headings={HEADINGS} />);
-    expect(screen.getByRole("link", { name: "A detail" }).className).toMatch(/pl-/);
+    expect(screen.getByRole("link", { name: "The problem" }).className).toMatch(/\bpl-3\b/);
+    expect(screen.getByRole("link", { name: "A detail" }).className).toMatch(/\bpl-6\b/);
+  });
+
+  it("bounds its own height so a long contents list stays reachable", () => {
+    render(<TableOfContents headings={HEADINGS} />);
+    const nav = screen.getByRole("navigation", { name: /on this page/i });
+    expect(nav.className).toMatch(/overflow-y-auto/);
+    expect(nav.className).toMatch(/max-h-/);
   });
 
   it("renders nothing when there are no headings", () => {
@@ -4173,7 +4185,14 @@ export function TableOfContents({
   return (
     <nav
       aria-label="On this page"
-      className={cn("self-start xl:sticky xl:top-20", className)}
+      // max-h + overflow mirrors SidebarTree. Without it a lesson with many
+      // headings runs past the sticky viewport with no way to reach the tail —
+      // currently masked because stubs have at most 4 headings, but Task 16
+      // writes real lessons with far more.
+      className={cn(
+        "self-start xl:sticky xl:top-20 xl:max-h-[calc(100dvh-6rem)] xl:overflow-y-auto",
+        className,
+      )}
     >
       <p className="font-mono text-xs uppercase tracking-wider text-ink-muted">
         On this page
@@ -4185,7 +4204,9 @@ export function TableOfContents({
               href={`#${heading.id}`}
               aria-current={activeId === heading.id ? "location" : undefined}
               className={cn(
-                "-ml-0.5 block border-l-2 py-1 pr-2 text-sm transition-brut hover:text-ink",
+                // py-2 gives a 36px target: comfortably past WCAG 2.5.8's
+                // 24px minimum without the density cost of forcing 44px.
+                "-ml-0.5 block border-l-2 py-2 pr-2 text-sm transition-brut hover:text-ink",
                 heading.level === 3 ? "pl-6" : "pl-3",
                 activeId === heading.id
                   ? "border-structural font-medium text-ink"
