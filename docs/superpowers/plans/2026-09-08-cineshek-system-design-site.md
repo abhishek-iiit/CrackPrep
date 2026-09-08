@@ -41,7 +41,9 @@ Every task's requirements implicitly include this section. Values are copied ver
 
 **Base tokens — light.** `--paper` `#FAF8F4` · `--ink` `#141414` · `--card` `#FFFFFF` · `--ink-muted` `#57534E` · `--link` `#2563EB` · `--border-structural` `#141414` · `--border-hairline` `#E5E0D8` · `--destructive` `#DC2626`
 
-**Base tokens — dark.** `--paper` `#0E0E0E` · `--ink` `#F5F3EF` · `--card` `#171716` · `--ink-muted` `#A8A29E` · `--link` `#93B4FF` · `--border-structural` `#F5F3EF` · `--border-hairline` `#2A2A28`
+**Base tokens — dark.** `--paper` `#0E0E0E` · `--ink` `#F5F3EF` · `--card` `#171716` · `--ink-muted` `#A8A29E` · `--link` `#93B4FF` · `--border-structural` `#F5F3EF` · `--border-hairline` `#2A2A28` · `--destructive` `#F87171`
+
+**`destructive` is per-theme, and must be.** Measured: `#DC2626` is 4.55:1 on light paper but only **4.00:1 on the dark ground**, and `#F87171` is 6.98:1 on dark but **2.61:1 on light**. Neither value is usable in both themes, so it belongs in `TokenSet` where the drift test and the contrast test both cover it.
 
 **Border rule.** Hairline tokens are decorative separators **only** — they fail 3:1 by design. Every boundary conveying a UI component (card edge, button, input, focus ring) uses `--border-structural` at 2px.
 
@@ -286,7 +288,7 @@ This task is the enforcement mechanism for the spec's colour arithmetic. Write t
 - Produces:
   - `contrastRatio(a: string, b: string): number` — accepts `#RRGGBB`, case-insensitive.
   - `relativeLuminance(hex: string): number`
-  - `baseTokens: { light: TokenSet; dark: TokenSet }` where `TokenSet = Record<TokenName, string>` and `TokenName = "paper" | "ink" | "card" | "inkMuted" | "link" | "borderStructural" | "borderHairline" | "destructive"`. Dark has no `destructive` key.
+  - `baseTokens: { light: TokenSet; dark: TokenSet }` where `TokenSet = Record<TokenName, string>` and `TokenName = "paper" | "ink" | "card" | "inkMuted" | "link" | "borderStructural" | "borderHairline"`. `destructive` is exported separately as a flat constant at this task; **Task 3 moves it into `TokenSet` per-theme** — see the note there.
   - `moduleColors: Record<ColorKey, { surface: string; ink: string }>`
   - `type ColorKey = "cobalt" | "amber" | "mint" | "violet" | "rose" | "ink" | "teal" | "lime" | "orange" | "cyan" | "fuchsia" | "sky" | "cream" | "lavender"`
 
@@ -537,11 +539,50 @@ they are decorative-only."
 
 **Files:**
 - Create: `components/layout/ThemeToggle.tsx`, `tests/design/css-tokens.test.ts`
-- Modify: `app/globals.css` (replace entirely), `app/layout.tsx` (replace entirely)
+- Modify: `app/globals.css` (replace entirely), `app/layout.tsx` (replace entirely), `lib/design/tokens.ts` (promote `destructive` into `TokenSet` — Step 0), `tests/design/contrast.test.ts` (cover it — Step 0b)
 
 **Interfaces:**
-- Consumes: `baseTokens`, `cssVarName`, `TokenName` from Task 2.
+- Consumes: `baseTokens`, `cssVarName`, `TokenName` from Task 2 — and amends all three, since Step 0 adds `destructive` to the `TokenName` union and both theme sets.
 - Produces: Tailwind utilities `bg-paper`, `bg-card`, `text-ink`, `text-ink-muted`, `text-link`, `border-structural`, `border-hairline`, `font-sans`, `font-mono`, `font-pixel`; the `dark:` variant driven by a `.dark` class; `<ThemeToggle />`.
+
+- [ ] **Step 0: Move `destructive` into `TokenSet` (per-theme)**
+
+Task 2 left `destructive` as a single flat constant, which is wrong and is the
+only base token with no test covering it. Measured contrast:
+
+| Value | On light paper `#FAF8F4` | On dark paper `#0E0E0E` |
+|---|---|---|
+| `#DC2626` | 4.55 ✓ | **4.00 ✗** |
+| `#F87171` | **2.61 ✗** | 6.98 ✓ |
+
+No single value clears AA in both themes, so it must be per-theme. Promoting it
+into `TokenSet` is what makes the drift test in Step 1 and the contrast test in
+Step 0b cover it automatically, since both iterate `Object.keys(baseTokens.light)`.
+
+In `lib/design/tokens.ts`: add `"destructive"` to the `TokenName` union, add
+`destructive: "#DC2626"` to `baseTokens.light`, add `destructive: "#F87171"` to
+`baseTokens.dark`, and delete the standalone `export const destructive` line
+(nothing imports it yet — Task 2 was its only appearance).
+
+- [ ] **Step 0b: Extend the contrast test to cover it**
+
+Append to `tests/design/contrast.test.ts`, inside the existing
+`describe("base tokens meet AA in both themes")` loop over `["light","dark"]`:
+
+```ts
+    it(`${theme}: destructive on paper >= 4.5`, () => {
+      expect(contrastRatio(t.destructive, t.paper)).toBeGreaterThanOrEqual(AA_TEXT);
+    });
+
+    it(`${theme}: destructive on card >= 4.5`, () => {
+      expect(contrastRatio(t.destructive, t.card)).toBeGreaterThanOrEqual(AA_TEXT);
+    });
+```
+
+Run: `npx vitest run tests/design/contrast.test.ts`
+Expected: PASS, four more assertions than before. If the light case fails, the
+per-theme split was not applied; if the dark case fails at 4.00, `#DC2626` is
+still being used for dark.
 
 - [ ] **Step 1: Write the failing drift test**
 
