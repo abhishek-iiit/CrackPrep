@@ -1,32 +1,165 @@
 ---
 title: "Bloom Filters"
 number: "04.13"
-summary: "Bloom Filters — notes in progress."
-status: draft
+summary: "A probabilistic set membership test that answers 'definitely not present' with certainty and 'probably present' with a tunable error rate."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 14
+tags: [probabilistic, filters, storage]
+updated: "2026-09-08"
 ---
 
-## The problem
+## The problem: paying full price for an answer of "no"
 
-What breaks without this, and the situation that forces the decision.
+A read for one key in a log-structured engine has to consult the in-memory table and then every immutable file on disk whose key range could contain that key. For a key that was never written, every one of those consultations returns nothing — and each one costs an index read, often a data block read, sometimes a network round trip to object storage. Ten files, ten I/Os, to establish that the key does not exist.
 
-## How it works
+The same shape turns up in front of any cache. A request arrives for an id that has never existed. It misses the cache, so you go to the database, which also has nothing, and you have spent a round trip to learn that there was nothing to learn. Crawler traffic and id enumeration are made almost entirely of these.
 
-The mechanism, step by step.
+You cannot get the exact answer without the data. What you can get is a cheap, conservative **no**: a structure that lives in memory, is small enough that you can afford one per file, and rules out most of the misses before they cost anything.
 
-## Tradeoffs
+A Bloom filter is that structure. It answers "definitely not present" with certainty and "probably present" with an error rate you choose. The asymmetry is the entire design. A wrong "probably" costs you the lookup you were already prepared to do; a wrong "no" would silently lose data, so the structure is built so that a wrong "no" cannot happen.
+
+## Mechanism
+
+The state is `m` bits, initially all zero, plus `k` hash functions, each mapping a key to one of the `m` positions. That is all — no keys are stored anywhere.
+
+<Steps>
+  <Step title="Insert: set k bits">
+    Hash the key `k` ways to get `k` positions, and set each of those bits to 1. Bits are never cleared. If a bit is already 1 because some other key set it, it stays 1 — collisions are expected and cost nothing at insert time.
+  </Step>
+  <Step title="Query: probe the same k bits">
+    Hash the key the same `k` ways and read those `k` bits. There are exactly two outcomes.
+  </Step>
+  <Step title="Any probed bit is 0 → definitely not present">
+    If the key had been inserted, every one of its `k` bits would be 1. A single zero is proof of absence. This is the only certain answer the filter gives, and it is the answer you built it for — return immediately, skip the disk read.
+  </Step>
+  <Step title="All k bits are 1 → probably present">
+    Either the key was inserted, or its `k` positions were set by a combination of other keys. The filter cannot tell which, so you do the expensive lookup and let the authoritative source decide.
+  </Step>
+</Steps>
+
+Two properties fall out of this for free. The work per operation is constant — `k` hashes and `k` bit probes, independent of how many keys the filter holds — and the filter stores no key material, so its size does not depend on key length and it cannot be enumerated.
+
+In practice `k` hash functions do not mean `k` hash computations. One good 64-bit hash split into two 32-bit halves generates all `k` positions by double hashing, which is the standard Kirsch–Mitzenmacher construction:
+
+```python
+h = hash64(key)
+h1, h2 = h & 0xFFFFFFFF, h >> 32
+
+def positions(k, m):
+    # k probes from one hash, not k independent hash functions
+    return [(h1 + i * h2) % m for i in range(k)]
+```
+
+So the real cost of a probe is one hash plus `k` random reads into a bit array, and at realistic sizes those reads land in a couple of cache lines rather than one each.
+
+## The error rate is a knob, and the knob has a formula
+
+<Formula label="False positive probability">p ≈ (1 − e^(−kn/m))^k</Formula>
+
+Here `n` is the number of keys inserted, `m` the number of bits, and `k` the number of probes. Read it in two halves: `1 − e^(−kn/m)` is roughly the probability that any given bit has been set after `n` insertions of `k` bits each, and a false positive requires all `k` probed bits to be set at once.
+
+Two things worth taking from the formula rather than memorising it:
+
+- **`p` depends on `m/n` — bits per key — not on `m` alone.** A filter sized for a million keys is worthless once you have inserted a hundred million: the array saturates, `p` climbs toward 1, and every answer becomes "probably present". A Bloom filter must be sized for the population it will hold, and when the population changes it is rebuilt, not grown.
+- **`k` has an optimum.** Too few probes and each bit carries too much weight; too many and you fill the array faster than the extra evidence is worth. The optimum sets about half the bits at capacity.
+
+<Formula label="Optimal size and probe count">m = −n · ln(p) / (ln 2)²  and  k = (m / n) · ln 2</Formula>
+
+### Worked example: a million keys at 1%
+
+Take `n` = 1,000,000 keys and a target `p` = 0.01.
+
+- `ln(0.01)` = −4.6052 and `(ln 2)²` = 0.4805.
+- `m` = 1,000,000 × 4.6052 / 0.4805 = **9,585,058 bits ≈ 9.6 Mbit**.
+- 9,585,058 / 8 = 1,198,132 bytes ≈ **1.2 MB**. Per key that is 9.6 bits, call it 1.2 bytes.
+- `k` = (9,585,058 / 1,000,000) × ln 2 = 9.585 × 0.6931 = 6.64, so **`k` = 7**.
+
+Check the rounding by putting the numbers back through the first formula, with `m` rounded up to 9.6 Mbit and `k` = 7: `kn/m` = 7,000,000 / 9,600,000 = 0.7292, `e^(−0.7292)` = 0.4823, so `1 − 0.4823` = 0.5177, and `0.5177^7` = 0.00996. That is 1.0% — rounding 6.64 probes up to 7 costs nothing, and the extra bits from rounding `m` up pay for it.
+
+Now compare with the exact answer. Storing a million keys in a hash set means storing the keys: 16-byte ids plus per-entry slot and pointer overhead runs to something like 40–60 bytes an entry in a typical runtime, so tens of megabytes. Those figures are order-of-magnitude, not a benchmark, but the ratio is the point — the filter is roughly thirty times smaller than the thing it stands in for, which is what lets you keep one per file resident while the data itself stays on disk.
+
+The accuracy/space curve is worth internalising, because it is unusually friendly: each factor of ten in accuracy costs a flat 4.8 bits per key.
+
+| Target `p` | Bits per key | `k` | Filter size for 1M keys |
+| --- | --- | --- | --- |
+| 10% | 4.8 | 3 | 0.6 MB |
+| 1% | 9.6 | 7 | 1.2 MB |
+| 0.1% | 14.4 | 10 | 1.8 MB |
+| 0.01% | 19.2 | 13 | 2.4 MB |
+
+Going from 1% to 0.1% is another 0.6 MB per million keys. That is usually a trivial price, which is why production filters are often tuned tighter than the textbook 1%.
+
+## What each operation costs
+
+| Operation | Bloom filter | Exact in-memory set of the same keys |
+| --- | --- | --- |
+| Insert | One hash, `k` bit writes into a fixed array; never resizes or reallocates | Stores the key itself; amortised constant, with occasional rehash pauses |
+| Lookup, key absent | `k` bit probes, short-circuiting on the first zero; no I/O at all | Constant — but only while the entire set is resident |
+| Lookup, key present | `k` bit probes, then the authoritative lookup you were guarding | Constant and authoritative on its own |
+| Delete | Not supported — rebuild the filter, or use a counting variant | Constant |
+| Merge two sets | Bitwise OR, provided `m` and `k` match | Set union, proportional to the smaller set |
+| Space per key | `m/n` bits — 9.6 at `p` = 1%, regardless of key length | Key bytes plus slot overhead: tens of bytes |
+| Wrong answers | False positives at rate `p`; false negatives impossible | None |
+| Resident size at 1M keys | ≈ 1.2 MB | Tens of MB (order of magnitude) |
+
+The row that decides most designs is the last one. Everything else about a Bloom filter is a consequence of it being small enough to keep in memory when the exact structure is not.
+
+<Callout type="gotcha">
+You cannot delete from a Bloom filter. Clearing a key's `k` bits would also clear bits that other keys are relying on, turning their "probably present" into "definitely not present" — a false negative, the one error the structure promises never to make. There is no `remove()`; there is only rebuild. That has two consequences worth designing around. First, Bloom filters belong to data whose key set does not shrink — an immutable file, a completed batch, a day of logs — which is exactly why they fit log-structured storage so well. Second, if your key set genuinely does shrink, you need a **counting Bloom filter**: replace each bit with a small counter (4 bits is typical), increment on insert, decrement on delete. That buys removal at four times the space, and introduces counter saturation as a new failure mode — once a counter pegs at its maximum it can never be safely decremented again. Reach for the counting variant only when rebuilding is impractical; rebuilding over a known key set is cheap and has no arithmetic edge cases.
+</Callout>
+
+## Where it actually earns its place
+
+### The read path of a log-structured engine
+
+Every immutable file in an LSM engine carries a Bloom filter over the keys it contains, built once when the file is written and held in memory. A point lookup consults each candidate file's filter first; a "definitely not present" skips the file entirely for the cost of a few memory probes. Without the filters, a lookup for a key that does not exist pays an I/O per candidate file. With them, it usually pays none.
+
+The fit is unusually clean: these files never change after they are written, so the no-deletion constraint above costs nothing, and the filter can be sized exactly — the writer knows `n` before it builds the filter. It also explains a budget surprise on large instances: filter and index blocks, not data blocks, are often what the memory is actually spent on. 07.09 LSM Tree Storage Engine walks the write and read paths, and 07.11 LSM Read Path Bloom And Sparse Index takes the read side apart in detail.
+
+### Avoiding pointless round trips
+
+Anywhere a negative lookup is expensive and common, the same pattern applies:
+
+- **Cache and database shielding.** Requests for ids that never existed pass straight through a cache to the database. A filter over the set of ids that do exist absorbs them in memory.
+- **Deduplication at volume.** "Have we crawled this URL", "have we already processed this event id" — populations too large to hold exactly, where reprocessing is wasteful rather than incorrect.
+- **Fan-out pruning.** Before asking all shards or all replicas, ask their filters, and only send the request to the ones that might hold the key.
+
+One precondition runs through all of them: a false positive must be merely wasteful. It costs exactly the work you were trying to skip, no more. If your workload cannot afford to do the expensive lookup 1% of the time, the answer is not a bigger filter — it is a different tool.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Reach for a Bloom filter when"
+  againstTitle="Use an exact structure when"
+  forItems={[
+    "The exact set does not fit in memory, and the whole point is to avoid touching disk or the network",
+    "The expensive operation you are guarding is the negative case, and most answers really are 'not present'",
+    "A false 'probably present' costs only the lookup you were already willing to perform",
+    "The key set is fixed or append-only, so 'rebuild instead of delete' is free — an immutable data file is the canonical case",
+    "You need constant work per probe at any population size, with no pointer chasing and no resize pauses",
+  ]}
+  againstItems={[
+    "The answer must be authoritative: uniqueness enforcement, authorisation, billing. Wrong 1% of the time is a bug, not a tuning parameter",
+    "You need more than membership — the value, a count, a range scan, or the ability to list what is in the set",
+    "Keys are deleted routinely and rebuilding the filter on every change is impractical",
+    "The set is small enough to sit in memory anyway, where a hash set is simpler, exact, and no slower",
+    "You cannot bound n in advance; a filter sized for the wrong population degrades silently into answering 'probably' for everything",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Introduce it by the cost you are avoiding, not by the structure. "Most of these lookups are for keys that do not exist, and each one is a disk read — I will put a Bloom filter in front of each file so the misses stay in memory." Then be ready for the three follow-ups that always come: what the false positive rate costs you (one wasted lookup, at rate `p`), why there are no false negatives (a zero bit is proof, because insertion sets all `k`), and how big it has to be — which is the arithmetic above, and worth being able to do out loud: about 10 bits per key for 1%, so roughly a megabyte per million keys.
 
-<KeyTakeaways items={["", "", ""]} />
+If you are asked what happens when the population grows past the design point, say the filter degrades rather than breaks, and that the remedy is to rebuild at the new size — this is a structure you provision, like a partition count.
+
+<KeyTakeaways
+  items={[
+    "A Bloom filter answers 'definitely not present' with certainty and 'probably present' at a rate you choose; false negatives are impossible by construction",
+    "p ≈ (1 − e^(−kn/m))^k, and it depends on bits per key rather than on total size — size the filter for the population you will actually insert",
+    "1% error costs 9.6 bits per key: about 1.2 MB for a million keys, against tens of MB for the exact set",
+    "Optimal k is (m/n) · ln 2, which is 7 probes at 1%, and each extra decimal digit of accuracy costs a flat 4.8 bits per key",
+    "There is no delete without a counting variant, so filters belong to immutable data and the fix for a stale filter is to rebuild it",
+    "The tool only fits where a false positive is harmless — it costs exactly the lookup you were trying to skip",
+  ]}
+/>

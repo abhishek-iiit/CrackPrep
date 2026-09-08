@@ -1,32 +1,185 @@
 ---
 title: "LSM Tree Storage Engine"
 number: "07.09"
-summary: "LSM Tree Storage Engine — notes in progress."
-status: draft
+summary: "Why write-optimised engines buffer in memory and merge on disk, and what that costs on the read path."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: deep
+estMinutes: 22
+tags: [storage, lsm, compaction]
+updated: "2026-09-08"
 ---
 
-## The problem
+## The problem: a random key stream is the worst thing you can hand a disk
 
-What breaks without this, and the situation that forces the decision.
+An index that updates in place has to put each key where it belongs. A B-tree (03.04) does exactly that: find the leaf page for the key, modify it, write it back. When keys arrive in random order — user ids, event ids, anything hashed or externally generated — those leaf pages are scattered across the device, and the write path becomes a stream of small writes to unrelated locations.
 
-## How it works
+Two costs stack up. The first is granularity: pages are written whole. Changing 100 bytes in a 4 KiB page writes 4 KiB, and durability requires the same change to be logged first, so the device sees the change twice before it is safe. The second is placement. On a spinning disk, scattered writes pay a seek each and sequential throughput is orders of magnitude higher than random. On flash the seek disappears, but the erase block is megabytes wide, so small scattered writes force the drive's own garbage collector to relocate live data — the amplification moves inside the device where you cannot see it or tune it.
 
-The mechanism, step by step.
+Meanwhile the operation every storage device is best at is a large sequential write.
 
-## Tradeoffs
+So invert the design. Do not update in place at all. Buffer incoming writes in memory, keep them sorted, and when you have enough of them write the whole batch out in one sequential pass as a file you will never modify again. Deletes become markers rather than edits. The foreground write path collapses to an append plus a memory insert, and the work you avoided — reconciling all those versions of all those keys — becomes a background job that merges files.
+
+That is a log-structured merge tree. It does not make the work disappear; it moves it. The write path gets cheap and predictable, the read path gets harder (a key can live in any of several files), and you inherit a background process that must keep up forever. Everything interesting about running an LSM engine follows from those three sentences.
+
+## The pieces
+
+- **Memtable** — a sorted, mutable in-memory structure (usually a skip list, sometimes a balanced tree) holding the most recent writes, capped at a fixed size. It is sorted for two reasons: a flush can then be written in key order in one pass, and a scan can merge it with on-disk files.
+- **Write-ahead log (WAL)** — an append-only file on disk carrying one record per write. It exists purely because the memtable is volatile: the durability of an acknowledged write comes from the log, never from the memtable. On restart, replaying the log rebuilds the memtable exactly. See 03.08 Database WAL And Recovery for the recovery mechanics.
+- **SSTable** — a sorted string table: an immutable file of key/value entries in key order, plus a sparse index, usually a Bloom filter, and a footer with checksums and metadata. Immutable is the load-bearing word. Nothing rewrites an SSTable; new files replace it.
+- **Levels** — L0 holds files flushed straight from memtables, so their key ranges overlap each other. L1 and below hold non-overlapping runs, with each level sized roughly ten times the level above it.
+- **Compaction** — the background merge that reads files from one or more levels, merge-sorts them, discards superseded values and expired tombstones, and writes new files lower down.
+- **Sequence numbers and tombstones** — every write gets a monotonically increasing sequence number, and a delete is a write of a tombstone marker. Both exist because nothing is modified in place: version order has to be carried in the data, and a delete has to be able to shadow older values that still exist in older files.
+
+<Figure
+  src="/diagrams/lsm-tree.svg"
+  alt="An incoming write splits two ways: it is appended to a write-ahead log on disk and inserted into the sorted in-memory memtable. When the memtable fills, it is flushed as one immutable SSTable into level 0, whose files have overlapping key ranges. Compaction merges level 0 files into level 1 as sorted, non-overlapping runs, dropping overwritten values and tombstones, and repeats into level 2, with each level holding roughly ten times the data of the one above."
+  width={820}
+  height={560}
+  caption="The write side of an LSM engine. Only the WAL append is synchronous; the flush and the compactions run behind it."
+/>
+
+An SSTable is laid out so that a lookup can find one block without reading the file:
+
+```text
+SSTable  (written once, in key order, never modified)
+
+  [ data block 0 ] [ data block 1 ] ... [ data block N ]
+  [ bloom filter ]   every key in this file
+  [ sparse index ]   first key of a block -> offset
+  [ footer ]         offsets, checksums, sequence range
+```
+
+The sparse index holds one entry per block rather than per key, so it stays small enough to keep in memory: a binary search over it gives the one block that could contain the key. 07.10 Memtable WAL And SSTable goes through the file format in detail.
+
+## The write path
+
+<Steps>
+  <Step title="1 — Append the record to the WAL">
+    Serialise the key, the value or tombstone, and the sequence number, then append to the log. If the write must survive a crash, this is where the fsync happens — the only synchronous device touch on the whole path, and a sequential append. Group commit amortises it: many concurrent writers land in one log buffer and share a single fsync, which is what lets a single engine acknowledge tens of thousands of durable writes a second.
+  </Step>
+  <Step title="2 — Insert into the memtable">
+    A sorted insert into an in-memory structure, logarithmic in the number of entries it holds. An update to an existing key does not overwrite anything: it is a new entry with a higher sequence number, sitting alongside the old one. That is what makes the design append-only end to end rather than only at the file level.
+  </Step>
+  <Step title="3 — Acknowledge">
+    The write is now durable (it is in the log) and visible (it is in the memtable). No data file has been touched. This is why the foreground write cost is nearly independent of how much data the engine already holds.
+  </Step>
+  <Step title="4 — Rotate the memtable when it fills">
+    At its size bound the memtable is frozen and a fresh one takes over immediately; incoming writes never wait for a flush. Memory stays bounded, and the frozen table remains readable while it waits its turn.
+  </Step>
+  <Step title="5 — Flush the frozen memtable as one L0 SSTable">
+    One sequential pass in key order: data blocks, then the Bloom filter, then the sparse index, then the footer. Once the file is fsynced and recorded in the manifest, the log segments whose writes it contains can be deleted — the file is now the durable copy. Note what the flush does *not* do: it does not merge with anything, which is why L0 files overlap.
+  </Step>
+  <Step title="6 — Compact in the background, forever">
+    Compaction threads pick files by a policy, merge-sort them with the overlapping files of the next level down, drop values that a newer version supersedes and tombstones that can no longer be shadowing anything, and write fresh immutable files. Superseded files are unlinked once no open reader or snapshot still needs them.
+  </Step>
+</Steps>
+
+Two consequences of step 6 deserve their own paragraph, because they are where LSM engines actually hurt.
+
+Compaction is the only part of the design that does bulk write work, and it is asynchronous. If it falls behind the incoming write rate, L0 accumulates files, every read has more overlapping candidates to consult, and read latency climbs. The engine's only remedy is backpressure: slow the writers, then stall them. That stall is the characteristic LSM failure mode, and it does not present as an error — it presents as a p99 write latency that was 2 ms all week and is 900 ms this afternoon. Provisioning an LSM engine means provisioning device bandwidth for compaction, not just for the application's own writes.
+
+And compaction is not free even when it keeps up. It reads and rewrites data that nobody asked about, competing with foreground reads for device bandwidth and page cache. That continuous background cost is the price of the cheap foreground write. 07.12 Compaction And Amplification covers the strategies and their scheduling.
+
+## The read path
+
+A read has to answer "what is the newest version of this key" when the key's versions may be spread across the memtable and any number of files.
+
+<Steps>
+  <Step title="1 — Search the active memtable">
+    The newest data lives here. A hit ends the search immediately — including a tombstone hit, which means the key was deleted and the answer is "not found", regardless of what older files still contain.
+  </Step>
+  <Step title="2 — Search any frozen memtables not yet flushed">
+    Same structure, next-newest data. Under a heavy write load there may be several waiting for flush.
+  </Step>
+  <Step title="3 — Search every L0 file, newest first">
+    L0 key ranges overlap, so every L0 file is a candidate and there is no way to narrow by range. This is why an L0 file count is a read-latency metric: each file costs at least a Bloom filter probe, and each filter that says "maybe" costs an index lookup and a block read.
+  </Step>
+  <Step title="4 — Search at most one file per level below L0">
+    Within L1 and deeper, runs are non-overlapping, so the manifest's key ranges identify exactly one candidate file per level. Probe its filter; if it says maybe, binary search the sparse index, read the one block that could hold the key, and search inside it. A point read therefore costs at most one block read per level, and usually zero for keys that are not there.
+  </Step>
+  <Step title="5 — Return the first hit, and treat a tombstone as absence">
+    Because the search runs newest to oldest, the first version found is the current one; sequence numbers resolve any ambiguity and give snapshot reads a consistent cut. A tombstone is a hit that returns "not found".
+  </Step>
+  <Step title="6 — Serve range scans by merging iterators">
+    A scan opens an iterator on the memtable and on every candidate file, then merges them k-way, emitting the newest version of each key and skipping shadowed ones. Its cost is proportional to the number of sorted runs it has to merge — which is exactly the quantity compaction exists to keep small. This is the access pattern where an LSM engine is furthest behind a B-tree.
+  </Step>
+</Steps>
+
+<Callout type="note">
+Steps 3 and 4 lean entirely on the per-file Bloom filter. Every SSTable carries one over its own keys, built when the file is written and held in memory; a negative answer skips the file for the cost of a few memory probes. That is the whole difference between a lookup for a missing key costing an I/O per candidate file and costing none — which matters because in a write-heavy system most point lookups are for keys that were never written. The fit is unusually clean: an SSTable never changes after it is written, so the filter needs no deletion support and can be sized exactly, since the writer knows the key count up front. 04.13 Bloom Filters has the sizing arithmetic — roughly 10 bits per key for a 1% false positive rate, so about a megabyte per million keys. Two limits worth remembering: a filter cannot help a range scan, because a scan has no single key to probe, and it never tells you *where* in the file a key is. That is the sparse index's job. 07.11 LSM Read Path Bloom And Sparse Index takes the pair apart together.
+</Callout>
+
+## Amplification is how you price the design
+
+Three numbers describe what a storage engine costs, and every engine is a choice about which of them to spend:
+
+- **Write amplification** — bytes written to the device per byte written by the application.
+- **Read amplification** — block reads (or I/Os) per logical read.
+- **Space amplification** — bytes occupied on disk per byte of live data.
+
+For a leveled LSM they follow from the fan-out. With a fan-out of ten, each level holds ten times the data of the one above, so the deepest level holds about 90% of everything — which caps space amplification near 1.1x once the layout is in steady state. The same fan-out sets write amplification: merging a byte from one level into the next rewrites roughly ten bytes of the destination, and a byte descends through every level on its way down, so the analytical estimate is fan-out times the number of levels — tens of times the application's own write volume. Read amplification is the other side of the trade: because runs below L0 do not overlap, a point read touches at most one file per level.
+
+Size-tiered compaction inverts every one of those. It merges files of similar size within a level instead of merging down into the level below, so a byte is written about once per level rather than once per fan-out step. Write amplification drops sharply; in exchange, several overlapping runs coexist in a level, so reads have more candidates, and multiple full copies of the same key range can exist at once until they merge, so space amplification is far worse.
+
+| | Leveled LSM | Size-tiered LSM | B-tree |
+| --- | --- | --- | --- |
+| Write amplification | High — about the fan-out per level, so tens of times overall | Low — roughly once per level | Page-granular: a 100-byte update writes a whole 4 KiB page, and the WAL record too |
+| Point read, key present | One candidate file per level; one block read after filter and index | Several candidate runs per level | Lowest and most predictable: tree-height page reads, mostly cached |
+| Point read, key absent | Near zero I/O — the filters answer it in memory | Near zero I/O, but over more filters | Tree-height page reads |
+| Short range scan | Merge one run per level | Merge several runs per level | Best: leaves are already contiguous and linked |
+| Space amplification | Low — roughly 1.1x, since the last level dominates | High — duplicate runs coexist until they merge | Moderate — partly-filled pages and fragmentation |
+| Where the cost lands | Background device bandwidth and CPU, continuously | Disk space and read latency | Foreground write latency and random I/O |
+
+The estimates in the first column are analytical — derived from the fan-out, not measured — and real engines beat them with tricks that are worth knowing exist rather than memorising: skipping compaction of files with no overlap, partitioning the deepest level, caching filters and index blocks separately from data. The relationships hold even when the constants move.
+
+You cannot optimise all three numbers at once. That is the useful form of the RUM conjecture: reads, updates, and space are a three-way trade, and picking a compaction strategy is exactly the act of choosing which two to favour. 07.02 Storage Engine Tradeoffs frames the same choice across engine families.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Choose an LSM engine when"
+  againstTitle="Choose a B-tree when"
+  forItems={[
+    "Writes dominate or arrive in bursts: the foreground path is a sequential append plus a memory insert, and everything expensive is deferred",
+    "Keys arrive in random order but can be sorted later — buffering turns a random key stream into sequential device writes",
+    "Point lookups for keys that do not exist are common, where a per-file Bloom filter makes them nearly free",
+    "The data set greatly exceeds memory and is written once and read rarely: event logs, metrics, time series, audit trails",
+    "Compression matters — immutable blocks compress once and are never re-compressed in place, and blocks can be large",
+    "You can pay for compaction with provisioned device bandwidth, and you would rather spend background throughput than foreground latency",
+  ]}
+  againstItems={[
+    "Reads must be latency-predictable at high percentiles: a B-tree read costs tree-height page reads and never depends on how far a background job has fallen behind",
+    "Short range scans over recent data are the main pattern — an LSM has to merge several sorted runs to serve what a B-tree reads from linked leaves",
+    "The workload updates a small hot set repeatedly: one page write in a B-tree versus a permanent tail of compaction work for every version an LSM keeps",
+    "You need in-place transactional semantics with tight variance and no write stalls",
+    "Space amplification must be bounded tightly and predictably, without depending on when compaction next runs",
+    "Operational simplicity matters: there is no background process whose backlog can silently degrade the foreground",
+  ]}
 />
+
+## What you will actually tune
+
+Every knob is one of the three amplifications traded for another:
+
+- **Memtable size.** Larger means fewer, bigger flushes and less write amplification at the top, at the cost of memory and a longer WAL replay on restart.
+- **Fan-out.** Larger means fewer levels — less read amplification — but more bytes rewritten per level transition.
+- **Compaction strategy.** Leveled for read- and space-efficiency, tiered for write-efficiency. Most engines let you choose per column family, because different data in the same system rarely wants the same answer.
+- **Bloom bits per key.** Memory against wasted I/O. Going from 1% to 0.1% is a few bits a key and often pays for itself immediately.
+- **Block size and compression.** Bigger blocks compress better and shrink the index, but every point read pays for the whole block.
+- **Level 0 file limits.** These are the backpressure thresholds. Setting them generously hides compaction debt until it arrives all at once.
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Reach for it by naming the write rate, not the acronym: "This is 50k writes a second of immutable events with occasional point lookups by id, so I want an engine whose write path is a sequential append — an LSM tree." Then price it in the same breath, because the tradeoff is the answer: "The costs are compaction bandwidth, which I have to provision, and read amplification on scans. Point reads for missing keys stay cheap because each file has a Bloom filter, and I would budget memory for those filters and the index blocks."
 
-<KeyTakeaways items={["", "", ""]} />
+Name the failure mode before you are asked. Compaction debt turning into a write stall is the thing that actually pages someone at 3am, and knowing that it shows up as a latency spike rather than an error is what separates having read about LSM trees from having run one.
+
+<KeyTakeaways
+  items={[
+    "An LSM engine trades random in-place page writes for sequential appends: a log for durability, a sorted memtable for recency, immutable files for everything older",
+    "Nothing is modified in place — updates and deletes are new entries with higher sequence numbers, so a read searches newest to oldest and stops at the first hit",
+    "Read cost is proportional to the number of sorted runs, which is precisely what compaction exists to keep small",
+    "Per-file Bloom filters make lookups for absent keys nearly free; the sparse index makes a hit cost one block read",
+    "Compaction defers write work rather than avoiding it — the bill arrives as continuous background bandwidth, and the classic failure is a write stall from compaction debt",
+    "Leveled compaction buys low read and space amplification with high write amplification, and size-tiered inverts that. Choosing between them is the design decision, not an implementation detail",
+  ]}
+/>

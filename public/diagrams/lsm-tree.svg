@@ -1,0 +1,105 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 820 560" width="820" height="560">
+  <title>LSM tree write path: write-ahead log, memtable, flush to level 0, compaction into deeper levels</title>
+  <!--
+    Every stroke and glyph is currentColor. A standalone SVG loaded through an
+    <img> cannot inherit the page's colour, so `color` is set here and flipped
+    on prefers-color-scheme; the ground rect flips with it, which keeps the
+    diagram legible even when a reader's explicit theme choice disagrees with
+    their OS setting.
+  -->
+  <style>
+    svg { color: #141414; }
+    .ground { fill: #FFFFFF; }
+    @media (prefers-color-scheme: dark) {
+      svg { color: #F5F3EF; }
+      .ground { fill: #171716; }
+    }
+    .box { fill: none; stroke: currentColor; stroke-width: 2; }
+    .tile { fill: none; stroke: currentColor; stroke-width: 1.5; }
+    .flow { fill: none; stroke: currentColor; stroke-width: 2; }
+    .split { fill: currentColor; }
+    .zone { stroke: currentColor; stroke-width: 1.5; stroke-dasharray: 6 6; stroke-opacity: 0.5; }
+    text { fill: currentColor; }
+    .mono { font-family: ui-monospace, "SFMono-Regular", Menlo, monospace; }
+    .sans { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+    .lg { font-size: 20px; }
+    .md { font-size: 16px; }
+    .sm { font-size: 14px; }
+  </style>
+
+  <rect class="ground" x="0" y="0" width="820" height="560" />
+
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5"
+            markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor" />
+    </marker>
+  </defs>
+
+  <!-- memory / disk boundary -->
+  <line class="zone" x1="10" y1="118" x2="810" y2="118" />
+  <text class="sans sm" x="808" y="110" text-anchor="end">memory</text>
+  <text class="sans sm" x="808" y="136" text-anchor="end">disk</text>
+
+  <!-- incoming write, splitting into the log and the memtable -->
+  <text class="mono lg" x="20" y="61">write(k, v)</text>
+  <circle class="split" cx="155" cy="54" r="4" />
+
+  <path class="flow" d="M 161 54 H 330" marker-end="url(#arrow)" />
+  <text class="sans sm" x="248" y="44" text-anchor="middle">2 insert</text>
+
+  <path class="flow" d="M 155 62 V 144" marker-end="url(#arrow)" />
+  <text class="sans sm" x="167" y="107">1 append</text>
+
+  <!-- memtable (in memory) -->
+  <rect class="box" x="336" y="22" width="250" height="64" rx="4" />
+  <text class="mono lg" x="461" y="52" text-anchor="middle">Memtable</text>
+  <text class="sans sm" x="461" y="74" text-anchor="middle">sorted, mutable, bounded size</text>
+
+  <!-- write-ahead log (on disk) -->
+  <rect class="box" x="40" y="150" width="230" height="64" rx="4" />
+  <text class="mono lg" x="155" y="180" text-anchor="middle">WAL</text>
+  <text class="sans sm" x="155" y="202" text-anchor="middle">append-only, fsynced</text>
+
+  <!-- flush -->
+  <path class="flow" d="M 461 86 V 244" marker-end="url(#arrow)" />
+  <text class="sans sm" x="476" y="152">3 flush when full:</text>
+  <text class="sans sm" x="476" y="172">write one immutable SSTable</text>
+
+  <!-- level 0 -->
+  <text class="mono lg" x="326" y="272" text-anchor="end">L0</text>
+  <text class="sans sm" x="326" y="292" text-anchor="end">key ranges overlap</text>
+  <rect class="tile" x="340" y="250" width="112" height="52" rx="3" />
+  <rect class="tile" x="464" y="250" width="112" height="52" rx="3" />
+  <rect class="tile" x="588" y="250" width="112" height="52" rx="3" />
+  <text class="mono sm" x="396" y="281" text-anchor="middle">SSTable</text>
+  <text class="mono sm" x="520" y="281" text-anchor="middle">SSTable</text>
+  <text class="mono sm" x="644" y="281" text-anchor="middle">SSTable</text>
+
+  <!-- compaction L0 -> L1 -->
+  <path class="flow" d="M 370 302 V 354" marker-end="url(#arrow)" />
+  <text class="sans sm" x="386" y="322">4 compact: merge sorted runs,</text>
+  <text class="sans sm" x="386" y="342">drop overwrites and tombstones</text>
+
+  <!-- level 1 -->
+  <text class="mono lg" x="326" y="382" text-anchor="end">L1</text>
+  <text class="sans sm" x="326" y="402" text-anchor="end">non-overlapping</text>
+  <rect class="tile" x="340" y="360" width="84" height="52" rx="3" />
+  <rect class="tile" x="432" y="360" width="84" height="52" rx="3" />
+  <rect class="tile" x="524" y="360" width="84" height="52" rx="3" />
+  <rect class="tile" x="616" y="360" width="84" height="52" rx="3" />
+
+  <!-- compaction L1 -> L2 -->
+  <path class="flow" d="M 370 412 V 464" marker-end="url(#arrow)" />
+  <text class="sans sm" x="386" y="442">each level holds roughly 10x the one above</text>
+
+  <!-- level 2 -->
+  <text class="mono lg" x="326" y="492" text-anchor="end">L2</text>
+  <text class="sans sm" x="326" y="512" text-anchor="end">largest, coldest</text>
+  <rect class="tile" x="340" y="470" width="55" height="52" rx="3" />
+  <rect class="tile" x="401" y="470" width="55" height="52" rx="3" />
+  <rect class="tile" x="462" y="470" width="55" height="52" rx="3" />
+  <rect class="tile" x="523" y="470" width="55" height="52" rx="3" />
+  <rect class="tile" x="584" y="470" width="55" height="52" rx="3" />
+  <rect class="tile" x="645" y="470" width="55" height="52" rx="3" />
+</svg>

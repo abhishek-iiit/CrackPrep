@@ -248,3 +248,24 @@ describe("search index", () => {
     }
   });
 });
+
+describe("sample lessons are written", () => {
+  const SAMPLES = [
+    { module: "foundations", slug: "requirements-clarification" },
+    { module: "nosql-partitioning-ids", slug: "bloom-filters" },
+    { module: "storage-engines", slug: "lsm-tree-storage-engine" },
+  ];
+
+  it.each(SAMPLES)("$slug is published with real content", ({ module, slug }) => {
+    const lesson = getLesson("system-design", module, slug);
+    expect(lesson).not.toBeNull();
+    expect(lesson!.status).toBe("published");
+    expect(lesson!.body.length).toBeGreaterThan(1500);
+    expect(lesson!.body).not.toContain('forItems={["", ""]}');
+  });
+
+  it("chains the three published lessons in course order", () => {
+    const index = getSearchIndex("system-design");
+    expect(index.map((d) => d.number)).toEqual(["01.01", "04.13", "07.09"]);
+  });
+});

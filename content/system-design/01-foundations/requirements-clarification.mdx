@@ -1,32 +1,121 @@
 ---
 title: "Requirements Clarification"
 number: "01.01"
-summary: "Requirements Clarification — notes in progress."
-status: draft
+summary: "The questions that turn a vague prompt into a bounded problem, and why guessing scale early is the most expensive mistake."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: intro
+estMinutes: 9
+tags: [requirements, process, scoping]
+updated: "2026-09-08"
 ---
 
-## The problem
+## "Design Twitter" is not a problem statement
 
-What breaks without this, and the situation that forces the decision.
+Design prompts name a product, not a problem. A product is a hundred features; a design is a handful of decisions — one datastore or two, cache or no cache, write synchronously or hand the work to a queue. Every one of those decisions is a function of numbers and boundaries the prompt withheld. Start drawing boxes and you have not avoided choosing those numbers; you have chosen them by accident, silently, and you will defend them for the next half hour without knowing you are doing it.
 
-## How it works
+Guessing scale early is the most expensive mistake because scale is the input almost every other choice depends on. A system taking 10,000 writes a day and a system taking 10,000 writes a second share nothing but a data model. The first is one Postgres instance and a nightly backup. The second is partitioned, buffered, and asynchronous, and half its complexity exists only to survive the write rate. Guess wrong and you do not get a slightly wrong design — you get a correct design for a problem nobody has, and you find out twenty minutes in, when restarting costs the most.
 
-The mechanism, step by step.
+What this step produces is not a document. It is a short list both of you can see: what the system does, what it must be, and four or five numbers with their units.
 
-## Tradeoffs
+## Split what it does from how well it must do it
+
+**Functional requirements** are verbs with an actor and an object. "A user shortens a long URL and gets a short link back." "A follower sees a new post in their feed." The test for whether one is concrete enough: you can name the API call. If you cannot, the requirement is still a slogan.
+
+**Non-functional requirements** are the qualities constraining how those verbs may be implemented — latency target, availability, durability, consistency, freshness, cost ceiling. 01.03 Non-Functional Requirements covers the full taxonomy; here it only matters that they are a separate list, gathered by separate questions.
+
+The split matters because the two lists drive different parts of the design. Functional requirements decide the data model and the endpoints. Non-functional requirements decide the architecture. Two systems with identical functional requirements and different latency targets look nothing alike: "the feed loads in 200 ms at p99" forces the feed to be computed before it is asked for, while "the feed loads in about two seconds" lets you query at read time and skip an entire subsystem. Nobody volunteers that sentence. You have to ask for it.
+
+A quick filter when you are unsure which list something belongs on: could you write a test that passes or fails? If the test needs a threshold to be decidable, it is non-functional — and you are missing the threshold.
+
+## Name the actors before the features
+
+Ask who uses the system. Not "how many users" yet — who, and in what role. A URL shortener has at least four actors:
+
+- the **creator** who submits a long URL, at low volume and tolerant of a slow response
+- the **follower** who hits the short link, anonymous, at enormous volume, intolerant of anything slow
+- the **analytics viewer**, internal, low volume, happy with data that is minutes stale
+- the **abuse and ops path** that has to disable a link now
+
+Each has a different read/write mix, a different latency tolerance, and a different authentication story. Missing one is how a design ends up with no way to delete anything and no ops story. Remember too that a caller need not be human: a batch job, a partner service, and a mobile client on a bad train connection all impose different requirements from a browser.
+
+For each actor, write one line — what they do, how many of them, how often. That line is where the numbers will attach.
+
+### Ask the read/write ratio explicitly
+
+After the size of the user base, this is the single most informative question available: for every write, how many reads?
+
+- **Around 1:1.** The write path *is* the system. You are designing for ingest throughput and durability, and a cache buys you little because nothing is read twice.
+- **100:1 or 1000:1.** The read path is the system. Caching, read replicas, precomputed views, and a CDN all become live options — and consistency becomes a real conversation, because now there are copies that can disagree.
+- **Reads far below writes**, as with sensor telemetry or audit logs. Optimise ingest and storage cost; the queries that do arrive are analytical and batch, which points at columnar storage rather than row storage.
+
+One question, and it moves the design more than any other number you will collect. Which is exactly why it should be a question and not a guess.
+
+## The four numbers worth asking for
+
+1. **Daily active users.** Or monthly actives plus an activity fraction. This sets the population everything else multiplies against.
+2. **Requests per second at peak** — peak, not average, because you provision for peak. Given a daily total, divide by 86,400 for the average and then apply a peak factor; 2–5x is a defensible range for a consumer product with a day/night cycle, and you should say which factor you picked and why. Traffic that arrives in bursts — a cup final, a flash sale, a push notification going out to everyone at once — breaks the diurnal assumption and needs its own number.
+3. **Payload size.** Bytes per item: the post body, the photo, the row. Multiplied by the write rate it gives bytes per second of ingest, and multiplied out again, storage growth per day. This is the number that decides whether object storage enters the design at all — 1 KB and 1 MB per item are different architectures.
+4. **Retention.** How long data must be kept, and whether all of it must stay queryable. Ninety days hot with a seven-year cold archive is a different system from "keep everything, all of it queryable" — see 04.14 Hot And Cold Storage Archival.
+
+With those four you can run the arithmetic in 01.06 Back-Of-The-Envelope Capacity Planning and come out with storage, bandwidth, and instance counts you can defend. Without them, every number downstream is decoration.
+
+<Callout type="gotcha">
+A number without a unit gets silently reinterpreted. "1M" on a whiteboard is one million *of something*, per *some* interval, and you and your interviewer will pick different answers — then contradict each other fifteen minutes later, in front of a diagram built on the mismatch. Write `1M DAU`, `12k writes/s at peak`, `2 KB per post`, `90-day retention`. Carry the units through every derived figure, and label peak as peak: a rate given as an average and provisioned as a peak is the most common arithmetic error in this whole exercise.
+</Callout>
+
+## When you cannot get numbers
+
+Sometimes the answer is "you tell me" or "assume whatever seems reasonable". That is not a dead end, it is a delegation: the number is now yours, so make it explicit and cheap to revise.
+
+- **State it as a number with units, and say what it is load-bearing for.** "I will assume 50M DAU, each opening the app twice a day and reading 20 posts per session — call it 2B feed reads a day, roughly 23k/s average and 70k/s at peak. If it is 5M rather than 50M, a primary with read replicas covers it and I would drop the precomputed feed entirely."
+- **Prefer round numbers you can multiply in your head.** 1M, 10M, 100M. Precision you invented is not precision.
+- **Anchor to something knowable** rather than inventing a figure: the length of a text post, the size of a phone photo, the fact that a mobile client polls on a 30-second timer.
+- **Write the assumption where both of you can see it, and mark it as an assumption.** Interviewers correct written assumptions readily. They rarely correct the ones you kept in your head.
+- **Say what would change if the assumption were wrong by 10x.** That single sentence is the point of the whole exercise: it shows the design has a hinge, and that you know where the hinge is.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Keep clarifying when"
+  againstTitle="Start designing when"
+  forItems={[
+    "More than one product fits the prompt — 'design a chat app' could mean 1:1 messaging or 100k-member broadcast channels, which share almost no mechanism",
+    "A number you are about to build on is missing and being wrong by 10x would change the topology, not just the instance count",
+    "The read/write ratio is still unknown, so you cannot yet say whether this is a read-path or a write-path problem",
+    "No actor list exists, which makes the API surface a guess",
+    "A requirement that sounds free has been stated — 'exactly once', 'strictly ordered', 'globally consistent' — and nobody has priced it yet",
+  ]}
+  againstItems={[
+    "You can state the system in one sentence containing an actor, a verb, and a scale number",
+    "You have the four numbers, or explicit written assumptions standing in for them",
+    "The remaining unknowns affect one component rather than the shape, so they can be flagged and deferred",
+    "Further questions would only add features, and what is already on the board fills the time you have",
+    "The answers have turned into 'up to you' — the delegation is itself the answer",
+  ]}
 />
 
-## In an interview
+## Clarifying versus stalling
 
-How to introduce this, and the follow-up questions it invites.
+Both look like asking questions. The difference is whether the answer changes what you draw.
 
-<KeyTakeaways items={["", "", ""]} />
+A clarifying question has a decision attached, and you can name the decision: "Do users need to see their own posts immediately after publishing? If yes, I will route an author's own reads around the cache." A stalling question enumerates features — hashtags, emoji, threading — where each answer adds a box and none of them changes the structure.
+
+In practice:
+
+- **Time-box it.** Three to five minutes of a forty-five minute session. Roughly a tenth.
+- **Ask in priority order:** actors and core verbs, then scale, then the non-functional targets, then what is explicitly out of scope. Then stop.
+- **Batch the questions** instead of round-tripping one at a time; you get more per exchange and it reads as planning rather than probing.
+- **Declare the boundary out loud.** "Out of scope: payments, moderation, multi-region. Tell me if you would rather I trade one of those for something on my list." A bounded problem needs an outside, and naming it is the other half of clarification.
+- **Read the problem back in one sentence** and get an explicit yes before drawing.
+
+Then keep going. Clarification is not a phase that ends — new decisions surface new questions, and the right moment to ask is when the decision arrives, not before. What ends after five minutes is asking questions with no decision behind them.
+
+<KeyTakeaways
+  items={[
+    "The prompt names a product; your first job is to name the problem — actors, verbs, and the qualities those verbs must have",
+    "Functional requirements set the data model and the API; non-functional requirements set the architecture",
+    "Ask for daily actives, peak requests per second, payload size, and retention — with units — before drawing anything",
+    "The read/write ratio decides whether you are designing a read path or a write path, and it is one question away",
+    "If numbers are refused, own them: pick a round assumption, write it down, and say what breaks if it is off by 10x",
+    "A clarifying question has a decision attached to it; a stalling question only adds features",
+  ]}
+/>
