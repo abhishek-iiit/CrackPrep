@@ -5333,7 +5333,9 @@ import type { Module } from "@/lib/content";
 export function ModuleGrid({ modules }: { modules: readonly Module[] }) {
   return (
     <section className="mx-auto max-w-[1200px] px-4 py-16">
-      <h2 className="text-2xl font-semibold tracking-tight">The fourteen modules</h2>
+      {/* Derived, like every other user-facing count. My original audit for this
+          grepped numeric forms ("14 modules") and missed the spelled-out one. */}
+      <h2 className="text-2xl font-semibold tracking-tight">The {modules.length} modules</h2>
       <p className="mt-2 max-w-prose text-ink-muted">
         In order. Each one assumes the ones before it.
       </p>
@@ -5543,6 +5545,15 @@ export function Subscribe() {
 `process.env.NEXT_PUBLIC_*` is inlined at build time, so this stays a Server Component with no client JavaScript. Reading it inside the function body rather than at module scope is what makes the `vi.stubEnv` test in Step 1 meaningful.
 
 - [ ] **Step 11: Create `app/(marketing)/page.tsx` and delete the scaffolded home page**
+
+Do both in the same commit. `app/page.tsx` currently serves `/`: deleting it
+alone 404s the route, and having both present gives Next two routes for `/` and
+fails the build with a conflict.
+
+After the swap, `npm run typecheck` may fail on a stale file under `.next/types/`
+that still references the deleted `app/page.tsx`. That directory is generated
+build cache and is gitignored — `rm -rf .next` clears it. Do not "fix" the
+typecheck error by editing anything under `.next/`.
 
 ```bash
 rm app/page.tsx
