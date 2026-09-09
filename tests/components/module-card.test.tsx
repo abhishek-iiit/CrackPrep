@@ -31,7 +31,11 @@ describe("ModuleCard", () => {
 
   it("reports written progress honestly rather than padding it", () => {
     render(<ModuleCard module={MODULE} />);
-    expect(screen.getByText(/2 written/i)).toBeInTheDocument();
+    // The whole run, not just /2 written/: both counts are text inside one
+    // anonymous flex item, so the separator's spacing is the component's job
+    // and `gap-2` cannot supply it. /2 written/ passed while this rendered
+    // "20 topics· 2 written" in production HTML.
+    expect(screen.getByText("20 topics · 2 written")).toBeInTheDocument();
   });
 
   it("omits the written count when nothing is written yet", () => {

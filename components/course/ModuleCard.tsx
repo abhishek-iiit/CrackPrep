@@ -18,8 +18,13 @@ export function ModuleCard({ module: mod }: { module: Module }) {
       <h3 className="mt-3 text-lg font-semibold">{mod.title}</h3>
       <p className="mt-2 flex-1 text-sm opacity-90">{mod.blurb}</p>
       <span className="mt-4 flex items-center gap-2 font-mono text-xs uppercase tracking-wider">
+        {/* One string, not a fragment: JSX strips the trailing whitespace before
+            a newline, so `topics{cond && <>· …</>}` renders "13 topics· 1
+            written" — and the parent's `gap-2` cannot help, because both runs
+            are text inside a single anonymous flex item. Same idiom as
+            app/system-design/[module]/page.tsx. */}
         {mod.totalCount} topics
-        {mod.publishedCount > 0 && <>· {mod.publishedCount} written</>}
+        {mod.publishedCount > 0 && ` · ${mod.publishedCount} written`}
         <ArrowRight aria-hidden className="ml-auto size-4" />
       </span>
     </Link>

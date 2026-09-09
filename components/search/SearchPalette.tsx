@@ -6,9 +6,13 @@ import Fuse from "fuse.js";
 import { Search } from "lucide-react";
 import type { SearchDoc } from "@/lib/content";
 
-// topicCount is passed in by Header (a Server Component) rather than hardcoded,
-// so the placeholder cannot drift from the real curriculum size.
-export function SearchPalette({ topicCount }: { topicCount: number }) {
+// publishedCount is passed in by Header (a Server Component) rather than
+// hardcoded, so the placeholder cannot drift from the index. It is the count of
+// PUBLISHED lessons — the ones getSearchIndex() actually indexes — and is named
+// after the CourseStats field it comes from so the wiring is hard to get wrong:
+// this prop was once fed stats.topicCount and advertised 179 searchable topics
+// over an index of 3.
+export function SearchPalette({ publishedCount }: { publishedCount: number }) {
   const router = useRouter();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -158,7 +162,7 @@ export function SearchPalette({ topicCount }: { topicCount: number }) {
                 setQuery(event.target.value);
                 setActive(0);
               }}
-              placeholder={`Search ${topicCount} topics…`}
+              placeholder={`Search ${publishedCount} topics…`}
               autoComplete="off"
               role="combobox"
               aria-expanded
@@ -202,6 +206,9 @@ export function SearchPalette({ topicCount }: { topicCount: number }) {
                     <button
                       type="button"
                       role="option"
+                      // Arrow keys drive selection and Tab is trapped on the
+                      // input, so an option must not be its own tab stop.
+                      tabIndex={-1}
                       id={`search-option-${i}`}
                       aria-selected={i === safeActive}
                       onMouseEnter={() => setActive(i)}

@@ -1,4 +1,3 @@
-import { AnnouncementBar } from "@/components/layout/AnnouncementBar";
 import { Audience } from "@/components/landing/Audience";
 import { Features } from "@/components/landing/Features";
 import { Hero } from "@/components/landing/Hero";
@@ -13,12 +12,6 @@ export default function HomePage() {
 
   return (
     <>
-      <AnnouncementBar
-        id="launch-2026-09"
-        message={`System design is live — ${stats.moduleCount} modules, ${stats.topicCount} topics`}
-        href="/system-design"
-        cta="Start reading"
-      />
       <Hero moduleCount={stats.moduleCount} topicCount={stats.topicCount} />
       <Stats {...stats} />
       <PathCards courses={getCourses()} />

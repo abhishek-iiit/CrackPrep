@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono, Geist_Pixel } from "next/font/google";
 import { ThemeProvider } from "next-themes";
+import { announcementDismissScript } from "@/lib/announcement";
 import { courseSlug, getCourseStats } from "@/lib/content";
 import "./globals.css";
 
@@ -53,6 +54,13 @@ export default function RootLayout({
       className={`${geist.variable} ${geistMono.variable} ${geistPixel.variable}`}
     >
       <body className="min-h-dvh bg-paper text-ink">
+        {/* Blocking, and first in <body> so it runs before any markup below is
+            parsed: a dismissed announcement bar is hidden by CSS from the
+            first paint instead of being removed after hydration, which
+            painted it and then shifted the page by its height. Mirrors the
+            no-flash script next-themes' ThemeProvider emits just below.
+            See lib/announcement.ts. */}
+        <script dangerouslySetInnerHTML={{ __html: announcementDismissScript }} />
         <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
           {children}
         </ThemeProvider>

@@ -18,3 +18,19 @@ export async function waitForHydration(page: Page) {
     page.getByRole("button", { name: /switch to (dark|light) theme/i }),
   ).toBeVisible();
 }
+
+/**
+ * The palette's placeholder promises the size of the index it fetches, so the
+ * expected number is derived from that same file rather than hardcoded. A
+ * literal (`/search 179 topics/i`) is what let the placeholder advertise all
+ * 179 curriculum topics over an index of 3 published lessons and still pass —
+ * the test enshrined the bug instead of catching it, and it would go stale
+ * again on the next lesson published.
+ */
+export async function searchPlaceholder(page: Page): Promise<RegExp> {
+  const response = await page.request.get("/search-index.json");
+  expect(response.ok()).toBe(true);
+  const docs: unknown = await response.json();
+  expect(Array.isArray(docs)).toBe(true);
+  return new RegExp(`^Search ${(docs as unknown[]).length} topics…$`);
+}

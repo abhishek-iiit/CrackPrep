@@ -1,44 +1,37 @@
 "use client";
 
-import { useState } from "react";
 import Link from "next/link";
 import { X } from "lucide-react";
-import { useMounted } from "@/lib/hooks/useMounted";
+import { ANNOUNCEMENT_DISMISSED_ATTR, announcementStorageKey } from "@/lib/announcement";
 
-type Props = { id: string; message: string; href?: string; cta?: string };
+type Props = { message: string; href?: string; cta?: string };
 
-function readDismissed(id: string): boolean {
-  try {
-    return window.localStorage.getItem(`announce:${id}`) === "dismissed";
-  } catch {
-    // Private browsing or blocked site data: treat as not dismissed.
-    return false;
-  }
-}
-
-export function AnnouncementBar({ id, message, href, cta }: Props) {
-  const mounted = useMounted();
-  const [dismissedNow, setDismissedNow] = useState(false);
-
-  // Storage is read only after hydration, so the server HTML and the first
-  // client render agree. No effect, so no cascading render and no
-  // setState-in-effect lint error — setState happens in the click handler only.
-  const dismissed = dismissedNow || (mounted && readDismissed(id));
-
+export function AnnouncementBar({ message, href, cta }: Props) {
+  // No storage read during render, and no useMounted() gate. Whether the bar
+  // starts hidden is decided before the first paint by the blocking script in
+  // the root layout plus the `[data-announce-dismissed]` rule in globals.css
+  // (see lib/announcement.ts), so this component only has to handle the click.
+  //
+  // Stamping the same attribute here — rather than holding a React state flag
+  // — hides the bar immediately via that one CSS rule and keeps it hidden
+  // across client-side navigations, where a remounted component's state would
+  // reset. It is a write to <html>, outside React's tree, exactly as
+  // next-themes' own toggle does.
   function dismiss() {
-    setDismissedNow(true);
     try {
-      window.localStorage.setItem(`announce:${id}`, "dismissed");
+      window.localStorage.setItem(announcementStorageKey, "dismissed");
     } catch {
       // Storage unavailable — dismissal simply will not persist.
     }
+    document.documentElement.setAttribute(ANNOUNCEMENT_DISMISSED_ATTR, "");
   }
 
   return (
-    <div
-      hidden={dismissed}
-      className="border-b-2 border-structural bg-card"
-    >
+    // data-announcement is what the CSS rule in globals.css hooks onto. The
+    // literal is repeated there rather than imported, because a stylesheet
+    // cannot read a TypeScript constant — a shared const would only look like
+    // it coupled them.
+    <div data-announcement="" className="border-b-2 border-structural bg-card">
       <div className="mx-auto flex max-w-[1200px] items-center gap-3 px-4 py-2">
         <p className="flex-1 text-center font-mono text-xs uppercase tracking-wider text-ink-muted">
           {message}

@@ -134,6 +134,16 @@ html.dark [data-rehype-pretty-code-figure] span {
 [data-rehype-pretty-code-figure] pre {
   background: transparent;
 }
+/* Announcement bar, dismissed. Unlayered on purpose so it beats any utility,
+   and paired with the blocking script in the root layout, which stamps this
+   attribute before the bar's markup is parsed — see lib/announcement.ts. The
+   bar's dismiss button needs a client component, but its VISIBILITY must not
+   wait for hydration: doing that painted the bar and then removed it,
+   shifting everything below by its height. */
+html[data-announce-dismissed] [data-announcement] {
+  display: none;
+}
+
 /* Autolinked headings must not look like body links. */
 .prose-lesson :is(h2, h3) a {
   color: inherit;

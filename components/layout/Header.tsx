@@ -35,7 +35,10 @@ export function Header() {
         </nav>
 
         <div className="ml-auto flex items-center gap-2">
-          <SearchPalette topicCount={stats.topicCount} />
+          {/* publishedCount, NOT topicCount: getSearchIndex() indexes published
+              lessons only, so the placeholder has to promise the size of the
+              index the palette actually fetches. */}
+          <SearchPalette publishedCount={stats.publishedCount} />
           <ThemeToggle />
         </div>
       </div>

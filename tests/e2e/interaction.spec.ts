@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { waitForHydration } from "./helpers";
+import { searchPlaceholder, waitForHydration } from "./helpers";
 
 test("search palette is fully keyboard operable", async ({ page }) => {
   await page.goto("/system-design");
@@ -8,7 +8,7 @@ test("search palette is fully keyboard operable", async ({ page }) => {
 
   const dialog = page.getByRole("dialog", { name: /search lessons/i });
   await expect(dialog).toBeVisible();
-  await expect(page.getByPlaceholder(/search 179 topics/i)).toBeFocused();
+  await expect(page.getByPlaceholder(await searchPlaceholder(page))).toBeFocused();
 
   await page.keyboard.type("bloom");
   const option = page.getByRole("option").first();
@@ -42,7 +42,7 @@ test("the search input keeps a visible focus ring", async ({ page }) => {
   await page.goto("/system-design");
   await waitForHydration(page);
   await page.keyboard.press("ControlOrMeta+k");
-  const input = page.getByPlaceholder(/search 179 topics/i);
+  const input = page.getByPlaceholder(await searchPlaceholder(page));
   await expect(input).toBeFocused();
   const outlineStyle = await input.evaluate((el) => getComputedStyle(el).outlineStyle);
   // Chromium's UA focus ring alone computes to "auto", not "none" — so
@@ -128,13 +128,44 @@ test("table of contents jumps to the matching heading", async ({ page, viewport 
   await expect(page.locator(href!)).toBeInViewport({ ratio: 1 });
 });
 
-test("announcement bar stays dismissed", async ({ page }) => {
+test("a dismissed announcement bar never paints again", async ({ page }) => {
   await page.goto("/");
   const dismiss = page.getByRole("button", { name: /dismiss announcement/i });
   await dismiss.click();
   await expect(dismiss).toBeHidden();
 
-  await page.reload();
+  // `toBeHidden()` auto-retries for 5s, so on a reload it cannot tell a bar
+  // that was never painted apart from one that painted and then vanished —
+  // and the second is what actually shipped, shifting the hero down by the
+  // bar's height on every visit after a dismissal. Same failure mode as the
+  // theme test above, which was the only one of the two defended. Two
+  // assertions replace it.
+
+  // 1. Document order, which is what makes the fix airtight rather than fast:
+  //    the blocking script that stamps <html> is emitted BEFORE the bar's
+  //    markup, so a dismissed bar is not merely hidden quickly — it cannot be
+  //    painted at all.
+  const html = await (await page.request.get("/")).text();
+  const scriptAt = html.indexOf("announce:");
+  const barAt = html.indexOf("data-announcement");
+  expect(scriptAt, "no inline dismissal script in the served HTML").toBeGreaterThan(-1);
+  expect(barAt, "no announcement bar in the served HTML").toBeGreaterThan(-1);
+  expect(barAt).toBeGreaterThan(scriptAt);
+
+  // 2. A synchronous read, before React has hydrated — the technique the theme
+  //    test uses. The old post-hydration `hidden={dismissed}` stamped no
+  //    attribute and left the bar displayed at this point.
+  await page.reload({ waitUntil: "domcontentloaded" });
+  expect(
+    await page.evaluate(() => {
+      const bar = document.querySelector("[data-announcement]");
+      return {
+        stamped: document.documentElement.hasAttribute("data-announce-dismissed"),
+        display: bar ? getComputedStyle(bar).display : "no bar element",
+      };
+    }),
+  ).toEqual({ stamped: true, display: "none" });
+
   await expect(page.getByRole("button", { name: /dismiss announcement/i })).toBeHidden();
 });
 
