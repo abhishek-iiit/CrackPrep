@@ -205,7 +205,7 @@ ever" rule in prose at the one place it could happen.
 
 ## Testing
 
-- `npm test` runs the Vitest suite: 301 tests across 15 files under
+- `npm test` runs the Vitest suite: 331 tests across 15 files under
   `tests/` (content-layer correctness, frontmatter/schema validation,
   syllabus parsing, design-token contrast, component rendering). It uses the
   `node` environment by default; files that need a DOM opt in per-file with a
