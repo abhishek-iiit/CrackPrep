@@ -16,6 +16,11 @@ export default defineConfig({
   webServer: {
     command: "npm run build && npm start",
     url: "http://localhost:3000",
+    // lib/site.ts refuses a production build with no absolute origin, and
+    // this suite runs a production build. Declared here rather than relying
+    // on a developer's .env.local, so `npm run test:e2e` is self-contained —
+    // and localhost IS the correct origin for the server it boots.
+    env: { NEXT_PUBLIC_SITE_URL: "http://localhost:3000" },
     reuseExistingServer: !process.env.CI,
     timeout: 300_000,
   },

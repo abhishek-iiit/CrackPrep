@@ -31,7 +31,10 @@ export type Module = {
   blurb: string;
   colorKey: ColorKey;
   url: string;
-  lessons: LessonMeta[];
+  // readonly, because freezeModules() freezes this array at runtime: the type
+  // said LessonMeta[] while a `.push()` threw, and the immutability test
+  // needed a cast to prove it — the tell that the type was lying.
+  lessons: readonly LessonMeta[];
   publishedCount: number;
   totalCount: number;
 };

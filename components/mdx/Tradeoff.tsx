@@ -12,8 +12,10 @@ function Column({ title, items }: { title: string; items: string[] }) {
       <h4 className="font-mono text-xs uppercase tracking-wider">{title}</h4>
       {real.length > 0 && (
         <ul className="mt-3 space-y-2 text-sm">
-          {real.map((item) => (
-            <li key={item} className="flex gap-2">
+          {/* Index keys: the list is static and its items are plain strings,
+              so two identical items would collide on a value key. */}
+          {real.map((item, index) => (
+            <li key={index} className="flex gap-2">
               <span aria-hidden className="font-mono">+</span>
               <span>{item}</span>
             </li>

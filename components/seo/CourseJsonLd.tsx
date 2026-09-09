@@ -22,8 +22,11 @@ export function CourseJsonLd({ lesson, module: mod }: { lesson: Lesson; module: 
   return (
     <script
       type="application/ld+json"
-      // Content is our own frontmatter, not user input.
-      dangerouslySetInnerHTML={{ __html: JSON.stringify(data) }}
+      // Content is our own frontmatter, but `</script>` inside a lesson title
+      // or summary would still close this tag early and drop the rest of the
+      // page's markup into it. Escaping `<` keeps the JSON valid (JSON parsers
+      // read \u003c as `<`) and makes that impossible.
+      dangerouslySetInnerHTML={{ __html: JSON.stringify(data).replace(/</g, "\\u003c") }}
     />
   );
 }

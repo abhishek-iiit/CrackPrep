@@ -1,8 +1,11 @@
 import Link from "next/link";
-import { getCourseStats } from "@/lib/content";
+import { courseSlug, getCourseStats } from "@/lib/content";
 
 export function Footer() {
-  const stats = getCourseStats("system-design");
+  // courseSlug, not a literal: this was the only hardcoded slug outside lib/,
+  // and getCourseStats returns zeros for an unknown course — so renaming the
+  // course would have left the footer quietly claiming "0 modules · 0 topics".
+  const stats = getCourseStats(courseSlug);
 
   return (
     <footer className="mt-24 border-t-2 border-structural">

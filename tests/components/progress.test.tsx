@@ -115,6 +115,19 @@ describe("CourseProgress", () => {
     expect(container).toBeEmptyDOMElement();
   });
 
+  it("never reports more complete than the course holds", () => {
+    // Progress keys carry no course namespace, so a renamed slug leaves a
+    // stale key behind and a second course would share the set. Either can
+    // outnumber `total`, and aria-valuenow > aria-valuemax is invalid.
+    progressStore.toggle("foundations/renamed-away");
+    progressStore.toggle("foundations/requirements-clarification");
+    render(<CourseProgress total={1} />);
+    const bar = screen.getByRole("progressbar");
+    expect(bar).toHaveAttribute("aria-valuenow", "1");
+    expect(bar).toHaveAttribute("aria-valuemax", "1");
+    expect(screen.getByText("1 / 1 complete")).toBeInTheDocument();
+  });
+
   it("reports progress once a lesson is complete", () => {
     progressStore.toggle("foundations/requirements-clarification");
     render(<CourseProgress total={179} />);

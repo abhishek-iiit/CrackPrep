@@ -15,10 +15,14 @@ function moduleDir(mod: ParsedModule): string {
 }
 
 function stub(mod: ParsedModule, topic: ParsedTopic): string {
+  // JSON.stringify for both, matching modulesFile() below. Hand-rolling the
+  // quote escaping got `title` right and `summary` wrong, so a topic title
+  // containing a double quote wrote invalid YAML and the next build failed in
+  // gray-matter rather than here.
   return `---
-title: "${topic.title.replace(/"/g, '\\"')}"
-number: "${topic.number}"
-summary: "${topic.title} — notes in progress."
+title: ${JSON.stringify(topic.title)}
+number: ${JSON.stringify(topic.number)}
+summary: ${JSON.stringify(`${topic.title} — notes in progress.`)}
 status: draft
 free: true
 difficulty: core

@@ -29,6 +29,10 @@ export default function SyllabusPage() {
           <a
             key={mod.slug}
             href={`#module-${mod.id}`}
+            // Without this the entire accessible name is the number, giving a
+            // screen-reader user 14 links called "01".."14" with nothing to
+            // choose between them.
+            aria-label={`Module ${mod.id}: ${mod.title}`}
             className="inline-flex min-h-11 items-center rounded-card border-2 border-structural bg-card px-3 font-mono text-xs uppercase transition-brut hover:shadow-hard-sm"
           >
             {mod.id}
@@ -42,8 +46,11 @@ export default function SyllabusPage() {
           return (
             <section key={mod.slug} id={`module-${mod.id}`} className="scroll-mt-24">
               <div className="flex items-baseline gap-3">
+                {/* Announced, like every other module-id badge on the site
+                    (ModuleCard, the module page): the number is real
+                    information here, not a decoration duplicating the
+                    heading beside it. */}
                 <span
-                  aria-hidden
                   style={{ backgroundColor: pair.surface, color: pair.ink }}
                   className="rounded-card px-2 py-0.5 font-pixel text-lg"
                 >

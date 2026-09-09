@@ -16,13 +16,12 @@ function isLive(slug: string): boolean {
 export function getCourses(): Course[] {
   return courseRecords.map((record) => {
     const live = record.status === "live" && isLive(record.slug);
-    const mods = live ? loadModules() : [];
-    return {
-      ...record,
-      moduleCount: mods.length,
-      topicCount: mods.reduce((sum, m) => sum + m.totalCount, 0),
-      url: live ? `/${record.slug}` : "",
-    };
+    // One definition of the totals, shared with getCourseStats below — this
+    // used to carry its own copy of the same reduce.
+    const { moduleCount, topicCount } = live
+      ? getCourseStats(record.slug)
+      : { moduleCount: 0, topicCount: 0 };
+    return { ...record, moduleCount, topicCount, url: live ? `/${record.slug}` : "" };
   });
 }
 

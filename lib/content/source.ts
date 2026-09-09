@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import matter from "gray-matter";
-import { modules as moduleRecords } from "@/content/system-design/modules";
+import { modules as moduleRecords, type ModuleRecord } from "@/content/system-design/modules";
 import { frontmatterSchema, moduleRecordSchema } from "./schema";
 import type { Lesson, LessonMeta, Module } from "./types";
 
@@ -12,18 +12,41 @@ function lessonUrl(moduleSlug: string, slug: string): string {
   return `/${COURSE_SLUG}/${moduleSlug}/${slug}`;
 }
 
+/** Indented, one issue per line — a bare ZodError is unreadable in build output. */
+function formatIssues(error: { issues: { path: PropertyKey[]; message: string }[] }): string {
+  return error.issues
+    .map((i) => `  ${i.path.join(".") || "(root)"}: ${i.message}`)
+    .join("\n");
+}
+
 function readLessonFile(dir: string, file: string) {
   const raw = readFileSync(join(CONTENT_ROOT, dir, file), "utf8");
   const parsed = matter(raw);
   const result = frontmatterSchema.safeParse(parsed.data);
   if (!result.success) {
     throw new Error(
-      `invalid frontmatter in content/${COURSE_SLUG}/${dir}/${file}:\n${result.error.issues
-        .map((i) => `  ${i.path.join(".") || "(root)"}: ${i.message}`)
-        .join("\n")}`,
+      `invalid frontmatter in content/${COURSE_SLUG}/${dir}/${file}:\n${formatIssues(result.error)}`,
     );
   }
   return { frontmatter: result.data, body: parsed.content };
+}
+
+/**
+ * Like readLessonFile's parse, this names where the bad data lives. A bare
+ * `.parse()` threw "Invalid input: expected string" with no hint that the
+ * offending value is in the generated registry, let alone which record — and
+ * that file holds 14 of them.
+ */
+function parseModuleRecord(record: ModuleRecord, index: number): ModuleRecord {
+  const result = moduleRecordSchema.safeParse(record);
+  if (!result.success) {
+    throw new Error(
+      `invalid module record in content/${COURSE_SLUG}/modules.ts (record ${
+        index + 1
+      }, id "${record.id}"):\n${formatIssues(result.error)}`,
+    );
+  }
+  return result.data;
 }
 
 let cache: readonly Module[] | null = null;
@@ -53,8 +76,8 @@ function freezeModules(modules: Module[]): readonly Module[] {
 export function loadModules(): readonly Module[] {
   if (cache) return cache;
 
-  const built: Module[] = moduleRecords.map((record) => {
-    const validated = moduleRecordSchema.parse(record);
+  const built: Module[] = moduleRecords.map((record, index) => {
+    const validated = parseModuleRecord(record, index);
 
     const files = readdirSync(join(CONTENT_ROOT, validated.dir))
       .filter((f) => f.endsWith(".mdx"))

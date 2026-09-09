@@ -23,7 +23,7 @@ The task-by-task implementation plan that built this repo:
 
 ```bash
 npm install
-cp .env.example .env.local   # optional — see below
+cp .env.example .env.local   # required before `npm run build` — see below
 npm run dev
 ```
 
@@ -34,8 +34,12 @@ Then open `http://localhost:3000`.
 See `.env.example`. Both are optional in development:
 
 - `NEXT_PUBLIC_SITE_URL` — absolute origin used to build the sitemap,
-  `robots.txt`, and JSON-LD. Defaults to `http://localhost:3000` if unset
-  (`lib/site.ts`).
+  `robots.txt`, and JSON-LD. Defaults to `http://localhost:3000` in
+  development and test, but a **production build with it unset fails at
+  module load** (`lib/site.ts`) rather than shipping 197 sitemap entries
+  pointing at localhost. So `npm run build`, `npm run verify` and
+  `npm run verify:all` need it set; `npm run dev` and `npm test` do not.
+  (`npm run test:e2e` supplies it itself — see `playwright.config.ts`.)
 - `NEXT_PUBLIC_SUBSCRIBE_ENDPOINT` — where the landing page's email-capture
   form posts. If unset, the form does not fake a success state; it renders an
   honest "signup is not configured yet" message instead

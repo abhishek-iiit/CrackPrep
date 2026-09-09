@@ -32,7 +32,11 @@ export function ProgressTracker({ lessonKey }: { lessonKey: string }) {
 /** Consumed by Task 11's course page to summarise progress across a course's lessons. */
 export function CourseProgress({ total }: { total: number }) {
   const { completed } = useProgress();
-  const done = completed.size;
+  // Clamped, because the stored keys are `moduleSlug/topicSlug` with no course
+  // namespace: a renamed slug leaves its key behind and a second course would
+  // write into the same set, either of which can push the count past `total`
+  // and emit aria-valuenow > aria-valuemax — an invalid progressbar.
+  const done = Math.min(completed.size, total);
 
   // Render nothing until there is progress. A "0 / 179 complete" bar on a first
   // visit is noise, and it would announce a progressbar at aria-valuenow=0 to
