@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 import { render, screen } from "@testing-library/react";
 import { Callout } from "@/components/mdx/Callout";
 import { Figure } from "@/components/mdx/Figure";
+import { Formula } from "@/components/mdx/Formula";
 import { KeyTakeaways } from "@/components/mdx/KeyTakeaways";
+import { Step, Steps } from "@/components/mdx/Steps";
 import { Tradeoff } from "@/components/mdx/Tradeoff";
 import { InlineCode } from "@/components/mdx/CodeBlock";
 import { mdxComponents } from "@/components/mdx";
@@ -19,6 +21,21 @@ describe("Callout", () => {
     render(<Callout type="warn">Careful.</Callout>);
     expect(screen.getByRole("note", { name: /warning/i })).toBeInTheDocument();
   });
+
+  it("gives each of the four types a different glyph", () => {
+    // `AlertTriangle` is lucide's deprecated ALIAS for `TriangleAlert` — the
+    // identical component object — so `warn` and `gotcha` used to render the
+    // same icon, and with one shared tint the four variants differed by a
+    // single word of label text. Compares the drawn paths, not the imported
+    // names, so a re-aliased icon cannot pass.
+    const shapes = (["note", "warn", "tip", "gotcha"] as const).map((type) => {
+      const { container, unmount } = render(<Callout type={type}>Body.</Callout>);
+      const svg = container.querySelector("svg")!.innerHTML;
+      unmount();
+      return svg;
+    });
+    expect(new Set(shapes).size).toBe(4);
+  });
 });
 
 describe("Tradeoff", () => {
@@ -31,8 +48,12 @@ describe("Tradeoff", () => {
         againstItems={["Writes dominate"]}
       />,
     );
-    expect(screen.getByRole("heading", { name: "Reach for it when" })).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Avoid it when" })).toBeInTheDocument();
+    // Titles are <p>, not headings: an <h4> under a lesson's <h2>s skipped a
+    // level, and a heading emitted by a component never reaches rehype-slug,
+    // so the table of contents could not list it anyway.
+    expect(screen.queryAllByRole("heading")).toHaveLength(0);
+    expect(screen.getByText("Reach for it when")).toBeInTheDocument();
+    expect(screen.getByText("Avoid it when")).toBeInTheDocument();
     expect(screen.getByText("Reads dominate")).toBeInTheDocument();
     expect(screen.getByText("Writes dominate")).toBeInTheDocument();
   });
@@ -48,13 +69,73 @@ describe("Tradeoff", () => {
 describe("KeyTakeaways", () => {
   it("renders a titled list", () => {
     render(<KeyTakeaways items={["One", "Two"]} />);
-    expect(screen.getByRole("heading", { name: /key takeaways/i })).toBeInTheDocument();
+    // <p>, not <h3> — see Tradeoff above.
+    expect(screen.queryAllByRole("heading")).toHaveLength(0);
+    expect(screen.getByText(/key takeaways/i)).toBeInTheDocument();
     expect(screen.getAllByRole("listitem")).toHaveLength(2);
   });
 
   it("renders nothing when every item is blank", () => {
     const { container } = render(<KeyTakeaways items={["", "", ""]} />);
     expect(container).toBeEmptyDOMElement();
+  });
+});
+
+describe("Steps", () => {
+  it("numbers its steps in the rendered output", () => {
+    // The <ol> carried `[counter-reset:step]` and nothing ever incremented
+    // it, and Tailwind's preflight zeroes the list marker — so a "numbered
+    // walkthrough" rendered with no numbers at all, which is why one lesson
+    // hand-numbered its steps into their titles.
+    render(
+      <Steps>
+        <Step title="Append the record to the WAL">Sequential append.</Step>
+        <Step title="Insert into the memtable">Sorted insert.</Step>
+        <Step title="Acknowledge">Durable and visible.</Step>
+      </Steps>,
+    );
+    const items = screen.getAllByRole("listitem");
+    expect(items).toHaveLength(3);
+    expect(items[0]).toHaveTextContent(/^1 Append the record to the WAL/);
+    expect(items[1]).toHaveTextContent(/^2 Insert into the memtable/);
+    expect(items[2]).toHaveTextContent(/^3 Acknowledge/);
+  });
+
+  it("keeps numbering the remaining steps when one is removed", () => {
+    // The point of numbering in the component rather than in the prose: the
+    // lesson that hand-numbered its titles would have gone 1, 2, 4 the first
+    // time anyone dropped a step.
+    render(
+      <Steps>
+        <Step title="First" />
+        <Step title="Second" />
+      </Steps>,
+    );
+    const items = screen.getAllByRole("listitem");
+    expect(items[0]).toHaveTextContent(/^1 First$/);
+    expect(items[1]).toHaveTextContent(/^2 Second$/);
+  });
+
+  it("emits no heading, so it cannot skip a level under the lesson's h2s", () => {
+    render(
+      <Steps>
+        <Step title="Only step" />
+      </Steps>,
+    );
+    expect(screen.queryAllByRole("heading")).toHaveLength(0);
+  });
+});
+
+describe("Formula", () => {
+  it("carries its label as the accessible name of the math region", () => {
+    // `label` is the only thing that tells a screen-reader user what the
+    // monospace expression is, and role="math" without a name announces as
+    // an unlabelled region.
+    render(<Formula label="Bloom filter false positive rate">(1 - e^(-kn/m))^k</Formula>);
+    const math = screen.getByRole("math", {
+      name: "Bloom filter false positive rate",
+    });
+    expect(math).toHaveTextContent("(1 - e^(-kn/m))^k");
   });
 });
 

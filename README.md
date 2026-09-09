@@ -126,7 +126,9 @@ MDX bodies have access to these components (registered in
   pros/cons, the workhorse for system design content.
 - `<KeyTakeaways items={[...]}>` — end-of-lesson summary list.
 - `<Figure>` — image with a caption; **fails the build if `alt` is missing.**
-- `<Steps>` / `<Step>` — numbered walkthroughs.
+- `<Steps>` / `<Step>` — numbered walkthroughs. `<Steps>` numbers its
+  `<Step>` children itself, so do **not** put a number in a step's `title`;
+  a hand-written one goes wrong the first time a step is reordered.
 - `<Formula>` — a formatted formula/expression block.
 
 The generator's stub template (`scripts/generate-content.ts`) shows the

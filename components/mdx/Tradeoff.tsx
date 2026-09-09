@@ -9,7 +9,11 @@ function Column({ title, items }: { title: string; items: string[] }) {
   const real = items.filter((i) => i.trim().length > 0);
   return (
     <div className="flex-1 rounded-card border-2 border-structural bg-card p-4">
-      <h4 className="font-mono text-xs uppercase tracking-wider">{title}</h4>
+      {/* <p>, not a heading: <h4> under the lesson's <h2>s skipped a level,
+          and a component-emitted heading never passes through rehype-slug, so
+          the table of contents silently omitted it. Same classes as
+          KeyTakeaways' title, which is the same kind of card label. */}
+      <p className="font-mono text-xs uppercase tracking-wider">{title}</p>
       {real.length > 0 && (
         <ul className="mt-3 space-y-2 text-sm">
           {/* Index keys: the list is static and its items are plain strings,

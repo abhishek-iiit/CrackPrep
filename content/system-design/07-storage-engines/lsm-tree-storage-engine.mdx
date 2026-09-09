@@ -55,22 +55,22 @@ The sparse index holds one entry per block rather than per key, so it stays smal
 ## The write path
 
 <Steps>
-  <Step title="1 — Append the record to the WAL">
+  <Step title="Append the record to the WAL">
     Serialise the key, the value or tombstone, and the sequence number, then append to the log. If the write must survive a crash, this is where the fsync happens — the only synchronous device touch on the whole path, and a sequential append. Group commit amortises it: many concurrent writers land in one log buffer and share a single fsync, so the durable write rate is bounded by fsyncs per second times batch size rather than by writes per second. That is what puts a single engine in the tens of thousands of durable writes a second — a ballpark to reason with, not a benchmark, since it moves with the device, the batch size, and how many writers are in flight.
   </Step>
-  <Step title="2 — Insert into the memtable">
+  <Step title="Insert into the memtable">
     A sorted insert into an in-memory structure, logarithmic in the number of entries it holds. An update to an existing key does not overwrite anything: it is a new entry with a higher sequence number, sitting alongside the old one. That is what makes the design append-only end to end rather than only at the file level.
   </Step>
-  <Step title="3 — Acknowledge">
+  <Step title="Acknowledge">
     The write is now durable (it is in the log) and visible (it is in the memtable). No data file has been touched. This is why the foreground write cost is nearly independent of how much data the engine already holds.
   </Step>
-  <Step title="4 — Rotate the memtable when it fills">
+  <Step title="Rotate the memtable when it fills">
     At its size bound the memtable is frozen and a fresh one takes over immediately; incoming writes never wait for a flush. Memory stays bounded, and the frozen table remains readable while it waits its turn.
   </Step>
-  <Step title="5 — Flush the frozen memtable as one L0 SSTable">
+  <Step title="Flush the frozen memtable as one L0 SSTable">
     One sequential pass in key order: data blocks, then the Bloom filter, then the sparse index, then the footer. Once the file is fsynced and recorded in the manifest, the log segments whose writes it contains can be deleted — the file is now the durable copy. Note what the flush does *not* do: it does not merge with anything, which is why L0 files overlap.
   </Step>
-  <Step title="6 — Compact in the background, forever">
+  <Step title="Compact in the background, forever">
     Compaction threads pick files by a policy, merge-sort them with the overlapping files of the next level down, drop values that a newer version supersedes and tombstones that can no longer be shadowing anything, and write fresh immutable files. Superseded files are unlinked once no open reader or snapshot still needs them.
   </Step>
 </Steps>
@@ -86,22 +86,22 @@ And compaction is not free even when it keeps up. It reads and rewrites data tha
 A read has to answer "what is the newest version of this key" when the key's versions may be spread across the memtable and any number of files.
 
 <Steps>
-  <Step title="1 — Search the active memtable">
+  <Step title="Search the active memtable">
     The newest data lives here. A hit ends the search immediately — including a tombstone hit, which means the key was deleted and the answer is "not found", regardless of what older files still contain.
   </Step>
-  <Step title="2 — Search any frozen memtables not yet flushed">
+  <Step title="Search any frozen memtables not yet flushed">
     Same structure, next-newest data. Under a heavy write load there may be several waiting for flush.
   </Step>
-  <Step title="3 — Search every L0 file, newest first">
+  <Step title="Search every L0 file, newest first">
     L0 key ranges overlap, so L0 cannot be narrowed to a single file by range, and in the worst case every L0 file is a candidate. Each file still carries its own minimum and maximum key, so a lookup skips any file whose range excludes the key — which prunes most of L0 for time-ordered keys and almost none of it for hashed ones. Either way an L0 file count is a read-latency metric: every surviving candidate costs at least a filter probe, and each filter that says "maybe" costs an index lookup and a block read.
   </Step>
-  <Step title="4 — Search at most one file per level below L0">
+  <Step title="Search at most one file per level below L0">
     Within L1 and deeper, runs are non-overlapping, so the manifest's key ranges identify exactly one candidate file per level. Probe its filter; if it says maybe, binary search the sparse index, read the one block that could hold the key, and search inside it. A point read therefore costs at most one block read per level, and usually zero for keys that are not there.
   </Step>
-  <Step title="5 — Return the first hit, and treat a tombstone as absence">
+  <Step title="Return the first hit, and treat a tombstone as absence">
     Because the search runs newest to oldest, the first version found is the current one; sequence numbers resolve any ambiguity and give snapshot reads a consistent cut. A tombstone is a hit that returns "not found".
   </Step>
-  <Step title="6 — Serve range scans by merging iterators">
+  <Step title="Serve range scans by merging iterators">
     A scan opens an iterator on the memtable and on every candidate file, then merges them k-way, emitting the newest version of each key and skipping shadowed ones. Its cost is proportional to the number of sorted runs it has to merge — which is exactly the quantity compaction exists to keep small. This is the access pattern where an LSM engine is furthest behind a B-tree.
   </Step>
 </Steps>
