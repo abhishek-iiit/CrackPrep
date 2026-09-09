@@ -218,6 +218,14 @@ ever" rule in prose at the one place it could happen.
   `npm run verify:all` adds the e2e suite on the end and is the one to run
   before considering the branch done.
 
+## Known issues
+
+`docs/known-issues.md` lists what the final whole-branch review found and left
+deliberately — the lesson sidebar's payload weight, a latent heading-slug
+divergence, some duplication, and dead code. Each entry names a line and says
+what would turn it into a real bug. Read it before starting work in any of
+those areas.
+
 ## Project structure
 
 ```
