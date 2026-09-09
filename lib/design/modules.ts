@@ -41,3 +41,19 @@ export const colorKeys = Object.keys(moduleColors) as ColorKey[];
  * leaves headroom (worst case 4.75:1, orange on dark paper).
  */
 export const PLANNED_CARD_OPACITY = 0.95;
+
+/**
+ * Opacity applied to de-emphasised body text sitting ON a module surface —
+ * a module card's blurb and the module page's blurb.
+ *
+ * Element `opacity` on text over a coloured surface composites the ink toward
+ * that surface, so the rendered ratio is always LOWER than the token pair's
+ * raw ratio: the worst key here renders at 4.68:1 against a raw 5.18:1, with
+ * only 0.18 to spare. tests/design/contrast.test.ts checks the composited
+ * value for all 14 keys, so a future palette edit that still clears 4.5:1 raw
+ * cannot quietly ship a sub-AA blurb. It is a number rather than the
+ * `opacity-90` utility for the same reason PLANNED_CARD_OPACITY is: the
+ * components and the guard must read one value, not a class name and a
+ * hardcoded 0.9 that can drift apart.
+ */
+export const MUTED_ON_SURFACE_OPACITY = 0.9;

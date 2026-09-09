@@ -16,11 +16,10 @@ function walk(dir: string, out: string[] = []): string[] {
   return out;
 }
 
-const ALLOWED_FS = [
-  join("lib", "content", "source.ts"),
-  join("scripts", ""),
-  join("tests", ""),
-];
+// walk() is only ever called on app/, components/ and lib/, so scripts/ and
+// tests/ entries could never match anything and only made the allow-list look
+// broader than it is. One file may reach the filesystem.
+const ALLOWED_FS = [join("lib", "content", "source.ts")];
 
 describe("filesystem access is confined to the content source", () => {
   const files = [...walk("app"), ...walk("components"), ...walk("lib")];
@@ -31,7 +30,9 @@ describe("filesystem access is confined to the content source", () => {
   });
 
   it.each(files)("%s does not import node:fs", (file) => {
-    if (ALLOWED_FS.some((allowed) => file.includes(allowed))) return;
+    // Exact relative path, not `includes`: a substring match would also
+    // exempt any future file whose path merely contains the allowed one.
+    if (ALLOWED_FS.includes(file)) return;
     const src = readFileSync(file, "utf8");
     expect(src).not.toMatch(/from\s+["'](node:)?fs["']/);
     expect(src).not.toMatch(/require\(["'](node:)?fs["']\)/);
@@ -51,41 +52,35 @@ describe("filesystem access is confined to the content source", () => {
 });
 
 describe("client components are limited to the seven named leaves", () => {
-  const ALLOWED_CLIENT = new Set([
-    "ThemeToggle", "AnnouncementBar", "SidebarTree",
-    "TableOfContents", "ProgressTracker", "SearchPalette",
-    "error", // Next.js requires error boundaries to be client components
-  ]);
+  // Full relative paths, not basenames: a basename allow-list exempts a
+  // second file of the same name anywhere in the tree, and — worse — an
+  // offenders-only assertion cannot notice a DELETION. Deleting
+  // SidebarTree.tsx left this suite green while both this describe title and
+  // README's "limited to seven named leaves" became false. Comparing the
+  // exact set both ways, asserting the list is seven long, and asserting each
+  // path exists on disk closes all three holes at once.
+  const CLIENT_COMPONENTS = [
+    join("app", "error.tsx"), // Next requires error boundaries to be client
+    join("components", "layout", "AnnouncementBar.tsx"),
+    join("components", "layout", "ThemeToggle.tsx"),
+    join("components", "lesson", "ProgressTracker.tsx"),
+    join("components", "lesson", "SidebarTree.tsx"),
+    join("components", "lesson", "TableOfContents.tsx"),
+    join("components", "search", "SearchPalette.tsx"),
+  ];
 
-  it("declares 'use client' only in allowed files", () => {
-    const offenders: string[] = [];
-    for (const file of [...walk("app"), ...walk("components"), ...walk("lib")]) {
-      const src = readFileSync(file, "utf8");
-      if (!/^\s*["']use client["']/m.test(src)) continue;
-      const base = file.split("/").pop()!.replace(/\.tsx?$/, "");
-      if (!ALLOWED_CLIENT.has(base)) offenders.push(file);
-    }
-    expect(offenders).toEqual([]);
+  it("names exactly seven", () => {
+    expect(CLIENT_COMPONENTS).toHaveLength(7);
   });
-});
 
-describe("PathCards has no opacity beyond the two known-safe decorative ones", () => {
-  // A nested opacity on TEXT here (e.g. the blurb <p> once had opacity-90)
-  // compounds with PLANNED_CARD_OPACITY in a way
-  // tests/design/contrast.test.ts's card-level compositing guard cannot see
-  // — three colour keys rendered sub-AA the one time this happened (fix
-  // round 2). A blanket "no opacity- class anywhere in the file" ban is too
-  // strong, though: the decorative stacked-card motif (aria-hidden, not
-  // text, never scanned for contrast) legitimately uses opacity-40 and
-  // opacity-70 and predates this guard. So this pins the exact allowed set
-  // instead of banning the token outright — any OTHER opacity-<N>
-  // (including a reintroduced one on real text) changes the matched set and
-  // fails. Matches actual Tailwind utility class tokens, not the word
-  // "opacity" or the PLANNED_CARD_OPACITY identifier in prose/comments —
-  // kept in the same spirit as the gray-matter import guard above.
-  it("uses only opacity-40 and opacity-70 (the decorative motif)", () => {
-    const src = readFileSync(join("components", "landing", "PathCards.tsx"), "utf8");
-    const found = src.match(/\bopacity-\d+\b/g) ?? [];
-    expect(new Set(found)).toEqual(new Set(["opacity-40", "opacity-70"]));
+  it.each(CLIENT_COMPONENTS)("%s exists", (file) => {
+    expect(existsSync(file)).toBe(true);
+  });
+
+  it("declares 'use client' in exactly those seven files", () => {
+    const found = [...walk("app"), ...walk("components"), ...walk("lib")]
+      .filter((file) => /^\s*["']use client["']/m.test(readFileSync(file, "utf8")))
+      .sort();
+    expect(found).toEqual([...CLIENT_COMPONENTS].sort());
   });
 });

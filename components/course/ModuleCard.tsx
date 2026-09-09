@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { ArrowRight } from "lucide-react";
-import { moduleColors } from "@/lib/design/modules";
+import { MUTED_ON_SURFACE_OPACITY, moduleColors } from "@/lib/design/modules";
 import type { Module } from "@/lib/content";
 
 export function ModuleCard({ module: mod }: { module: Module }) {
@@ -16,7 +16,12 @@ export function ModuleCard({ module: mod }: { module: Module }) {
     >
       <span className="font-pixel text-2xl">{mod.id}</span>
       <h3 className="mt-3 text-lg font-semibold">{mod.title}</h3>
-      <p className="mt-2 flex-1 text-sm opacity-90">{mod.blurb}</p>
+      {/* The opacity comes from the shared constant, not the `opacity-90`
+          utility, so the contrast guard measures the value actually rendered
+          — see MUTED_ON_SURFACE_OPACITY. */}
+      <p style={{ opacity: MUTED_ON_SURFACE_OPACITY }} className="mt-2 flex-1 text-sm">
+        {mod.blurb}
+      </p>
       <span className="mt-4 flex items-center gap-2 font-mono text-xs uppercase tracking-wider">
         {/* One string, not a fragment: JSX strips the trailing whitespace before
             a newline, so `topics{cond && <>· …</>}` renders "13 topics· 1

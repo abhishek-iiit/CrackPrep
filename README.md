@@ -169,16 +169,24 @@ A few rules are structural, not stylistic, and are enforced by
   path card on the landing page) against both light and dark page
   backgrounds. CSS `opacity` composites the ink as well as the surface onto
   whatever sits behind it, so a pair that clears 4.5:1 on its own can still
-  fail once composited — this is why `components/landing/PathCards.tsx` has
-  a "no opacity on real content, ever" rule enforced by its own guard in
-  `boundaries.test.ts`; opacity there is confined to two decorative,
-  `aria-hidden` values.
+  fail once composited.
+- Every module's ink is checked again composited at
+  `MUTED_ON_SURFACE_OPACITY`, the de-emphasis applied to blurb text sitting
+  on a module surface (a module card, a module page header). That value
+  lives in `lib/design/modules.ts` and is applied as a number rather than as
+  the `opacity-90` utility, so the guard measures what actually renders:
+  orange's blurb reaches the screen at 4.68:1 from a raw 5.18:1, and a
+  future key at 4.55 raw would render near 3.95.
 - Base text/link/destructive tokens are ≥4.5:1 (≥3:1 for the structural
   border, per WCAG 1.4.11) in both themes.
 
-**Do not edit a module colour or `PLANNED_CARD_OPACITY` without re-running
+**Do not edit a module colour or either opacity constant without re-running
 `npx vitest run tests/design/contrast.test.ts`.** A colour that looks fine on
-its own can still fail once it's the "planned" opacity variant.
+its own can still fail once it is composited — and note that opacity does not
+compose: a de-emphasis nested inside the planned card would compound with
+`PLANNED_CARD_OPACITY` in a way neither guard models, which is why
+`components/landing/PathCards.tsx` carries a "no opacity on real content,
+ever" rule in prose at the one place it could happen.
 
 ## Testing
 

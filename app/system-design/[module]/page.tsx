@@ -3,7 +3,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { ArrowRight } from "lucide-react";
 import { Badge } from "@/components/ui/Badge";
-import { moduleColors } from "@/lib/design/modules";
+import { MUTED_ON_SURFACE_OPACITY, moduleColors } from "@/lib/design/modules";
 import { courseSlug, getModule, getModules } from "@/lib/content";
 
 type Params = { module: string };
@@ -49,7 +49,10 @@ export default async function ModulePage({ params }: { params: Promise<Params> }
       >
         <span className="font-pixel text-3xl">{mod.id}</span>
         <h1 className="mt-2 text-3xl font-semibold">{mod.title}</h1>
-        <p className="mt-2 max-w-prose opacity-90">{mod.blurb}</p>
+        {/* Shared constant, not `opacity-90` — see MUTED_ON_SURFACE_OPACITY. */}
+        <p style={{ opacity: MUTED_ON_SURFACE_OPACITY }} className="mt-2 max-w-prose">
+          {mod.blurb}
+        </p>
         <p className="mt-4 font-mono text-xs uppercase tracking-wider">
           {mod.totalCount} topics
           {mod.publishedCount > 0 && ` · ${mod.publishedCount} written`}
