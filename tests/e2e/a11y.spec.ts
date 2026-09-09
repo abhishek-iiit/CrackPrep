@@ -1,5 +1,6 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
+import { waitForHydration } from "./helpers";
 
 const PAGES = [
   "/",
@@ -8,9 +9,12 @@ const PAGES = [
   "/system-design",
   "/system-design/storage-engines",
   "/system-design/storage-engines/lsm-tree-storage-engine",
-  // Only page in PAGES with a Formula (role="math") block — two of them, plus
-  // a second code sample — so this is the only coverage for the tabIndex fix
-  // made on components/mdx/Formula.tsx and CodeBlock.tsx's scroll-x wrappers.
+  // The only page in PAGES with a Formula (role="math") block, and a second
+  // code sample. It does NOT cover a tabIndex fix — Formula's scroll-x/tabIndex
+  // were removed (fix round 2: axe never fires there, since a formula wraps
+  // instead of overflowing and so is never actually scrollable). What this
+  // entry actually caught was a real dark-mode color-contrast defect in the
+  // code block's syntax-highlighting theme — see fix round 1's report.
   "/system-design/nosql-partitioning-ids/bloom-filters",
 ];
 
@@ -46,13 +50,7 @@ test("the open search dialog has no critical or serious axe violations", async (
   // IDREF is exactly what axe's aria-valid-attr-value catches — so the dialog
   // needs its own scan, across all three states it can render.
   await page.goto("/system-design");
-  // Wait for hydration before dispatching Cmd+K: the shortcut listener is
-  // attached in a useEffect on `window`, outside React's delegated root, so a
-  // keydown that arrives before the effect runs is silently dropped and never
-  // retried (unlike a click, which React replays against the pre-hydration DOM).
-  await expect(
-    page.getByRole("button", { name: /switch to (dark|light) theme/i }),
-  ).toBeVisible();
+  await waitForHydration(page);
   await page.keyboard.press("ControlOrMeta+k");
   await expect(page.getByRole("dialog", { name: /search lessons/i })).toBeVisible();
 
@@ -73,6 +71,44 @@ test("the open search dialog has no critical or serious axe violations", async (
   await page.keyboard.press("ControlOrMeta+a");
   await page.keyboard.type("zzzzzz");
   await expect(page.getByText(/No lesson matches/)).toBeVisible();
+  await expectClean(page);
+});
+
+test("the search dialog has no violations while the index is still loading", async ({ page }) => {
+  // The critical aria-required-attr bug this suite caught lived in exactly
+  // the two states above never covered: docs === null (loading) and
+  // docs !== null but empty (index fetched, zero published lessons). Both
+  // are hasOptions === false, same as the zero-results state above, but that
+  // state is reached via a real fetch that always resolves fast with real
+  // data — it never actually exercises "docs === null" as observed state.
+  // Holding the /search-index.json response open here is what does.
+  let releaseIndex: () => void;
+  const held = new Promise<void>((resolve) => {
+    releaseIndex = resolve;
+  });
+  await page.route("**/search-index.json", async (route) => {
+    await held;
+    await route.fulfill({ json: [] });
+  });
+
+  await page.goto("/system-design");
+  await waitForHydration(page);
+  await page.keyboard.press("ControlOrMeta+k");
+  await expect(page.getByRole("dialog", { name: /search lessons/i })).toBeVisible();
+  await expect(page.getByText("Loading index…")).toBeVisible();
+  await expectClean(page);
+
+  releaseIndex!();
+});
+
+test("the search dialog has no violations when the index is empty", async ({ page }) => {
+  await page.route("**/search-index.json", (route) => route.fulfill({ json: [] }));
+
+  await page.goto("/system-design");
+  await waitForHydration(page);
+  await page.keyboard.press("ControlOrMeta+k");
+  await expect(page.getByRole("dialog", { name: /search lessons/i })).toBeVisible();
+  await expect(page.getByText("No lessons are published yet.")).toBeVisible();
   await expectClean(page);
 });
 

@@ -1,20 +1,5 @@
-import { expect, test, type Page } from "@playwright/test";
-
-/**
- * SearchPalette's Cmd+K listener is attached via `window.addEventListener`
- * inside a useEffect — outside React's delegated root. `page.goto()` resolves
- * on `load`, which precedes React running its effects, so a keydown
- * dispatched in that window is silently dropped and never retried (unlike a
- * click, which React replays against the pre-hydration DOM). Waiting on
- * ThemeToggle's label — "Switch theme" pre-hydration, directional after —
- * guarantees the post-hydration effect pass has already run, so the listener
- * is attached before the shortcut is pressed.
- */
-async function waitForHydration(page: Page) {
-  await expect(
-    page.getByRole("button", { name: /switch to (dark|light) theme/i }),
-  ).toBeVisible();
-}
+import { expect, test } from "@playwright/test";
+import { waitForHydration } from "./helpers";
 
 test("search palette is fully keyboard operable", async ({ page }) => {
   await page.goto("/system-design");
