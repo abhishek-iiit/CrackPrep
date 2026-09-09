@@ -408,8 +408,17 @@ sidebar's data projection already exists.
 
 `<Callout type="note|warn|tip|gotcha">`, `<Tradeoff>` (side-by-side
 pros/cons — the workhorse for system design), `<KeyTakeaways>`, `<Figure>`
-(caption, `alt` required), `<Steps>`, `<Formula>`, `<Term>` (inline glossary),
-and code blocks with language label and copy button.
+(caption, `alt` required), `<Steps>`, `<Formula>`, and code blocks with
+language label and copy button.
+
+**`<Term>` (inline glossary) was specified here and deliberately NOT built.**
+Nothing in the curriculum references it: none of the 179 generated stubs and
+none of the three written lessons use it, so shipping it would have added an
+unused component and an untested code path. It is a genuine, if small, gap
+against the spec as originally approved rather than an oversight — recorded
+here so the decision is visible instead of being inferred from its absence.
+Build it when a lesson actually needs a glossary term, together with whatever
+glossary storage it should read from, which this spec never defined.
 
 `<Figure>` fails the build if `alt` is missing. Diagrams are inline SVG with
 theme-aware `currentColor` strokes — never raster screenshots of text.

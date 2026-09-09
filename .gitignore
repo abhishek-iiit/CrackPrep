@@ -32,6 +32,9 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+# ...but .env.example documents the variables and is MEANT to be committed.
+# Without this negation `git add .env.example` fails silently with exit 1.
+!.env.example
 
 # vercel
 .vercel
