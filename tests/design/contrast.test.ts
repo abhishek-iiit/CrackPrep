@@ -32,6 +32,21 @@ describe("contrastRatio", () => {
   });
 });
 
+describe("compositeOver", () => {
+  it("returns the foreground unchanged at alpha 1", () => {
+    expect(compositeOver("#1D4ED8", "#FAF8F4", 1)).toBe("#1D4ED8");
+  });
+
+  it("returns the background unchanged at alpha 0", () => {
+    expect(compositeOver("#1D4ED8", "#FAF8F4", 0)).toBe("#FAF8F4");
+  });
+
+  it("rejects an out-of-range alpha", () => {
+    expect(() => compositeOver("#1D4ED8", "#FAF8F4", 1.1)).toThrow(/alpha out of range/i);
+    expect(() => compositeOver("#1D4ED8", "#FAF8F4", -0.1)).toThrow(/alpha out of range/i);
+  });
+});
+
 describe("module surfaces meet AA for their ink", () => {
   const entries = Object.entries(moduleColors);
 

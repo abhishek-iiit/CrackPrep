@@ -68,3 +68,24 @@ describe("client components are limited to the seven named leaves", () => {
     expect(offenders).toEqual([]);
   });
 });
+
+describe("PathCards has no opacity beyond the two known-safe decorative ones", () => {
+  // A nested opacity on TEXT here (e.g. the blurb <p> once had opacity-90)
+  // compounds with PLANNED_CARD_OPACITY in a way
+  // tests/design/contrast.test.ts's card-level compositing guard cannot see
+  // — three colour keys rendered sub-AA the one time this happened (fix
+  // round 2). A blanket "no opacity- class anywhere in the file" ban is too
+  // strong, though: the decorative stacked-card motif (aria-hidden, not
+  // text, never scanned for contrast) legitimately uses opacity-40 and
+  // opacity-70 and predates this guard. So this pins the exact allowed set
+  // instead of banning the token outright — any OTHER opacity-<N>
+  // (including a reintroduced one on real text) changes the matched set and
+  // fails. Matches actual Tailwind utility class tokens, not the word
+  // "opacity" or the PLANNED_CARD_OPACITY identifier in prose/comments —
+  // kept in the same spirit as the gray-matter import guard above.
+  it("uses only opacity-40 and opacity-70 (the decorative motif)", () => {
+    const src = readFileSync(join("components", "landing", "PathCards.tsx"), "utf8");
+    const found = src.match(/\bopacity-\d+\b/g) ?? [];
+    expect(new Set(found)).toEqual(new Set(["opacity-40", "opacity-70"]));
+  });
+});

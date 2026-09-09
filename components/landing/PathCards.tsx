@@ -24,7 +24,20 @@ function Inner({ course }: { course: Course }) {
       </p>
 
       <h3 className="mt-3 font-pixel text-2xl">{course.title}</h3>
-      <p className="mt-3 text-sm opacity-90">{course.blurb}</p>
+      {/* No opacity here, ever. Element opacity on a coloured surface
+          composites the ink as well as the surface (see PLANNED_CARD_OPACITY
+          below), and a SECOND, nested opacity on top of that compounds in a
+          way tests/design/contrast.test.ts's card-level guard cannot see —
+          it modeled the card's one compositing step, not two. That nested
+          opacity used to live here (a de-emphasis on the blurb text) and
+          three colour keys (teal, orange, fuchsia) rendered sub-AA the
+          moment they were used, with the axe suite blind to it too, since
+          axe composites accumulated text opacity against the page
+          background rather than the card surface it actually sits on.
+          text-sm against the title's larger pixel font already carries the
+          hierarchy; the planned card still reads as muted overall via
+          PLANNED_CARD_OPACITY, the "Soon" pill, and not being a link. */}
+      <p className="mt-3 text-sm">{course.blurb}</p>
 
       <ul className="mt-4 space-y-1 text-sm">
         {course.bullets.map((bullet) => (
