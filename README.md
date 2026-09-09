@@ -163,6 +163,15 @@ A few rules are structural, not stylistic, and are enforced by
   or updating the allow-list in `boundaries.test.ts` deliberately, not by
   accident.
 
+## Keyboard and screen-reader affordances
+
+Both layouts open with a `sr-only focus:not-sr-only` skip link targeting the
+`<main id="main" tabIndex={-1}>` they wrap. A lesson page puts roughly 34
+focusable elements — the header, the search trigger, the full sidebar tree —
+ahead of the prose, so without it a keyboard user tabs through the whole
+navigation on every page. `tabIndex={-1}` on the target is what makes the
+jump actually move focus rather than only scroll.
+
 ## Design tokens and module colours
 
 `lib/design/modules.ts` defines one `{surface, ink}` colour pair per module

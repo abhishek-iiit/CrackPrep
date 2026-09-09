@@ -196,3 +196,22 @@ test("sidebar collapses other modules and marks the current lesson", async ({ pa
     nav.getByRole("button", { name: /NoSQL, Partitioning & IDs/ }),
   ).toHaveAttribute("aria-expanded", "true");
 });
+
+test("the first tab stop is a skip link that moves focus to the main content", async ({
+  page,
+}) => {
+  // A lesson page puts ~34 focusable elements — header, search, the whole
+  // sidebar tree — ahead of the prose, and before this nothing on the site
+  // linked to the #main that had been sitting there unused.
+  await page.goto("/system-design/nosql-partitioning-ids/bloom-filters");
+  await page.keyboard.press("Tab");
+
+  const skip = page.getByRole("link", { name: /skip to content/i });
+  await expect(skip).toBeFocused();
+  // sr-only on its own would leave a sighted keyboard user tabbing into
+  // something they cannot see, so it must actually appear once focused.
+  await expect(skip).toBeInViewport();
+
+  await skip.press("Enter");
+  await expect(page.locator("main#main")).toBeFocused();
+});
