@@ -1,32 +1,111 @@
 ---
 title: "WebSockets Vs SSE Vs Long Polling"
 number: "11.04"
-summary: "WebSockets Vs SSE Vs Long Polling — notes in progress."
-status: draft
+summary: "When the server only needs to push, SSE is often enough; WebSockets earn their keep for bidirectional traffic, and long polling remains the HTTP fallback when neither channel survives the path."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 14
+tags: [sse, websockets, long-polling, browser]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Unidirectional push is a different product from a socket
 
-What breaks without this, and the situation that forces the decision.
+WebSockets, Server-Sent Events (SSE), and long polling are often listed as interchangeable "realtime" options. They are not. WebSockets are a bidirectional framed protocol after an HTTP Upgrade. SSE is an HTTP response that stays open and streams `text/event-stream` messages server-to-client only. Long polling is still request/response, held until an event or timeout. The useful question is not which is newest — it is whether the client must send on the same channel, whether the browser's EventSource constraints are acceptable, and what reconnect semantics you get for free.
 
-## How it works
+11.02 covers short/long/WebSocket cost modeling. 11.03 compares long poll and WebSockets on proxies and connection state. This lesson adds SSE and focuses on **when unidirectional push wins**.
 
-The mechanism, step by step.
+## What SSE actually gives you
 
-## Tradeoffs
+SSE is a single long-lived HTTP GET. The server responds with `Content-Type: text/event-stream` and writes events as they occur:
+
+```text
+event: feed
+id: 184392
+data: {"badge": 3}
+
+data: {"badge": 4}
+```
+
+Blank lines delimit events. An optional `id` field lets the browser's EventSource automatically send `Last-Event-ID` on reconnect so the server can resume. The API is unidirectional: the page opens EventSource, the server pushes, and anything the client must upload goes on ordinary `fetch`/XHR POSTs.
+
+That split is a feature when the product is mostly notifications, live scores, dashboards, or "new posts available" — the receive path stays simple HTTP, cacheable at the edges in some deployments, and compatible with infrastructure that already terminates HTTPS correctly. It is a non-feature when chat send, presence, and receive must share one ordered channel with minimal round trips.
+
+## Browser and protocol constraints that matter
+
+| Concern | WebSocket | SSE | Long polling |
+| --- | --- | --- | --- |
+| Direction | Bidirectional | Server → client only | Server → client per response (client starts each request) |
+| Browser API | `WebSocket` | `EventSource` (auto-reconnect, `Last-Event-ID`) | Manual `fetch` loop |
+| Binary frames | Yes | Text (UTF-8 event stream); binary needs encoding | Whatever the response body is |
+| HTTP/2 | One WS per connection model historically; browsers vary | Multiple SSE streams multiplex naturally on HTTP/2 | Multiplexes like any HTTP |
+| Auth headers | Fine in browsers via WS protocols/cookies; tokens often in query or first message | EventSource cannot set custom headers — cookie or query token patterns dominate | Full control of headers every request |
+| Reconnect | Application-defined | Built into EventSource with backoff | Application-defined (open next poll) |
+| Proxy familiarity | Upgrade must be allowed | Looks like a slow HTTP response | Looks like a slow HTTP response |
+
+<Callout type="gotcha">
+EventSource in browsers will not let you attach an `Authorization: Bearer ...` header. Teams discover this after designing a pure Bearer API: SSE forces cookie auth, a short-lived query token, or abandoning EventSource for `fetch` + `ReadableStream` (which reintroduces manual reconnect). Mentioning that constraint in an interview separates "I read the MDN page" from "I shipped notifications."
+</Callout>
+
+### Reconnect and gap recovery
+
+- **SSE + EventSource:** on drop, the browser reconnects and sends the last seen event id. Your server must be able to read events after that id from a backlog (Redis stream, Kafka offset, DB cursor). Without retained ids, auto-reconnect only reopens the pipe — it does not repair gaps.
+- **WebSocket:** you define resume tokens, sequence numbers, or "replay since timestamp" yourself. More flexible (binary, bidirectional), more code.
+- **Long polling:** each response can include a cursor; the next poll continues from there. Gap recovery is natural if the cursor is durable; there is no automatic browser helper.
+
+## When SSE wins
+
+Reach for SSE when all of the following hold:
+
+1. **Traffic is mostly server → client.** Badge counts, live commentary consumption, stock ticks, progress jobs.
+2. **Text payloads are enough**, or you are willing to base64 rare binary.
+3. **You want browser-native reconnect** and can store event ids for resume.
+4. **You prefer to keep client uploads on normal HTTP APIs** — simpler auth, idempotency, and rate limits on POST paths you already operate.
+5. **HTTP/2 to the origin is available**, so many clients' SSE streams do not each burn a separate TCP connection the way they did under HTTP/1.1 (browsers historically limited concurrent connections per host; SSE under H1 could hit that ceiling with multiple streams).
+
+SSE loses when you need client→server on the same connection at high frequency, when you need binary frames, when custom headers are mandatory on the stream, or when you already standardized on a WebSocket gateway for other features and a second push stack would split ops.
+
+## Where long polling still belongs in the trio
+
+Long polling remains the compatibility layer: no Upgrade, no EventSource quirks, works wherever POST/GET work. Use it as:
+
+- the **fallback** when WebSocket or SSE is blocked by a proxy,
+- the **first ship** when event rates are low and you have not built resume-backed streams yet,
+- the pattern for **environments without EventSource** (some embedded clients) where a held request is still simpler than a WS stack.
+
+It loses to SSE when you want continuous push without request churn and can run a long HTTP response; it loses to WebSockets when bidirectional or high event rates dominate (11.03).
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Prefer SSE when"
+  againstTitle="Prefer WebSocket or long poll when"
+  forItems={[
+    "The product is unidirectional push — notifications, live read-only feeds, job progress — and uploads stay on separate HTTP APIs",
+    "Browser EventSource auto-reconnect and Last-Event-ID match your backlog/cursor design",
+    "Payloads are text/JSON and you want to avoid Upgrade and sticky-socket complexity if a single region HTTP origin suffices",
+    "HTTP/2 multiplexes many clients without the old per-host connection caps that hurt SSE on HTTP/1.1",
+    "You want push that still looks like HTTP to most proxies, without inventing a frame protocol",
+  ]}
+  againstItems={[
+    "Clients must send often on the same channel — chat, collaborative editing, synced presence — where WebSocket bidirectionality pays for itself",
+    "Binary frames, custom stream headers, or non-browser clients make EventSource a poor fit — use WebSocket or raw streaming fetch",
+    "You cannot retain event ids for resume, so SSE's reconnect feature would reopen empty pipes after gaps",
+    "Hostile networks break long responses and Upgrades alike and you need the most boring fallback — long poll with short holds",
+    "A WebSocket gateway fleet already exists (11.01) and adding SSE would duplicate fan-out, auth, and observability",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Ask directionality first: "Does the client need to send on this channel?" If no, propose SSE for browser clients and mention EventSource reconnect plus `Last-Event-ID`, and the Bearer-header limitation. If yes, WebSockets. Keep long poll as the explicit fallback for proxy failure, not as the default for a modern bidirectional app. Naming unidirectional versus bidirectional as the primary fork — before latency numbers — is the clean structure interviewers want.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "SSE is unidirectional HTTP streaming; WebSockets are bidirectional after Upgrade; long polling is held request/response",
+    "SSE wins for server-to-client notifications when text events and separate POST uploads are enough",
+    "Browser EventSource reconnects automatically and can send Last-Event-ID — but only if your backend retains a resume cursor",
+    "EventSource cannot set custom Authorization headers; plan for cookies, query tokens, or a non-EventSource client",
+    "Under HTTP/1.1, many SSE connections could exhaust per-host browser limits; HTTP/2 largely removes that pressure",
+    "Long polling remains the compatibility fallback when Upgrade or long streams fail on the path; it is not the default once bidirectionality or high event rates show up",
+  ]}
+/>

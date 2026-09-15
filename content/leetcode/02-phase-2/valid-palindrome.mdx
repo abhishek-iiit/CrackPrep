@@ -1,0 +1,100 @@
+---
+title: "Valid Palindrome"
+number: "02.06"
+summary: "Skip non-alphanumeric junk, compare from both ends inward — two pointers on the cleaned logical string."
+status: published
+free: true
+difficulty: intro
+estMinutes: 9
+tags: [two-pointers, string]
+updated: "2026-09-15"
+---
+
+## Read the letters forward and backward
+
+Given a string, return whether it reads the same forward and backward after considering only alphanumeric characters and ignoring case. `"A man, a plan, a canal: Panama"` is true; `"race a car"` is false.
+
+Copying into a cleaned lowercase string and reversing it works — O(n) time, O(n) extra space for the copy. At n = 2 × 10⁵ the judge accepts that, but the usual ask is O(n) time and **O(1)** extra space: compare in place with two pointers, skipping what does not count.
+
+The edge cases that bite: empty string after stripping (valid), all punctuation (valid), and letters that match only after lowercasing (`'A'` vs `'a'`).
+
+## Two pointers, skip the noise
+
+Place `left` at 0 and `right` at n − 1. Advance `left` while it points at a non-alphanumeric; retreat `right` similarly. Compare `s[left]` and `s[right]` case-insensitively. Mismatch → false. Match → move both inward. Stop when `left >= right`.
+
+The invariant: everything strictly outside `[left, right]` has already been verified as symmetric.
+
+<Steps>
+<Step title="Skip non-alphanumeric from left and right">
+  Punctuation and spaces are invisible — do not copy them out.
+</Step>
+<Step title="Compare lowercase(left) to lowercase(right)">
+  Use toLowerCase or ASCII offset; be consistent for digits (they are unchanged).
+</Step>
+<Step title="Move inward and repeat until pointers cross">
+  Crossing with no mismatch means palindrome.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function isPalindrome(s: string): boolean {
+  const isAlnum = (c: string) => /[a-z0-9]/i.test(c);
+
+  let left = 0;
+  let right = s.length - 1;
+
+  while (left < right) {
+    while (left < right && !isAlnum(s[left])) left++;
+    while (left < right && !isAlnum(s[right])) right--;
+
+    if (s[left].toLowerCase() !== s[right].toLowerCase()) return false;
+
+    left++;
+    right--;
+  }
+
+  return true;
+}
+```
+
+Time **O(n)** — each index moves at most once. Space **O(1)** — only two indices beyond the input.
+
+<Tradeoff
+  forTitle="Two pointers in place when"
+  againstTitle="Clean-and-reverse copy when"
+  forItems={[
+    "Interviewer asks for O(1) extra space",
+    "n is large (2 × 10⁵) and allocating a cleaned string is avoidable",
+    "Input is read-only and you may not build auxiliary strings",
+    "Same pattern extends to 02.07 Longest Palindromic Substring checks inside expand",
+    "You are already comfortable with skip-until-valid pointer moves",
+  ]}
+  againstItems={[
+    "Clarity under time pressure — filter to `[a-z0-9]` and compare to reverse is obvious",
+    "Unicode normalization matters — in-place ASCII tricks are wrong; normalize first into a new string",
+    "Follow-up requires the cleaned string anyway for indexing",
+    "Tiny n and the interviewer wants the shortest code path",
+    "String is immutable and language makes in-place edits awkward — a copy is fine",
+  ]}
+/>
+
+## In an interview
+
+Use the Panama example. Confirm: alphanumeric only, case insensitive, empty string true.
+
+State O(1) space intent before coding. Mention inner while loops for skipping — the bug is comparing before skipping, so `' '` meets `'P'` and falsely fails.
+
+Follow-ups: palindrome after deleting at most one character; only letters (no digits); compare two strings as palindrome pairs. Leads naturally into 02.07 Longest Palindromic Substring and 02.08 Palindromic Substrings.
+
+<KeyTakeaways
+  items={[
+    "Valid Palindrome compares from both ends inward, skipping non-alphanumeric characters",
+    "Case folding applies at comparison time — 'A' and 'a' match",
+    "Two pointers give O(n) time and O(1) extra space without building a cleaned copy",
+    "All-punctuation or empty logical content is a valid palindrome",
+    "Each index is visited at most once by left or right — no nested rescan",
+    "The two-pointer skip pattern is the same family as container and substring problems, with a different stop condition",
+  ]}
+/>

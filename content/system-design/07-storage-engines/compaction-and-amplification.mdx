@@ -1,32 +1,128 @@
 ---
 title: "Compaction And Amplification"
 number: "07.12"
-summary: "Compaction And Amplification — notes in progress."
-status: draft
+summary: "Compaction rewrites immutable files to drop dead versions and bound the number of runs — and amplification numbers are how you price which strategy you picked."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: deep
+estMinutes: 20
+tags: [storage, lsm, compaction, amplification]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Cheap writes deposit a debt that only rewriting can pay
 
-What breaks without this, and the situation that forces the decision.
+An LSM write path (07.09, 07.10) appends to a WAL, inserts into a memtable, and eventually flushes an immutable SSTable into L0. That flush deliberately does **not** merge with existing files — which is why L0 key ranges overlap and why reads may consult many candidates (07.11). Space fills with superseded values and tombstones. Read amplification climbs with the number of sorted runs.
 
-## How it works
+**Compaction** is the background merge that reads SSTables, merge-sorts them, drops versions that no live snapshot can need, and writes new SSTables lower in the tree (or within a tier). It is not optional maintenance candy. It is the mechanism that keeps the read path and the disk finite. When it lags the ingest rate, the engine eventually applies backpressure: first slower writes, then stalls. That stall rarely looks like an error string. It looks like a p99 write latency that was low all week and is hundreds of milliseconds this afternoon.
 
-The mechanism, step by step.
+Amplification is how you talk about the bill with numbers instead of vibes.
 
-## Tradeoffs
+## The three amplifications
+
+- **Write amplification** — bytes written to the device per byte the application wrote. Compaction dominates this in an LSM; the WAL and flush are only the beginning.
+- **Read amplification** — device or block reads per logical read. More overlapping runs → more candidates → higher amplification, even with Bloom filters on the miss path.
+- **Space amplification** — bytes on disk per byte of live data. Extra copies and old versions until compaction drops them.
+
+You do not get to minimise all three. Choosing a compaction strategy is choosing which two to favour — the practical form of the RUM conjecture inside one engine family. 07.02 Storage Engine Tradeoffs frames the same idea across engine families; here it is inside LSM.
+
+## Leveled compaction
+
+Leveled compaction (LevelDB / RocksDB-style leveled) keeps L1 and below as non-overlapping runs. Each level has a target size roughly `fan-out` times the level above — ten is the classic fan-out.
+
+When L0 needs to drain, compaction picks L0 files and all overlapping files in L1, merges them, and writes non-overlapping L1 outputs. When L1 exceeds its budget, overlapping slices merge into L2, and so on. A byte that ages into the deepest level is rewritten at each boundary.
+
+Analytical write amplification sits near `fan-out × number of levels` — tens of times application write volume as a ballpark derived from geometry, not a benchmark. Space amplification stays low once steady state is reached because the deepest level holds most data (~90% at fan-out 10), so extra copies above it are a small fraction — often cited near ~1.1x. Point reads below L0 touch at most one file per level. That is the read- and space-optimised corner.
+
+## Size-tiered compaction
+
+Size-tiered compaction (Cassandra's classic size-tiered, and similar "tiered" modes elsewhere) merges files of similar size within a pile rather than insisting on non-overlapping levels. Several overlapping runs can coexist at the same logical tier. A byte tends to be rewritten fewer times — roughly once per size tier rather than once per fan-out step — so write amplification drops.
+
+The bill moves. Reads may consult several runs per tier. Space amplification spikes because multiple full-ish copies of a key range can live until a large merge collapses them. Operators see disk usage sawtooth and read latency more sensitive to how far merges have progressed.
+
+| | Leveled | Size-tiered |
+| --- | --- | --- |
+| Write amplification | High (fan-out per level descent) | Lower (merge similar-sized files) |
+| Read amplification (point) | Low below L0 — one file per level | Higher — several overlapping runs |
+| Space amplification | Low in steady state (~1.1x ballpark) | High until large merges land |
+| Typical fit | Read-heavy or space-tight primary storage | Write-heavy ingest where disk headroom exists |
+| Failure shape when behind | L0 count ↑, write stall, read candidates ↑ | Disk fill and read latency ↑, merge storms |
+
+Many engines let you pick per column family. That is not indecision — different data in one process often wants different corners of the trade.
+
+## What compaction actually does to versions
+
+<Steps>
+  <Step title="Pick inputs under a policy">
+    Policies vary: oldest L0 files, size thresholds, tombstone density, time-based windows for time-series. The picker is a product decision; the merge mechanics are shared.
+  </Step>
+  <Step title="Merge-sort keys newest-wins">
+    Iterators over inputs emit the newest sequence number per key. Older values are dropped when no snapshot still needs them.
+  </Step>
+  <Step title="Drop tombstones only when safe">
+    A tombstone can vanish only when every older file that could hold a shadowed value is also past retention for open snapshots. Dropping a tombstone too early resurrects data — a silent correctness bug.
+  </Step>
+  <Step title="Write new SSTables and update the manifest">
+    Outputs are new immutable files. Manifest swap publishes them; inputs are unlinked when no reader still pins them.
+  </Step>
+  <Step title="Throttle so foreground traffic still breathes">
+    Compaction competes for disk bandwidth and CPU with flushes and reads. Unthrottled compaction can fix space while destroying read latency; over-throttled compaction builds debt until writes stall.
+  </Step>
+</Steps>
+
+<Callout type="warn">
+Write stall from compaction debt is the characteristic LSM outage. The fix in the moment is usually operational — reduce ingest, raise compaction parallelism carefully, emergency disk — not "restart the process." The fix in design is provisioning: estimate sustained write rate times write amplification and buy that much sequential device bandwidth *above* what the application alone needs. If you provision disks for ingest only, you provision for a quiet lab, not for steady state.
+</Callout>
+
+## Tuning knobs that move amplification
+
+- **Fan-out / level size multiplier.** Higher fan-out → fewer levels → less read amplification, more bytes rewritten per level transition.
+- **L0 file count triggers.** Soft and hard limits that start compaction and then stall writes. Set them "generously" and you hide debt until it arrives as a cliff.
+- **Compaction parallelism and rate limits.** Throughput versus interference with latency-sensitive reads.
+- **Tombstone / TTL heavy workloads.** Need compactions that actually visit the key ranges holding deletes; otherwise space never returns.
+- **Partitioning / compact-on-delete tricks.** Real engines skip merges with no overlap and may compact the bottom level in partitions — constants move, geometry remains.
+
+## Worked geometry (order-of-magnitude)
+
+Suppose fan-out 10 and data that fills about 5 levels below L0. A byte descending through each level is merged against roughly 10× its own volume at each step. Saying "write amplification ≈ 10 × 5 = 50" is the classroom estimate leveled compaction invites. Production RocksDB-style deployments often beat the naive product with overlapping-aware pickers and dynamic level sizing, but if your capacity plan assumes write amplification of 2 for leveled LSM, you are not planning — you are hoping. Tiered designs might land closer to single digits of rewrite for the same logical data movement, paid for in space and read candidates.
+
+| Workload signal | Lean leveled | Lean tiered |
+| --- | --- | --- |
+| Point-read SLO tight | Yes | Risky |
+| Sustained write >> read | Maybe, with bandwidth | Often better fit |
+| Disk cheap, RAM for filters ample | Either | Tiered more tolerable |
+| Disk tight / expensive | Prefer leveled | Avoid as default |
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Choose leveled compaction when"
+  againstTitle="Choose size-tiered (or write-optimised) compaction when"
+  forItems={[
+    "Point-read latency and predictable candidate counts matter — one file per level below L0",
+    "Space amplification must stay near ~1x in steady state without waiting on huge merge storms",
+    "You can provision the higher write amplification as continuous background disk bandwidth",
+    "Negative lookups should stay cheap with filters over a modest candidate set (07.11)",
+    "The dataset is a primary store where read shape dominates over pure ingest rate",
+  ]}
+  againstItems={[
+    "Ingest rate is the constraint and you have disk headroom for duplicated runs",
+    "You explicitly prefer lower write amplification even if reads merge more overlapping runs",
+    "Workload is write-once time-series with natural time windows that tiered merges can drop wholesale",
+    "Operational preference is fewer level-shaped knobs and you accept sawtooth space usage",
+    "You will keep Bloom filters strong and candidacy high is acceptable under your read SLO",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Define compaction as debt collection: "Flushes make writes cheap by not merging; compaction merges later so reads and disk stay bounded." Then pick a strategy by the amplification you can afford: leveled when reads and space matter; tiered when writes dominate and disk is plentiful. Quote geometry, not folklore — fan-out times levels as the leveled write-amp estimate — and name the failure mode: compaction debt → L0 growth → write stall, visible as latency, fixed by bandwidth and throttling policy rather than by "adding a cache."
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Compaction merge-sorts immutable SSTables, drops obsolete versions and safe tombstones, and writes new files so run count and space stay bounded",
+    "Write, read, and space amplification are the three numbers; a compaction strategy chooses which to favour because you cannot minimise all three",
+    "Leveled compaction keeps non-overlapping runs below L0 — high write amplification, low read and space amplification",
+    "Size-tiered compaction merges similar-sized overlapping runs — lower write amplification, higher read and space amplification",
+    "The classic operational failure is compaction debt presenting as write stalls and rising read candidates, not as a clean early error",
+    "Provision device bandwidth for ingest times write amplification; sizing disks for application writes alone under-provisions an LSM in steady state",
+  ]}
+/>

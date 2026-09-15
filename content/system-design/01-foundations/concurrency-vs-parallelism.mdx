@@ -1,32 +1,66 @@
 ---
 title: "Concurrency Vs Parallelism"
 number: "01.07"
-summary: "Concurrency Vs Parallelism — notes in progress."
-status: draft
+summary: "Concurrency is dealing with many things at once; parallelism is doing many things at once — and they fail differently."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: intro
+estMinutes: 9
+tags: [concurrency, parallelism, scaling]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Two words that get used interchangeably right up until the design breaks
 
-What breaks without this, and the situation that forces the decision.
+Concurrency is a property of a system's structure: it is dealing with more than one thing in progress at a time, making progress on several tasks even if, at any single instant, only one of them is actually executing. Parallelism is a property of execution: more than one thing is genuinely happening at the same instant, on separate cores or separate machines. A system can be concurrent without being parallel, parallel without being especially concurrent, both at once, or neither — and confusing the two leads to the same wrong fix every time: adding more of one when the bottleneck actually needed more of the other.
 
-## How it works
+A single-threaded event loop juggling ten thousand open connections is concurrent and not parallel: one core, interleaving between connections while each one waits on a network read, never running two of them at the literal same instant. A batch job that splits a one-terabyte file across a hundred worker machines, each grinding through its own shard start to finish with no interleaving of its own, is parallel and barely concurrent in the everyday sense — each worker is doing exactly one thing. A web server running a thread pool across eight cores, each thread juggling several sockets, is both at once. And a strictly sequential script that does one thing, waits for it to finish, then does the next is neither.
 
-The mechanism, step by step.
+## What each one is actually for
 
-## Tradeoffs
+| | Concurrency | Parallelism |
+| --- | --- | --- |
+| Problem it solves | Making progress on many independent, often waiting, tasks | Finishing one large task faster by splitting the work |
+| Requires multiple cores? | No — works on a single core via interleaving | Yes, to get a real speedup |
+| Typical mechanism | Event loop, coroutines, async/await, OS thread scheduling | Worker pools, multiple processes or machines, SIMD |
+| What you're optimizing | Throughput and responsiveness under many in-flight, waiting operations | Wall-clock time of one computation |
+| Coordination cost | Scheduling, plus locks or other synchronization if shared state is touched from more than one thread | Partitioning the work and merging the results back together |
+| Classic failure mode | A race condition or deadlock over state two tasks both touch | A straggler — one shard or worker takes far longer than the rest, and the whole job waits on it |
+
+The distinction that actually matters for a system design decision is which kind of bottleneck you have. Most backend request handling is I/O-bound — a request spends most of its time waiting on a database, a downstream service, or a disk, not computing — and that workload wants concurrency: an event loop or async runtime that can have thousands of requests waiting at once without needing thousands of threads or thousands of cores. Only once a workload is CPU-bound does real parallelism buy you anything, because only splitting the actual computation across more cores or more machines reduces the wall-clock time it takes — resizing images, transcoding video, ranking a large batch, compressing a file. Horizontal scaling (01.08 Horizontal Vs Vertical Scaling) is parallelism applied at the machine level, for exactly this reason: it helps when the constraint is genuinely how much computation can happen at once, not how many things are merely waiting.
+
+<Callout type="gotcha">
+Adding concurrency or parallelism on top of a serialized resource doesn't remove the bottleneck, it just moves the queue somewhere less visible. A thread pool sized to a thousand workers, all of them ultimately waiting on the same single database connection or the same lock, does not process a thousand requests at once — it processes however many the serialized resource allows, and the other 990 sit queued behind it, now with the added cost of having been scheduled onto a thread first. Find out which resource is actually shared before adding more of either kind of concurrency to fix a slowdown.
+</Callout>
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Reach for real parallelism when"
+  againstTitle="Concurrency alone is enough when"
+  forItems={[
+    "The work is CPU-bound — encoding, compression, ranking a batch — so wall-clock time only drops if the computation is literally split across cores or machines",
+    "One job needs to finish faster, not more jobs need to be in flight at once",
+    "A single core's scheduling capacity is already saturated and the workload keeps growing",
+    "The task is embarrassingly parallel — the shards don't need to coordinate with each other mid-task",
+  ]}
+  againstItems={[
+    "The workload is I/O-bound, spending most of its time waiting on a network call, a disk, or another service, which an event loop or thread pool can overlap without more cores",
+    "The tasks are numerous but individually cheap, so the win is in not blocking on any single one, not in running them at the literal same instant",
+    "Coordinating parallel workers — partitioning the input, merging results, handling stragglers — would cost more than the time it saves at your current scale",
+    "Shared mutable state between the units doing the work would introduce race conditions you'd then have to design locking or immutability around, for a speedup you don't yet need",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Name which kind of bottleneck the problem actually has before naming a mechanism. "This service is I/O-bound, so an async runtime buys concurrency without a thread per request" is a different claim from "this ranking job is CPU-bound, so splitting it across N workers is a parallelism problem" — and the second one comes with its own new constraint worth naming unprompted: once the job is parallel, its completion time is gated by the slowest shard, not the average one, which is a straggler problem, not a scheduling problem, and it needs a different fix (02.12 Tail Latency covers the same shape from the latency side).
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Concurrency is a structural property — making progress on many things at once — and does not require more than one core",
+    "Parallelism is an execution property — genuinely doing many things at the same instant — and requires multiple cores or machines to produce a real speedup",
+    "A system can be concurrent without parallel, parallel without especially concurrent, both, or neither, and each combination fits a different workload",
+    "I/O-bound work wants concurrency, because the time is spent waiting, not computing; CPU-bound work needs real parallelism, because only splitting the computation reduces wall-clock time",
+    "Concurrency's classic failure is a race condition over shared state; parallelism's classic failure is a straggler that the whole job ends up waiting on",
+    "Adding more concurrency or parallelism on top of a bottleneck that is actually a single serialized resource just moves the queue, it doesn't remove it",
+  ]}
+/>

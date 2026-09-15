@@ -1,32 +1,73 @@
 ---
 title: "Columnar Stores vs Wide-Column Stores"
 number: "04.03"
-summary: "Columnar Stores vs Wide-Column Stores — notes in progress."
-status: draft
+summary: "Columnar and wide-column share a name and solve opposite problems: one lays out storage by column for analytics, the other is a sparse row store grouped into column families."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [columnar, wide-column, olap, storage-engines]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Two systems share a name and disagree about everything else
 
-What breaks without this, and the situation that forces the decision.
+"Columnar" and "wide-column" sound like variations on one idea, and the confusion is common enough to name directly before going further. A columnar store — Redshift, ClickHouse, a Parquet file — is defined by its physical layout: every column's values are stored contiguously, so a query touching three columns out of two hundred reads only those three. A wide-column store — Bigtable, Cassandra, HBase — is a data model, not a layout: rows keyed by a row key, values grouped into named column families, and any row allowed a different set of columns from any other. Underneath, a wide-column store is usually built on the same kind of engine as anything else with a write-heavy path — an LSM tree (07.09 LSM Tree Storage Engine) — which is closer in spirit to a row store than to a columnar file format.
 
-## How it works
+The practical cost of confusing them runs both ways. Reach for Cassandra expecting Redshift's "scan two columns across a billion rows in a second" and you'll be disappointed, because Cassandra's storage is organized for lookup and range scan by row key, not for cheap column-only scans across the whole dataset. Reach for Redshift expecting Cassandra's "accept fifty thousand writes a second from a fleet of devices, each with its own sparse set of columns" and you'll be disappointed the other way — columnar formats are typically built and compressed in batches, and random single-row inserts are exactly what they're worst at.
 
-The mechanism, step by step.
+### Columnar: contiguous by column
 
-## Tradeoffs
+For N rows and M columns, a row store puts row 1's M values together, then row 2's, and so on. A columnar store puts all N values of column 1 together, then all N values of column 2. Values in one column share a type and often a narrow range, so they compress far better together than mixed with unrelated types in a row — run-length encoding, dictionary encoding, and delta encoding all get more effective. A scan that needs only `amount` and `region` out of a 200-column events table reads only those two column files, skipping the other 198 entirely: I/O scales with columns touched, not columns that exist. The cost lands on writes — inserting one row means touching all M column files — so columnar engines usually queue writes and flush them as large batches rather than committing rows one at a time.
+
+### Wide-column: sparse, sorted by row key
+
+Think of a wide-column store as a distributed, sorted, multi-dimensional map: row key to column family to column qualifier to a timestamped value. Rows are stored sorted by row key, so a range scan by key — all sensor readings for one device between two times, if the row key is prefixed by device id — is efficient. Columns are sparse and dynamic: one row might have twenty columns in a family, another row three, with no wasted space for the columns a row doesn't have, unlike a fixed-schema table with nullable columns. Physically it's usually an LSM tree per column family: writes append to a memtable and a write-ahead log, flush to immutable sorted files, and compact in the background — 07.09 LSM Tree Storage Engine covers the mechanics directly. That's where a wide-column store's real strength comes from: absorbing very high, continuous write volume, because the foreground write path is the same cheap append that makes any LSM engine fast.
+
+| | Columnar (analytical) | Wide-column (Bigtable/Cassandra) |
+| --- | --- | --- |
+| What's contiguous on disk | One column's values, across all rows | One row key's columns, within a column family |
+| Optimized for | Aggregating a few columns across huge row counts | High-throughput writes and range scans by row key |
+| Update pattern | Large batch loads; a single-row update is expensive | Continuous per-row writes, including sparse, partial rows |
+| Compression | Very high — same-typed values, run-length and dictionary encoding | Moderate — compresses within a column family, not across the dataset |
+| Underlying engine | Columnar file format (Parquet, ORC) plus a query executor | LSM tree, the same family as 07.09 LSM Tree Storage Engine |
+| Example systems | Redshift, ClickHouse, BigQuery, Snowflake | Bigtable, Cassandra, HBase |
+
+<Callout type="note">
+Some systems blur the boundary on purpose — certain wide-column engines add columnar-like compression within a column family, and some analytical warehouses bolt on fast point-lookup paths beside their columnar storage. Treat a vendor's claim to be "both" as a detail to verify against your actual query pattern, not a reason to skip the distinction above.
+</Callout>
+
+Columnar analytical stores earn their place wherever the query is "aggregate over a lot of history, touching few columns" — dashboards, BI, time-window rollups at a scale beyond what a single service's own aggregation, like 10.06 Bucketed Time Window Aggregation, is built to hold. Wide-column stores earn their place wherever the write volume is the constraint and the read pattern is a lookup or range scan by a known row key — time series per device, per-user event history, anything sharded by a natural key with unbounded growth; 04.05 Sharding And Partitioning covers how that row key becomes the partition key in most deployments.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Reach for a columnar analytical store when"
+  againstTitle="Reach for a wide-column store when"
+  forItems={[
+    "Queries aggregate a handful of columns across millions or billions of rows — sums, counts, percentiles over history",
+    "Data arrives and is queried in large batches rather than one row at a time",
+    "Compression ratio matters because the dataset is large enough that storage cost and scan bandwidth dominate",
+    "The workload is append, load, and query, not update-in-place, so you don't need row-level transactional updates",
+  ]}
+  againstItems={[
+    "Write volume is the binding constraint and writes arrive continuously, a row or a few at a time, from many sources",
+    "The read pattern is a lookup or range scan by a known row key, not an aggregate over unrelated rows",
+    "Rows are naturally sparse — different entities have very different attribute sets, and a fixed column set would waste space or force nulls",
+    "You need horizontal write scaling across a cluster more than fast full-column scans",
+    "The row key can be chosen to match the dominant access pattern, so range scans by key cover most reads",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Name the layout, not the label. Saying "wide-column" or "columnar" without describing the physical property you actually need doesn't show reasoning — say "I need to scan two columns across the whole table for a rollup, so I want data stored contiguously by column" or "I need continuous high-volume writes keyed by device id with a range scan by time, so I want an LSM-backed wide-column store." If asked to justify Cassandra over Redshift for a given workload, the deciding fact is almost always the read pattern: a known key versus an unknown aggregate.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Columnar and wide-column share a word and little else: one is a physical layout — contiguous storage by column — and the other is a sparse, row-key-indexed data model usually built on an LSM tree.",
+    "Columnar stores earn their compression and scan speed by reading only the columns a query touches, at the cost of expensive row-level updates.",
+    "Wide-column stores earn their write throughput the same way any LSM engine does — cheap sequential appends — and are organized for lookups and range scans by row key, not for cross-row aggregation.",
+    "A wide-column row can have a completely different set of columns from its neighbor with no wasted space; a columnar table's schema is fixed at load time.",
+    "Reach for columnar when the query is 'aggregate a few columns over a lot of history'; reach for wide-column when the constraint is sustained write volume with a known row-key access pattern.",
+    "The row key in a wide-column store does the same job the partition key does in any sharded system, so choosing it badly produces the same hot-partition failure mode described in 04.06 Hot Partitions.",
+  ]}
+/>

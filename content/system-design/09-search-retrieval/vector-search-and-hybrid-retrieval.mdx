@@ -1,32 +1,109 @@
 ---
 title: "Vector Search And Hybrid Retrieval"
 number: "09.13"
-summary: "Vector Search And Hybrid Retrieval — notes in progress."
-status: draft
+summary: "Why nearest-neighbor search over embeddings needs an approximate index like HNSW, and why production ranking blends it with lexical scoring instead of replacing it."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: deep
+estMinutes: 22
+tags: [vector-search, ann, embeddings, hybrid-retrieval]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The problem: "relevant" and "shares a word with the query" are different tests
 
-What breaks without this, and the situation that forces the decision.
+09.04 TF-IDF Relevance Scoring and 09.05 BM25 Production Ranking both score a document by which query terms it contains and how rare and how densely those terms appear. That is a lexical test, and it fails in a specific, common way: it cannot see past vocabulary. A query for "waterproof jacket for hiking" and a product titled "rain-resistant shell for the trail" describe the same item and share not one word. BM25 scores it zero. A synonym list patches the worst of this, but synonyms are a hand-maintained list against a language that keeps generating new phrasing, and it says nothing about a query and a document related by meaning without sharing any near-synonym pair at all — "python list sort" and "how to order a python array" are one example among an effectively unbounded set of such pairs.
 
-## How it works
+What you actually want is a similarity test that operates on meaning rather than tokens. An embedding model gives you exactly that: a function mapping a piece of text (or an image, or an audio clip) to a dense vector — a few hundred to a couple thousand real numbers, typically 384, 768, or 1536 dimensions depending on the model — such that pieces of text with related meaning land close together in that vector space, usually measured by cosine similarity or a dot product. Train that mapping well and "waterproof jacket for hiking" and "rain-resistant shell for the trail" end up a short distance apart even though they share no tokens.
 
-The mechanism, step by step.
+That closes the semantic gap and opens a new one: now the problem is nearest-neighbor search over millions or billions of vectors, and that is a harder computational problem than it looks.
 
-## Tradeoffs
+## Why you cannot just compare against every vector
+
+The exact answer to "find the k nearest vectors" is a full scan: compute the similarity between the query vector and every stored vector, keep the top k. Each comparison over a 768-dimensional vector costs on the order of 768 multiply-adds. Over 10 million stored vectors that is roughly 7.7 billion floating-point operations per query — call it single-digit milliseconds on a single well-optimized core if everything fits in cache, and at that size it usually does not, so real latency runs well past that. And the cost is linear in the corpus: double the vectors, double the work, per query, for every query. A production system serving thousands of queries a second cannot brute-force this and still hit an interactive latency budget.
+
+The way out is the one every large lookup problem eventually takes: give up exactness for speed, and bound how wrong you are willing to be. An approximate nearest-neighbor (ANN) index trades a small, tunable amount of recall — the chance the true nearest neighbor is actually returned — for a query cost that grows far slower than linearly with corpus size.
+
+## HNSW: search a graph instead of a list
+
+Hierarchical Navigable Small World graphs (HNSW) are the ANN structure most production vector databases build around, so it is worth going through the mechanism rather than treating it as a black box.
+
+The structure is a multi-layer graph over the stored vectors. Each vector is a node. Layer 0 contains every node, connected to a bounded number of its approximate nearest neighbors — call that bound `M`, typically somewhere from 16 to 64. Each layer above 0 contains a shrinking, randomly chosen subset of the nodes below it, with roughly constant, small odds of a node appearing one layer up — so the top layer holds only a handful of nodes. The effect is the same idea as a skip list: sparse long-range links up top for covering distance quickly, dense short-range links at the bottom for precision.
+
+<Steps>
+  <Step title="Enter at the top layer">
+    Search starts at a fixed entry point in the sparsest layer.
+  </Step>
+  <Step title="Greedily descend within a layer">
+    At each layer, repeatedly move to whichever neighbor of the current node is closest to the query, until no neighbor is closer than the current node. That node is the layer's local answer.
+  </Step>
+  <Step title="Drop down and repeat">
+    Use that local answer as the entry point into the next layer down, where the same greedy walk continues among a denser set of neighbors. Each layer refines the answer the layer above could only approximate.
+  </Step>
+  <Step title="Beam search at layer 0">
+    At the bottom layer, widen from a single greedy path to a candidate list of size `ef_search`, exploring several promising neighbors at once instead of committing to one. Return the top `k` of that candidate list.
+  </Step>
+</Steps>
+
+The mechanism gives three separate knobs, and all three are recall-versus-cost trades rather than free parameters: `M` (links per node) trades memory and build time for connectivity, `ef_construction` trades index build time for graph quality, and `ef_search` trades query latency for recall — and unlike the other two, `ef_search` is set per query, so a caller can ask for more accuracy on an important query and less on a cheap one without touching the index.
+
+An IVF index (inverted file index) takes a different approach worth knowing exists even without going as deep on it: cluster the vector space offline with k-means into a few thousand centroids, assign every vector to its nearest centroid, and at query time search only the `nprobe` centroids closest to the query rather than the whole corpus. IVF needs a training pass and a hard cluster assignment, so a vector sitting near a cluster boundary can be missed unless `nprobe` is raised; HNSW needs no training pass but pays for its graph with more memory per vector, since it stores edges, not just a centroid id.
+
+| | HNSW | IVF |
+| --- | --- | --- |
+| Build step | Incremental — insert as you go | Requires a k-means training pass over sample data first |
+| Memory per vector | Higher — vector plus `M` graph edges per layer | Lower — vector plus one centroid id |
+| Tunable at query time | Yes — `ef_search` | Yes — `nprobe` |
+| Weak spot | Memory footprint at large `M` | Recall near cluster boundaries at low `nprobe` |
+| Typical fit | Read-heavy, memory-available deployments | Very large corpora where memory per vector is the binding constraint |
+
+<Callout type="gotcha">
+An ANN index is approximate on purpose, and the failure mode does not look like a failure. A missed true nearest neighbor does not throw an error or a warning — it just silently ranks a slightly-worse document first, forever, for that query, until someone notices relevance quietly degrading. The only way to catch it is to measure recall against an exact baseline on a held-out sample, the way 09.09 Search Evaluation Metrics describes, not to assume the index is doing what the paper said it would.
+</Callout>
+
+## Why production systems run both, not one
+
+Vector similarity is strong exactly where lexical scoring is weak — paraphrase, synonym, cross-lingual, and conceptual matches — and weak exactly where lexical scoring is strong: exact tokens that carry meaning precisely because they are exact. A model number, a person's surname, an error code, a rare technical term — an embedding model tends to place these near other things that are merely topically similar, because the training signal that shaped the space rewarded general semantic similarity, not exact-string fidelity. BM25 gets a query for "ETIMEDOUT" or "SKU-88213-B" exactly right, immediately, because it is just counting where that literal token occurs. A pure vector search can quietly return five plausible-looking documents that don't contain the token at all.
+
+So a hybrid pipeline runs both retrieval paths against the same query and combines the results, rather than picking one:
+
+- **Weighted score fusion.** Normalize the BM25 score and the vector similarity score onto comparable scales — they are not naturally comparable, since one is an unbounded lexical score and the other is typically a bounded cosine similarity — then combine as a weighted sum, tuned against a relevance-labeled query set.
+- **Reciprocal rank fusion (RRF).** Run each retriever independently, take each document's *rank* in each result list rather than its raw score, and combine as a sum of `1 / (k + rank)` across the lists, where `k` is a small constant (commonly around 60) that dampens the effect of a document's exact rank near the top. RRF sidesteps the score-normalization problem entirely by only ever looking at ordinal position, which is why it is the more common default in practice.
+
+Either way the shape is the same: retrieve a candidate set from each path — typically the top few hundred from each, not the full corpus — union or fuse them, and re-rank the merged set. That re-ranking stage is also where 09.07 Query Understanding Pipeline and behavioral features from 09.08 Search Feedback And Relevance Signals typically get folded in, since by this point the candidate set is small enough to afford a heavier scoring pass.
+
+The operational cost of running both paths is real and worth naming: two indexes to build, store, and keep in sync (09.10 Search Index Synchronization applies to both), two query paths to execute and merge within the same latency budget, and a corpus that needs re-embedding — a full reindex, not an incremental patch — every time the embedding model changes, since old and new embeddings do not share a coordinate space and cannot be compared to each other at all.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Add vector search (and fuse it with lexical) when"
+  againstTitle="Lexical search alone is enough when"
+  forItems={[
+    "Queries and documents are commonly related by meaning without sharing vocabulary — paraphrase, synonym-free rewording, or cross-lingual matches",
+    "The corpus is unstructured natural language (support tickets, product descriptions, chat transcripts) rather than exact identifiers or codes",
+    "You can afford a second index, a re-embedding pipeline, and the extra memory an ANN graph or IVF index costs per vector",
+    "Recall on paraphrased queries is a measured, named product problem, not a guess",
+    "You can run a fusion step (RRF or weighted scoring) so exact-token queries are not sacrificed to get semantic ones",
+  ]}
+  againstItems={[
+    "Queries are dominated by exact identifiers, codes, names, or short keyword lookups where lexical scoring is already precise",
+    "The corpus and query volume are small enough that BM25's precision is already sufficient and the operational cost of a second index buys little",
+    "You cannot afford to re-embed the whole corpus periodically, or the embedding model is unstable or unavailable",
+    "Latency budget has no room for a second retrieval path and a fusion step on top of the existing one",
+    "Explainability matters and stakeholders need to see exactly which term matched, not a similarity score with no visible cause",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Introduce it by the gap it closes, not the model: "BM25 will miss a query and a document that mean the same thing but share no words, so I'd add a vector index over embeddings and fuse its results with the lexical ranking rather than replace it." Expect the follow-up on scale — brute-force nearest neighbor is linear in corpus size, which is why you reach for an approximate index like HNSW — and be ready to say what that costs: memory for the graph, a recall/latency knob (`ef_search`) instead of a guaranteed exact answer, and a full reindex whenever the embedding model changes. Name the fusion mechanism by name — RRF is the simplest one to describe out loud — and name the reason you keep BM25 in the loop at all: exact tokens, codes, and identifiers, which embeddings are not built to preserve precisely.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Embeddings map text to vectors so that semantic similarity becomes vector proximity, closing the gap where lexical scoring like BM25 sees no shared tokens at all",
+    "Brute-force nearest-neighbor search is linear in corpus size and does not scale to interactive latency at millions of vectors, which is why production systems use an approximate index",
+    "HNSW searches a multi-layer graph greedily from sparse top layers down to a dense bottom layer, trading recall for speed through the ef_search parameter set at query time",
+    "IVF clusters vectors with k-means and searches only the nearest few clusters, at the cost of a training pass and reduced recall near cluster boundaries",
+    "Vector search and lexical search fail in complementary ways — embeddings blur exact identifiers, BM25 misses paraphrase — which is why production systems fuse both rather than choosing one",
+    "Reciprocal rank fusion combines two ranked lists by position rather than by score, avoiding the problem of normalizing two scores that were never on the same scale",
+  ]}
+/>

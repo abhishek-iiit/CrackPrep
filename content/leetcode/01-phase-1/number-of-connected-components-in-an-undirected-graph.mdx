@@ -1,0 +1,102 @@
+---
+title: "Number of Connected Components in an Undirected Graph"
+number: "01.34"
+summary: "Count components by marking each unvisited node once — DFS, BFS, or Union-Find all work; pick the one that matches your input shape."
+status: published
+free: true
+difficulty: core
+estMinutes: 12
+tags: [graph, dfs, union-find]
+updated: "2026-09-15"
+---
+
+## How many islands in a node graph
+
+Given `n` nodes and undirected edges, count connected components. With `n = 5` and edges `[[0,1],[1,2],[3,4]]`, nodes `{0,1,2}` form one component and `{3,4}` another — answer **2**. Node `3` with no edges is still its own component of size 1.
+
+The brute force — for each node, BFS to mark everything reachable and increment a counter — is exactly the right idea. Each node is visited once; each edge is traversed twice in an adjacency list. The only design choice is whether you express "same component" with a visited array, a queue, or Union-Find merges.
+
+## One launch per unseen node
+
+Build an adjacency list from the edge pairs (undirected: add both directions). Loop `i` from `0` to `n-1`. If `i` is unvisited, increment `count` and DFS/BFS from `i` to paint the whole component. When the loop finishes, `count` is the number of components.
+
+Union-Find alternative: start with `n` components, union each edge, return the number of distinct roots after path compression. Same asymptotics, different ergonomics when edges arrive incrementally.
+
+<Steps>
+<Step title="Build adjacency">
+For each `[u, v]`, push `v` onto `adj[u]` and `u` onto `adj[v]`.
+</Step>
+<Step title="Scan all nodes">
+If node `i` is unvisited, run DFS from `i` and increment the component counter.
+</Step>
+<Step title="DFS marks the component">
+Visit neighbors recursively; mark each node visited before exploring edges to avoid infinite loops.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function countComponents(n: number, edges: number[][]): number {
+  const adj: number[][] = Array.from({ length: n }, () => []);
+  for (const [u, v] of edges) {
+    adj[u].push(v);
+    adj[v].push(u);
+  }
+
+  const visited = new Array<boolean>(n).fill(false);
+  let components = 0;
+
+  const dfs = (node: number): void => {
+    visited[node] = true;
+    for (const nei of adj[node]) {
+      if (!visited[nei]) dfs(nei);
+    }
+  };
+
+  for (let i = 0; i < n; i++) {
+    if (!visited[i]) {
+      components++;
+      dfs(i);
+    }
+  }
+
+  return components;
+}
+```
+
+Time **O(n + e)** where **e** is the number of edges. Space **O(n + e)** for adjacency and the visited array (recursion stack O(n) in the worst case).
+
+<Tradeoff
+  forTitle="DFS/BFS from unvisited nodes when"
+  againstTitle="Union-Find when"
+  forItems={[
+    "You already build an adjacency list for a later traversal or path query",
+    "The graph is static and all edges are known upfront",
+    "You want to enumerate nodes in each component, not just count them",
+    "Teaching the 'each launch = one component' pattern that maps to 01.30 Number of Islands",
+    "Recursion depth is safe (n ≤ a few thousand) or you will rewrite DFS iteratively"
+  ]}
+  againstItems={[
+    "Edges arrive online ('connect u and v') and you need the count after each operation",
+    "You only have edge pairs and never need adjacency for anything else",
+    "Same Union-Find structure handles 01.33 Graph Valid Tree in the same interview block",
+    "Very deep skinny graphs blow the recursion stack — UF avoids stack depth",
+    "You are counting components in a grid implicitly — grid DFS is the same code with different neighbors"
+  ]}
+/>
+
+## In an interview
+
+Restate with a tiny example; confirm isolated nodes count as components. Say you will iterate all nodes and DFS from each unvisited one — component count equals the number of launches. Complexity O(n + e) because each node and edge is touched once.
+
+Follow-ups: return sizes of each component, count in a directed graph (strongly connected components — different algorithm), dynamic connectivity. Mention marking visited **before** recursing into neighbors — revisiting without a visited check cycles forever on undirected graphs.
+
+<KeyTakeaways items={[
+  "Component count equals the number of times you start DFS/BFS from an unvisited node.",
+  "Every node appears in exactly one component; isolated nodes are components of size 1.",
+  "Build undirected adjacency bidirectionally — forgetting the reverse edge breaks traversal.",
+  "Union-Find: start at n components, subtract one per successful union; final root count matches DFS count.",
+  "Time O(n + e), space O(n + e); same skeleton as 01.30 Number of Islands on an implicit grid graph.",
+  "01.33 Graph Valid Tree asks a stricter question — one component plus acyclicity, not just a count."
+]} />

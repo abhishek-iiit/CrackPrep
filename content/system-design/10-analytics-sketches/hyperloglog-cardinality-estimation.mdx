@@ -1,32 +1,107 @@
 ---
 title: "HyperLogLog Cardinality Estimation"
 number: "10.04"
-summary: "HyperLogLog Cardinality Estimation — notes in progress."
-status: draft
+summary: "Estimate how many distinct keys a stream contains in kilobytes of state by tracking the longest run of leading zeros across a fixed set of registers."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: deep
+estMinutes: 20
+tags: [hyperloglog, cardinality, sketches, probabilistic]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Distinct counts grow with vocabulary, not with traffic
 
-What breaks without this, and the situation that forces the decision.
+"How many unique visitors hit this endpoint today" sounds like a `COUNT(DISTINCT user_id)`. It is — until the distinct set is tens or hundreds of millions of ids and the query either scans a huge table or maintains a hash set that grows without bound. Total event volume can be handled by counters; distinct volume cannot, because each new id that has never been seen before adds state. The long tail of one-off ids is the same enemy that shows up in 10.08 Count-Min Sketch for frequencies and in 04.13 Bloom Filters for membership — except here the question is neither "how many times" nor "have I seen this," but "how many different ones."
 
-## How it works
+You cannot get an exact distinct count without remembering something proportional to the set (or scanning everything again). What you can get is an estimate with a few percent relative error in a fixed handful of kilobytes, mergeable across shards, updated in one hash and one register write per event. That structure is HyperLogLog.
 
-The mechanism, step by step.
+## Mechanism: rarity of leading zeros
 
-## Tradeoffs
+Hash each key to a wide bit string. Under a good hash, the chance that a random key starts with at least `ρ` leading zero bits is about `2^(-ρ)`. Seeing a leading-zero run of length 20 somewhere in the stream is evidence that you have seen on the order of a million distinct hashes — not proof, but a strong stochastic signal. HyperLogLog turns that signal into a stable estimator by splitting the stream across many small experiments instead of trusting one global maximum.
+
+<Steps>
+  <Step title="Allocate m registers, all zero">
+    Choose `m = 2^b` registers (typical production values: `m` = 2,048 to 16,384, so `b` = 11 to 14). Register `i` will store the maximum leading-zero rank observed for keys whose hash falls into bucket `i`.
+  </Step>
+  <Step title="On each key, hash once and split the bits">
+    Compute a 64-bit hash. Use the first `b` bits as the register index. Take the remaining bits, count the position of the first 1-bit (the leading-zero rank `ρ`, with the usual +1 convention so an immediate 1 yields rank 1), and write `registers[i] = max(registers[i], ρ)`.
+  </Step>
+  <Step title="Estimate cardinality from the harmonic mean of the registers">
+    Registers that saw rare patterns (large `ρ`) pull the estimate up; registers stuck at small ranks pull it down. Averaging via a harmonic mean dampens outliers better than an arithmetic mean of `2^ρ` terms. Empirically corrected formulas (HyperLogLog, then HyperLogLog++) convert that average into an estimate of distinct count.
+  </Step>
+  <Step title="Merge sketches by taking per-register maxima">
+    Two HLLs built with the same `m` and hash function merge by `registers[i] = max(A[i], B[i])`. The merge equals what you would have gotten by hashing the union of both streams into one sketch — no extra bias beyond each side's own error. That is why per-shard unique-visitor HLLs roll up into a global distinct count; 10.05 Mergeable Sketches For Analytics generalizes the pattern.
+  </Step>
+</Steps>
+
+No keys are stored. Two different keys can collide into the same register; the register only keeps the more extreme rank. The structure never shrinks when keys "leave" — like a Bloom filter, it is built for append-only observation of a set that only grows within the window you care about. For sliding windows you keep separate HLLs per time bucket and discard old buckets — 10.06 Bucketed Time Window Aggregation.
+
+## Error and size are a formula
+
+<Formula label="Standard error (classic HLL)">σ ≈ 1.04 / √m</Formula>
+
+Here `m` is the number of registers. Doubling `m` cuts the error by about `√2`, not by half — the same diminishing-return shape as other Monte Carlo estimators. HyperLogLog++ adds bias corrections and a sparse representation for small cardinalities; production libraries (Redis `PFCOUNT`, Guava, Apache DataSketches) implement those refinements. The mental model stays: pick `m` for the error you can tolerate, then forget the key population size.
+
+| Registers `m` | Approx. relative std. error | State (1 byte/register) | Typical use |
+| --- | --- | --- | --- |
+| 512 | ~4.6% | 0.5 KB | Coarse dashboards |
+| 2,048 | ~2.3% | 2 KB | Common default ballpark |
+| 4,096 | ~1.6% | 4 KB | Product analytics |
+| 16,384 | ~0.8% | 16 KB | Tighter unique-reach estimates |
+
+Those sizes are order-of-magnitude for dense registers; sparse encodings are smaller while cardinality is low. Compare with an exact hash set of 50 million 8-byte ids: hundreds of megabytes to gigabytes once overhead lands — again order-of-magnitude, not a benchmark. The ratio is why HLL shows up in Redis, warehouses, and stream processors as a first-class type.
+
+<Callout type="gotcha">
+HyperLogLog answers "how many distinct," not "is this id one of them" and not "how many times did this id appear." Membership is 04.13 Bloom Filters (or an exact set). Per-key frequency is 10.08 Count-Min Sketch. Using HLL as a poor man's set — treating the estimate as if you could list the ids — is a category error that shows up in interviews when someone reaches for one sketch to answer every analytics question.
+</Callout>
+
+### Worked intuition: why leading zeros carry cardinality
+
+If you have seen only ~1,000 distinct hashes, observing a run of 20 leading zeros is unlikely; if you have seen ~1,000,000, it becomes unsurprising. Each register is a compressed summary of the most surprising rarity in its slice of the hash space. Harmonic averaging across registers turns a collection of noisy maxima into a single estimate whose relative error shrinks as `1/√m`, independent of how large the true cardinality grows — which is the property exact sets do not have.
+
+## Where it fits next to other counters
+
+| Question | Structure |
+| --- | --- |
+| Total events (sum) | Sharded / batched counters — 10.02 View Counting At Scale |
+| Distinct keys (cardinality) | HyperLogLog |
+| Approximate frequency of a given key | Count-Min Sketch — 10.08 |
+| Definitely not seen / probably seen | Bloom filter — 04.13 |
+| Top frequent keys | CMS + heap — 10.09 Top-K Heavy Hitters |
+
+Unique daily active users, unique search queries, approximate audience reach for a campaign, and "how many distinct IPs hit this service today" are the canonical HLL jobs. Billing that pays per unique human usually cannot tolerate a 2% error without a contractual buffer — keep exact sets or deterministic warehouses for money, HLL for product and ops.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Reach for HyperLogLog when"
+  againstTitle="Use an exact distinct structure when"
+  forItems={[
+    "Distinct cardinality is large or unbounded and a hash set of ids will not fit in memory",
+    "A few percent relative error is acceptable for the product or dashboard consumer",
+    "You need fixed memory and O(1) updates per event regardless of how large the set grows",
+    "Partial aggregates must merge across shards, regions, or time buckets via register-wise max",
+    "You only need the count of distinct keys, not the ability to list or look up individual members",
+  ]}
+  againstItems={[
+    "The distinct count is contractual, billed, or audited and a bounded relative error is still a bug",
+    "You need membership tests or the ability to enumerate who the distinct ids were",
+    "Cardinality stays small enough that an exact set is cheaper to reason about than a probabilistic estimate",
+    "Keys must be removable from the distinct set without rebuilding windowed sketches",
+    "You actually needed frequencies or heavy hitters — HLL throws away per-key detail by design",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Introduce it by the cost: "Exact COUNT DISTINCT means storing every id or rescanning the log — I would keep a HyperLogLog per day (or per shard) with a few kilobytes of registers, update by hashing each id into a register max, and merge with per-register maximums for a global unique estimate at roughly `1.04/√m` relative error." Be ready to contrast it with Bloom filters (membership) and Count-Min Sketch (frequency), and to say that sliding windows are multiple HLLs, not one HLL that forgets. If asked for failure modes, name hash-quality dependence, underestimation risk for tiny sets without HLL++ bias correction, and the impossibility of deleting a single id from the estimate without discarding the window.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "HyperLogLog estimates distinct cardinality in fixed memory by hashing each key into one of m registers and storing the maximum leading-zero rank seen in that register",
+    "Cardinality is recovered from a harmonic-mean-style combination of the registers; classic relative standard error scales as about 1.04/√m",
+    "Two compatible HLLs merge by taking the elementwise maximum of registers, which is why per-shard unique counts roll up cleanly",
+    "State is typically kilobytes (for example ~2 KB at m = 2,048 for ~2% error), against unbounded growth for an exact id set",
+    "HLL does not support membership queries, per-key counts, or deleting a key — pair it with Bloom filters, Count-Min Sketch, or windowed rebuilds as needed",
+    "Use it for unique visitors, reach, and distinct query volume; keep exact distinct paths for anything billed or audited per unique",
+  ]}
+/>

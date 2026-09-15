@@ -1,32 +1,108 @@
 ---
 title: "Boolean Tiered Search"
 number: "09.03"
-summary: "Boolean Tiered Search — notes in progress."
-status: draft
+summary: "Cheap AND/OR over posting lists as the recall stage — and why processing rare terms first keeps multi-term queries inside a latency budget."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [search, boolean-retrieval, posting-lists, query-execution]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Ranking cannot fix a candidate set you never built
 
-What breaks without this, and the situation that forces the decision.
+09.01 Information Retrieval System Design splits search into retrieve-then-rank. The retrieve stage's job is recall: assemble every document that *could* be relevant under a boolean interpretation of the query, fast enough that the ranker still has budget left. That stage is boolean retrieval over the inverted index (09.02 Inverted Index And Posting Lists) — AND, OR, and sometimes NOT on posting lists — not BM25 yet, not machine-learned ranking yet.
 
-## How it works
+Get boolean execution wrong and you feel it before any scorer runs: queries with a common term melt the CPU merging million-long lists; queries that require all terms miss documents because an aggressive filter was applied too early. Tiered (or "document-at-a-time / term-at-a-time with early focus on rare terms") search is how production engines keep the boolean stage both complete enough and cheap enough.
 
-The mechanism, step by step.
+## Boolean operators on sorted lists
 
-## Tradeoffs
+Assume each query term has a posting list sorted by document id.
+
+**AND (intersection).** Walk lists together; emit ids present in every list. Two-list intersection is the workhorse. Multi-term AND is repeated pairwise intersection — and **order matters**. Intersecting a 50-million-doc list for `the` with a 2,000-doc list for `xylophone` first produces a 2,000-ish candidate set (at most); doing it the other way around does tens of millions of comparisons to reach the same place. Always start with the **shortest** list (rarest term, approximated by document frequency).
+
+**OR (union).** Merge sorted lists, emitting ids that appear in any. OR grows candidates; unconstrained OR of common terms can materialize enormous sets and is usually bounded (top lists only, or OR inside a clause that is later ANDed).
+
+**NOT.** Rarely implemented as "complement of the whole corpus." Usually: compute a positive candidate set, then subtract (or filter) documents that contain the negated term. Complement-of-corpus is as large as the index; filtering a candidate set is proportional to candidates.
+
+```text
+query: noise AND cancelling AND headphones
+
+df(noise) ≈ 800_000
+df(cancelling) ≈ 40_000
+df(headphones) ≈ 120_000
+
+execution order:
+  1) load postings(cancelling)           # shortest
+  2) intersect postings(headphones)
+  3) intersect postings(noise)           # largest last
+  → candidate doc ids for ranking
+```
+
+Those df numbers are illustrative order-of-magnitude for a mid-size product corpus, not a measurement — the structural point is the ascending-df order.
+
+## What "tiered" adds
+
+Pure boolean can still be too slow or too huge. Tiering layers policies on top of the operators:
+
+1. **Term priority by df.** Rare terms first, as above. This is the non-negotiable tier.
+2. **Required vs optional clauses.** In many engines a default multi-word query is not a hard AND of every token. It may require the rarest terms and treat common ones as optional scorers — or use a minimum-should-match threshold so 3 of 4 terms suffice. That is still "boolean-ish" retrieval shaping the candidate set before full ranking.
+3. **Champion / top postings first.** For very frequent terms, only the highest-quality or highest-tf documents may sit in a first-tier list (09.06 Stop Words And Champion Lists). First try to satisfy the query from champion lists; fall back to full lists only if the candidate set is too small. That trades a bit of recall for a lot of latency headroom.
+4. **Early termination under a budget.** Once you have K candidates that will fill the ranker's heap — or once a latency circuit breaker trips — stop mining more boolean matches. Safe only when the retrieval policy still guarantees the ranker's inputs are good enough; otherwise you silently drop recall.
+
+<Callout type="gotcha">
+AND feels like the "correct" interpretation of a user query, but hard-AND of every token destroys recall on real queries: one typo, one synonym not expanded, one stop word still present, and the intersection goes empty. Production systems soften boolean retrieval — synonym expansion, stemming, minimum-should-match — *before* blaming the ranker for bad results. An empty candidate set is a retrieval failure; BM25 never sees the document.
+</Callout>
+
+## AND vs filter vs rank
+
+Keep three ideas separate when designing the query plan:
+
+| Mechanism | Role | Failure if misused |
+| --- | --- | --- |
+| Boolean retrieval | Build candidates from terms | Too tight → empty; too loose → ranker drowns |
+| Structured filters | Exact constraints (in stock, category = X) | Applied after huge OR → wasted work; apply early when selective |
+| Ranking (TF-IDF/BM25) | Order candidates | Cannot resurrect docs never retrieved |
+
+Selective filters (rare category, geo shard, tenant id) should run early — they shrink postings or candidate sets before expensive intersections. Non-selective filters ("status = active" on a corpus that is 99% active) should not lead the plan; they cost almost as much as scanning candidates and buy little.
+
+## Cost model you can sketch on a whiteboard
+
+Intersection cost is roughly proportional to the sum of lengths of lists you actually scan. Starting with rare terms caps that sum early. OR cost grows with output size. Phrase verification adds a pass over positions for docs that survived term AND. When an interviewer asks why search p99 spikes on some queries, "the query is all common terms, so every list is huge and minimum-should-match still leaves a giant candidate set" is a more precise answer than "the cluster is hot."
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Lean on strict boolean AND when"
+  againstTitle="Relax retrieval (OR / min-should-match) when"
+  forItems={[
+    "Terms are selective and users mean 'all of these must appear' — SKUs, error codes, precise product phrases",
+    "The candidate set after AND is still large enough that ranking has something to order",
+    "False positives are costly (legal search, medical codes) and missing a weak partial match is acceptable",
+    "You have synonym/stemming expansion already, so hard AND is less brittle than raw tokens suggest",
+    "Latency budget is tight and you must bound merge work with short lists first",
+  ]}
+  againstItems={[
+    "Queries are exploratory natural language where requiring every token empties the result set too often",
+    "Typos and alternate forms are common and query understanding cannot catch them all yet",
+    "Recall matters more than surgical precision at the retrieval stage — ranking will polish the set",
+    "Champion-list or stop-word policies already remove the worst common-term blowups",
+    "You can afford a larger candidate K into BM25 and need the boolean stage to stay generous",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Describe the pipeline in order: "Boolean retrieval over inverted lists builds candidates — rarest term first — then BM25 ranks. If a document never shows up, I debug retrieval; if it shows up in the wrong order, I debug ranking." Walk a three-term AND and reorder by df out loud.
 
-<KeyTakeaways items={["", "", ""]} />
+Expect "how do you handle stop words" and "what if all terms are common." Point at stop-word policy and champion lists (09.06), and at minimum-should-match rather than pretending hard AND always works. Naming recall loss from over-strict boolean before the interviewer pins a bad demo query is the win.
+
+<KeyTakeaways
+  items={[
+    "Boolean retrieval is the recall stage: AND/OR/NOT over sorted posting lists produce candidates for ranking",
+    "Intersect shortest (rarest) posting lists first — order of intersection dominates CPU for multi-term AND",
+    "NOT is a filter on candidates, not a materialization of the complement of the corpus",
+    "Hard-AND of every user token is often too brittle; minimum-should-match and query expansion protect recall",
+    "Tiering adds champion lists, required/optional clauses, and early termination on top of raw boolean operators",
+    "A missing document is a retrieval bug; a poorly ordered one is a ranking bug — keep the stages' failure modes separate",
+  ]}
+/>

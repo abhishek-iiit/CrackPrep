@@ -1,0 +1,105 @@
+---
+title: "Word Search"
+number: "01.49"
+summary: "DFS from each cell with backtracking — mark visited in-place, undo the mark when the path fails."
+status: published
+free: true
+difficulty: core
+estMinutes: 15
+tags: [backtracking, dfs, matrix]
+updated: "2026-09-15"
+---
+
+## Find a word as a contiguous path in a grid
+
+Given an `m × n` board of characters and a string `word`, return whether `word` exists as a path of adjacent (horizontal or vertical) cells without reusing a cell in the same path. Board `[["A","B","C","E"],["S","F","C","S"],["A","D","E","E"]]`, word `"ABCCED"` → true; `"ABCB"` → false because the second `B` would reuse a cell.
+
+Brute force: try every cell as start, DFS along matching letters. Without backtracking you either revisit cells (wrong) or allocate a fresh `visited` set per path (correct but heavy). The usual interview form **mutates the board temporarily** — replace the cell with `'#'` while exploring, restore on retreat.
+
+## DFS with undo on failure
+
+From `(r,c)`, if out of bounds, already visited, or char mismatch, return false. If index reaches `word.length`, success. Mark cell visited, try four neighbors for index+1, unmark and return false if all fail.
+
+<Steps>
+<Step title="Try each cell as start">
+  Outer double loop; short-circuit on first success.
+</Step>
+<Step title="Match and recurse">
+  Base case: `index === word.length`. Check `board[r][c] === word[index]`.
+</Step>
+<Step title="Mark, explore, unmark">
+  Save char, set `'#'`, DFS neighbors, restore char — classic backtracking template.
+</Step>
+</Steps>
+
+Pruning: if current char frequency on board is less than in word, early false — optional on small boards, useful when alphabet is tiny and word is long.
+
+## Solution
+
+```ts
+function exist(board: string[][], word: string): boolean {
+  const m = board.length;
+  const n = board[0].length;
+
+  const dfs = (r: number, c: number, index: number): boolean => {
+    if (index === word.length) return true;
+    if (r < 0 || c < 0 || r >= m || c >= n) return false;
+    if (board[r][c] !== word[index]) return false;
+
+    const saved = board[r][c];
+    board[r][c] = "#";
+
+    const found =
+      dfs(r + 1, c, index + 1) ||
+      dfs(r - 1, c, index + 1) ||
+      dfs(r, c + 1, index + 1) ||
+      dfs(r, c - 1, index + 1);
+
+    board[r][c] = saved;
+    return found;
+  };
+
+  for (let r = 0; r < m; r++) {
+    for (let c = 0; c < n; c++) {
+      if (dfs(r, c, 0)) return true;
+    }
+  }
+  return false;
+}
+```
+
+Time **O(m n · 4^L)** worst case (`L = word.length`); with pruning and early exit, much better in practice. Space **O(L)** recursion depth.
+
+<Tradeoff
+  forTitle="Backtracking DFS with in-place mark when"
+  againstTitle="BFS from all starts when"
+  forItems={[
+    "Path must be simple — no cell reused in one word",
+    "Word length L is modest (≤ 15 on LeetCode) and recursion depth is safe",
+    "Board is mutable or you can use a parallel visited array",
+    "Extension to find all words leads to trie + DFS (02.23 Word Search II)",
+  ]}
+  againstItems={[
+    "Need shortest path length — BFS on grid is the right tool",
+    "Board is read-only shared and cannot be temporarily mutated",
+    "Multiple words queried repeatedly on same board — build a trie once",
+    "Word length approaches grid area and memoization on (r,c,index) is required to avoid TLE",
+  ]}
+/>
+
+## In an interview
+
+Clarify adjacency (4-direction, no diagonal), reuse rule, and case sensitivity. Example: path exists vs reuse blocked.
+
+Before coding, say DFS + backtracking with mark/unmark. Mention trying every start cell.
+
+Bug to volunteer: forgetting to restore the cell after failed branches (corrupts later starts); off-by-one on index when comparing chars. Follow-ups: return the path coordinates; 02.23 Word Search II with many words; wrap-around board variants.
+
+<KeyTakeaways items={[
+  "Word Search is DFS from each cell matching the first character, extending while chars match.",
+  "Mark visited by temporarily changing the cell (e.g. to '#') and restore on backtrack.",
+  "Four directions only; diagonal moves are not allowed unless the prompt says so.",
+  "Worst-case time grows with branching factor 4 per letter; early mismatch prunes most paths.",
+  "Recursion depth is O(word length); stack overflow is theoretical on tiny LeetCode limits.",
+  "Multiple-word variants combine this DFS with a trie — see 02.23 Word Search II.",
+]} />

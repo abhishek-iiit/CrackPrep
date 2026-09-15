@@ -1,32 +1,106 @@
 ---
 title: "End-To-End Checksums"
 number: "07.20"
-summary: "End-To-End Checksums — notes in progress."
-status: draft
+summary: "Hop-by-hop integrity only proves each cable was fine in isolation — end-to-end checksums let the writer and reader agree on bytes even when every middlebox swears it did nothing wrong."
+status: published
 free: true
 difficulty: core
 estMinutes: 12
+tags: [checksums, integrity, object-storage, durability]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Every hop can be correct and the object can still be wrong
 
-What breaks without this, and the situation that forces the decision.
+TCP checksums catch some in-flight corruption. Disk controllers store ECC. TLS protects against on-path tampering. None of those answers the question the object store's customer actually asks: **are the bytes I read the bytes I uploaded?** A proxy that recomputes a TCP segment, a memory bit flip on a storage node after the NIC check passed, a buggy transcoding layer that rewrites a buffer, a silent disk error that ECC missed — each can produce a stored object that no single hop flagged. Hop-by-hop integrity is necessary. It is not sufficient.
 
-## How it works
+End-to-end checksums close that gap: the client (or the first trusted component that sees the body) computes a digest over the payload, that digest travels with the object as metadata, and every subsequent reader can recompute and compare. 07.19 Object Storage Durability And Replication needs this to scrub and repair safely; without a digest, repair has no notion of "good copy."
 
-The mechanism, step by step.
+## Where the digest is born and where it is checked
 
-## Tradeoffs
+<Steps>
+  <Step title="Compute at the trust boundary">
+    Ideally the client SDK hashes the body as it streams (CRC32C, SHA-256, or a tree hash for multipart). If the client cannot, the API frontend hashes as it receives bytes — weaker end-to-end coverage (the path client→frontend is unchecked by the object digest) but still protects the storage pipeline.
+  </Step>
+  <Step title="Send the digest with the write">
+    Headers or trailers carry the expected checksum. Trailers matter for streaming uploads where the digest is only known after the last byte. Multipart uploads checksum each part and often maintain a composite checksum of part digests so the completed object has a well-defined whole-object digest.
+  </Step>
+  <Step title="Verify before durability ack">
+    Each storage node verifies the chunk against the digest before fsync-ack (07.18). A mismatch fails the PUT; bad bytes must not become a durable replica that scrubbing might later treat as authoritative.
+  </Step>
+  <Step title="Persist digest in metadata">
+    The metadata record (07.17) stores the checksum / ETag beside size and partition locator. HEAD can return it without reading the body; conditional requests and client-side validation use it.
+  </Step>
+  <Step title="Verify on read and on scrub">
+    GET paths recompute (or verify stored per-chunk digests) before returning to the client. Background scrubbers walk streams, recompute, and compare; a mismatch quarantines the fragment and triggers repair from another replica or parity.
+  </Step>
+</Steps>
+
+```text
+Client                Frontend           Storage node           Metadata
+  |                      |                    |                    |
+  |-- PUT + digest ----->|                    |                    |
+  |                      |-- chunk+digest --->|                    |
+  |                      |                    | verify             |
+  |                      |                    | append+fsync       |
+  |                      |                    |-- ack ------------>|
+  |                      |-- commit record (digest stored) ------->|
+  |<-- 200 + ETag -------|                    |                    |
+```
+
+## Algorithms and what they buy you
+
+| Digest | Typical role | Notes |
+| --- | --- | --- |
+| CRC32C | Fast transport and storage integrity | Hardware-accelerated on many CPUs; not cryptographic |
+| MD5 | Legacy ETags in some object APIs | Collision-prone; fine as a corruption check, not as security |
+| SHA-256 | Stronger integrity / content addressing | Costlier; used when digests double as security or dedup keys |
+| Tree / part checksums | Multipart and large objects | Lets you validate parts independently and compose a whole-object digest |
+
+Corruption detection for durability wants speed and hardware support — CRC32C is the workhorse inside storage nodes. Cryptographic hashes matter when the threat includes malicious substitution, not only random bit flips. Do not pretend a CRC is an authenticity check against an attacker who can also rewrite the stored CRC; authenticity needs a MAC or signature with a key the attacker lacks.
+
+<Callout type="gotcha">
+An ETag that is opaque or defined as "whatever the implementation stored" is not always a content checksum — some APIs change ETag semantics for encrypted objects or multipart uploads. When integrity matters, use the explicit checksum headers the API documents, not an assumed equivalence between ETag and MD5.
+</Callout>
+
+## Failure modes checksums do not fix by themselves
+
+**Wrong digest stored with wrong bytes.** If a buggy writer computes a digest over buffer A and stores buffer B with that digest, every check passes and the object is still wrong relative to user intent. Client-side computation before send is the main mitigation; server-only hashing cannot catch client SDK bugs that mix buffers.
+
+**Canonicalization surprises.** Checksumming compressed bytes versus uncompressed, or including headers in the digest that a proxy strips, produces false mismatches. Define exactly which bytes enter the hash — payload body only is the usual object-store answer.
+
+**Repair voting without quorum.** With two replicas disagreeing and no majority, checksums tell you they differ; they do not tell you which is original unless you trust a version with a client-supplied digest from ingest time. Keep the ingest digest in metadata as the tie-breaker when possible.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Invest in end-to-end checksums when"
+  againstTitle="Rely mainly on hop-by-hop checks when"
+  forItems={[
+    "You store durable objects that will be repaired, scrubbed, and read months later",
+    "Multiple transforms sit between writer and disk — proxies, queues, language runtimes — each a corruption opportunity",
+    "Clients can re-validate downloads (SDK checksum mode) and you want mismatches to fail closed",
+    "Erasure coding or multi-replica repair must distinguish good fragments from bad ones",
+    "Compliance or customer contracts require demonstrable integrity verification, not only transport security",
+  ]}
+  againstItems={[
+    "Ephemeral data never leaves a single process memory space and is not repaired across nodes",
+    "A single local filesystem write with no replication and no long-term scrubbing is the whole design",
+    "You already content-address every blob by cryptographic hash at the application layer and store by that hash",
+    "The environment cannot afford hashing CPU on a bulk ingest path and accepts rare silent corruption as a risk",
+    "Objects are tiny metadata-only records inside a database that already checksums its own pages end to end",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Say the phrase "end-to-end" and mean it: "the client computes a checksum, we store it with the object, and we verify on write, read, and scrub — TCP is not enough." Mention multipart part checksums if large uploads come up. Pre-empt the repair question: scrubbing without checksums can replicate corruption; with checksums, repair has a definition of good.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Hop-by-hop integrity (TCP, TLS, device ECC) does not prove the bytes read match the bytes uploaded",
+    "End-to-end checksums are computed at a trust boundary, stored in metadata, and verified on write ack, read, and scrub",
+    "Fail PUTs that mismatch before durability acknowledgment so bad bytes never become repair sources",
+    "CRC32C is the usual fast integrity digest inside storage; cryptographic hashes add authenticity only with a key or client trust model",
+    "Multipart uploads checksum parts and compose a whole-object digest so large bodies stay verifiable without a single memory pass",
+    "Checksums detect disagreement; ingest-time digests in metadata are what let repair decide which replica is authoritative",
+  ]}
+/>

@@ -1,0 +1,95 @@
+---
+title: "Valid Anagram"
+number: "02.03"
+summary: "Two strings are anagrams when every letter count matches; sort compares the same multiset in a different order."
+status: published
+free: true
+difficulty: intro
+estMinutes: 9
+tags: [hash-map, string, sorting]
+updated: "2026-09-15"
+---
+
+## Same letters, different order
+
+Given two strings `s` and `t`, return whether `t` is an anagram of `s` — same multiset of characters, rearranged. `s = "anagram", t = "nagaram"` is true; `s = "rat", t = "car"` is false.
+
+Different lengths fail immediately — no scan needed. Equal length but wrong letters is where naive approaches waste work: comparing sorted copies is O(n log n); comparing 26 frequency buckets is O(n). At n = 5 × 10⁴ both pass the judge, but the frequency pass is the pattern 02.04 Group Anagrams builds on, and it avoids the sort entirely.
+
+## Count once, compare to zero
+
+Assume lowercase English letters only. One array of length 26 is enough.
+
+Walk both strings in lockstep. For each index `i`, increment the bucket for `s[i]` and decrement the bucket for `t[i]`. If every bucket ends at zero, the multisets match. If any bucket is non-zero, one string had more of that letter than the other.
+
+The invariant after processing the first `k` characters: the count array holds the frequency difference `s[0..k-1] − t[0..k-1]`.
+
+<Steps>
+<Step title="If s.length !== t.length, return false">
+  Anagrams must have equal length — this catches most negatives in O(1).
+</Step>
+<Step title="For each index i, count[s[i]]++ and count[t[i]]--">
+  One pass merges the two frequency tables into a difference table.
+</Step>
+<Step title="Return true iff every bucket is zero">
+  Non-zero means surplus or deficit for that letter.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function isAnagram(s: string, t: string): boolean {
+  if (s.length !== t.length) return false;
+
+  const count = new Array<number>(26).fill(0);
+  for (let i = 0; i < s.length; i++) {
+    count[s.charCodeAt(i) - 97]++;
+    count[t.charCodeAt(i) - 97]--;
+  }
+
+  return count.every((c) => c === 0);
+}
+```
+
+Time **O(n)** for n = |s|. Space **O(1)** — 26 integers regardless of n.
+
+Alternative: sort both strings and compare — O(n log n) time, O(n) space if copies are sorted in place on new strings. Correct, slower, easier to write under pressure if you forget the count trick.
+
+<Tradeoff
+  forTitle="Frequency count when"
+  againstTitle="Sort both strings when"
+  forItems={[
+    "You want O(n) and the alphabet is small and fixed (lowercase a–z)",
+    "This check is a building block — 02.04 Group Anagrams keys groups by the same count signature",
+    "n is large and the log factor in sort matters for follow-ups",
+    "Unicode or variable alphabet — a Map replaces the array with the same logic",
+    "You are comparing many pairs and can reuse a single buffer with clear-and-refill",
+  ]}
+  againstItems={[
+    "Alphabet is huge and sparse — sorting two strings is simpler than a big map",
+    "Interview time is short and sort+compare is obviously correct in two lines",
+    "You only need yes/no once on tiny inputs",
+    "The problem allows only lowercase and you want the shortest possible code",
+    "Follow-up is k-anagram with sliding window — sort does not extend cleanly",
+  ]}
+/>
+
+## In an interview
+
+Restate: anagram means same character counts. Confirm lowercase, equal length implied, empty strings both anagrams of each other.
+
+Mention length check first, then the single-pass difference array. The bug to call out: two separate frequency maps compared key-by-key works but does twice the work — merge into one difference pass.
+
+Follow-ups: Unicode (use Map), check anagram in a stream, or group all anagrams (02.04 Group Anagrams). If they say "what if s is longer?" — you already returned false at the length gate.
+
+<KeyTakeaways
+  items={[
+    "Valid Anagram is multiset equality — same length and identical per-letter counts",
+    "One pass with increment/decrement on a fixed-size count array is O(n) time and O(1) space for lowercase English",
+    "Length mismatch is an immediate false without scanning characters",
+    "Sorting both strings is O(n log n) but needs no frequency machinery — fine for tiny n",
+    "The count signature is the canonical anagram key used in 02.04 Group Anagrams",
+    "Empty s and t are anagrams; single-character mismatch fails on the one bucket that stays non-zero",
+  ]}
+/>

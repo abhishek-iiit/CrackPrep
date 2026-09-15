@@ -1,32 +1,75 @@
 ---
 title: "HTTP REST And gRPC"
 number: "02.03"
-summary: "HTTP REST And gRPC — notes in progress."
-status: draft
+summary: "REST-over-JSON and gRPC-over-protobuf answer the same question differently: who reads this payload, and how much does parsing it cost at scale."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 15
+tags: [http, grpc, rest, protobuf]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The wire format is a decision you make once and live with everywhere
 
-What breaks without this, and the situation that forces the decision.
+Every RPC call is really three decisions stacked on top of each other: which transport carries the bytes, how the bytes are encoded, and what shape the interface takes on each end. REST over HTTP/1.1 with JSON and gRPC over HTTP/2 with protobuf answer all three differently, and the differences aren't cosmetic — they show up as bytes on the wire, connections held open, and CPU spent parsing, at a volume that matters once you're making thousands of calls a second between services rather than one call from a browser.
 
-## How it works
+REST-over-JSON won the last two decades of API design because it's legible without tooling: a URL, an HTTP verb, and a JSON body you can read with your eyes and generate with `curl`. That legibility is a real design property, not just a convenience — it's what lets an engineer debug a production issue by pasting a request into a terminal, and what lets browsers, mobile clients, third-party integrators, and internal services all speak the same protocol without agreeing on tooling first. gRPC gives up some of that legibility for throughput and structure: a binary wire format, a schema every client and server compiles against, and a transport that multiplexes many calls over one connection instead of one call per request.
 
-The mechanism, step by step.
+## What REST-over-HTTP actually costs, and what it buys
 
-## Tradeoffs
+A JSON object repeats every field name as text on every message: `{"user_id": 123456, "display_name": "Alice Smith", "is_active": true}` sends the strings `user_id`, `display_name`, and `is_active` in full, every single time, even though both sides already agree on the schema. Over HTTP/1.1, each connection also serves one request at a time — a client keeps a small pool of connections open (browsers typically cap it around six per host) and either waits for one to free up or pays for a new TCP and TLS handshake, which is the transport-layer cost 02.04 TCP Vs UDP walks through in detail.
+
+What REST buys back is substantial, though. HTTP's own semantics — status codes, `GET` idempotency, `ETag` and `Cache-Control` headers — are understood by every CDN, browser cache, and proxy on the internet without your API doing anything extra. A `GET` with the right caching headers gets served out of a CDN edge node and never reaches your servers at all. gRPC calls, being POST-shaped RPCs over a single persistent connection, don't get any of that for free — caching an individual RPC response means building it yourself.
+
+## What gRPC actually costs, and what it buys
+
+gRPC starts from a `.proto` schema file — the field names, types, and RPC method signatures in one place — and generates client and server code in whichever languages you need from it. Two consequences follow. First, the encoding is binary and positional: a field is a tag number and a type, not a repeated string key, so the same message above encodes to something on the order of 15–20 bytes instead of JSON's roughly 60–70, once whitespace and quoting are counted. The exact ratio moves with field-name length and value distribution, but binary tag-based encoding beating repeated string keys by several times over is the durable pattern, not a one-off measurement. Second, because both sides compiled from the same schema, a type mismatch is a compile error on the client, not a runtime surprise parsed out of a JSON blob.
+
+The transport underneath is HTTP/2, which multiplexes many concurrent calls over a single TCP connection instead of opening one connection per in-flight request — no six-connection cap, and no head-of-line blocking between unrelated calls at the application level, though 02.04 TCP Vs UDP covers a real head-of-line blocking case that HTTP/2 does *not* solve, because it still rides on top of one TCP stream underneath. gRPC also gives you streaming natively as part of the method definition, not bolted on: a unary call, a server-streaming call (one request, a stream of responses — a live feed), a client-streaming call (many requests, one response — an upload), or a full bidirectional stream, all using the same framing.
+
+<Callout type="gotcha">
+gRPC does not run natively in a browser. Browsers' `fetch` and `XMLHttpRequest` APIs don't expose the raw HTTP/2 frame control or trailers gRPC's protocol needs, so a browser client needs gRPC-Web, which speaks a modified framing to a proxy — commonly Envoy — that translates it into real gRPC to reach the backend. If your consumers include a browser, that proxy is another hop and another thing to operate; it isn't a drop-in replacement for REST at the edge.
+</Callout>
+
+| Dimension | REST over HTTP/1.1 + JSON | gRPC over HTTP/2 + protobuf |
+| --- | --- | --- |
+| Payload size | Larger — field names repeated as text | Smaller — positional binary tags, no field names on the wire |
+| Browser support | Native | Needs gRPC-Web plus a translating proxy |
+| Streaming | Bolted on (long polling, SSE, WebSocket) | Native call types: unary, server-stream, client-stream, bidi |
+| Schema | Optional (OpenAPI can describe it after the fact) | Mandatory and enforced — `.proto` generates both sides |
+| Human debuggability | High — readable with `curl` and your eyes | Low — needs a decoder or reflection tooling |
+| HTTP caching | Free, via standard headers and any CDN | None built in — you build response caching yourself |
+| Typical fit | Public APIs, browser clients, third-party integrators | Internal service-to-service calls at volume, known clients on both ends |
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Reach for gRPC when"
+  againstTitle="Reach for REST/JSON when"
+  forItems={[
+    "Both ends are services you control, so a shared `.proto` schema and generated stubs are a net simplification, not a coordination burden",
+    "Call volume is high enough that payload size and per-message parsing cost show up in infrastructure bills or latency budgets",
+    "The workload needs a real streaming call — server-push, client-upload, or bidirectional — rather than a request/response bolted onto something else",
+    "Compile-time type safety across a service boundary is worth more than being able to read a request with your eyes",
+  ]}
+  againstItems={[
+    "Consumers include browsers or third parties you don't control, where `fetch`-level compatibility matters more than wire efficiency",
+    "Human debuggability is a real requirement — engineers need to `curl` an endpoint and read the response without a decoder",
+    "You want HTTP caching semantics (`ETag`, `Cache-Control`, CDN edge caching) for free instead of building response caching yourself",
+    "The API is public and needs to be consumable by clients written in whatever language or tooling a third party already has",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Name the actual cost you're trading, not the acronym: "this is an internal call between two services I control, at high volume, so I'd reach for gRPC — the schema gives me compile-time safety on both ends and the binary encoding matters at this call rate. If this endpoint were public-facing with browser clients, I'd stay with REST and JSON, because I'd rather have `curl`-level debuggability and free CDN caching than shave bytes off a call volume that's orders of magnitude lower." Expect a follow-up about mixing both — a common answer is REST or GraphQL at the public edge and gRPC for everything behind the API gateway, with 02.05 API Gateway vs Load Balancer covering where that edge component sits and doing the translation so neither side needs to know about the other's format.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "REST-over-JSON trades wire efficiency for universal legibility: readable by eyes and tools, understood by every browser, proxy, and CDN without extra work",
+    "gRPC trades that legibility for a compile-time-checked schema and a binary encoding that's several times smaller than the equivalent JSON for the same fields",
+    "HTTP/2 multiplexing lets gRPC run many concurrent calls over one connection, avoiding the per-host connection cap that constrains HTTP/1.1 clients",
+    "gRPC's four call shapes — unary, server-stream, client-stream, bidirectional — are native to the protocol; REST bolts streaming on after the fact",
+    "A browser cannot speak gRPC directly; gRPC-Web needs a translating proxy, which is an operational cost REST doesn't have",
+    "The decision usually turns on who's on the other end of the call: known internal services at volume favor gRPC, unknown or browser-based consumers favor REST",
+  ]}
+/>

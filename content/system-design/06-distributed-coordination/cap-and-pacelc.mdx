@@ -1,32 +1,84 @@
 ---
 title: "CAP And PACELC"
 number: "06.04"
-summary: "CAP And PACELC — notes in progress."
-status: draft
+summary: "CAP is a partition-time choice between consistency and availability; PACELC adds the everyday latency-versus-consistency trade that actually dominates production."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [cap, pacelc, consistency, availability]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The theorem most people misquote
 
-What breaks without this, and the situation that forces the decision.
+CAP says that if a network partition happens — some nodes cannot reach others — a distributed datastore cannot keep offering both linearizable consistency and availability for every request. It must choose. That sentence is precise, and almost every whiteboard version of it is wrong in the same two ways: people treat CAP as a permanent product label ("we are an AP system"), and they forget that partitions are rare while the latency cost of coordinating on every request is permanent.
 
-## How it works
+The useful form of the theorem is a conditional, not a brand. When the cluster is healthy and every replica can talk, you can have both strong consistency and availability — you pay in round trips, not in outages. When a partition appears, you either refuse some writes (or stale-sensitive reads) so every answer that does return is still correct, or you keep answering from the side of the partition you can see and accept that two sides may diverge until they heal. Consistency versus availability is the choice *during* the partition. Outside it, the interesting trade is elsewhere.
 
-The mechanism, step by step.
+That "elsewhere" is why PACELC exists. Brewer's original CAP framing left a gap: most of a system's life is not spent partitioned. PACELC fills it: if there is a Partition, choose Availability or Consistency; Else, when the network is fine, choose Latency or Consistency. The second half is the one that actually shapes day-to-day architecture — every strongly consistent read that waits for a quorum is a latency tax you pay on every request, not only during an outage.
 
-## Tradeoffs
+## What each letter actually means
+
+**Consistency (C)** here means something close to linearizability for the operations under discussion (06.02 Consistency Models): once a write is acknowledged, every subsequent read sees it or something newer, no matter which replica you hit. It is not "the data is correct in some business sense." It is a recency and ordering promise across replicas.
+
+**Availability (A)** means every non-failed node that receives a request eventually returns a response — not an error saying "I cannot decide right now." It does not mean "five nines of uptime" in the SRE sense, and it does not require a fast response. A node that hangs forever is unavailable; a node that returns a stale value in 2 ms is available under this definition.
+
+**Partition tolerance (P)** is not optional in any system that spans more than one machine. Networks drop, delay, and split; you do not get to design the partition away. CAP is therefore never a three-way pick-two menu — it is "given that partitions happen, what do you sacrifice when one arrives." Treating P as a feature you can leave out is how designs claim "CA" and then discover that a rack switch failure silently chose for them.
+
+| Framing | When it applies | The forced choice | What you actually feel |
+| --- | --- | --- | --- |
+| CAP | During a network partition | Consistency vs availability | Writes rejected, or divergent replicas |
+| PACELC (Else) | Normal operation, healthy network | Latency vs consistency | Extra RTT on every coordinated read/write |
+
+## How real systems land on the spectrum
+
+A single-leader relational primary with synchronous replication to a standby is CP-leaning under partition: if the primary cannot confirm the write to a quorum of replicas, it stalls or fails the write rather than acknowledge something that might be lost. Clients on the minority side of a split see errors, not stale success.
+
+A Dynamo-style store with tunable quorums (06.03 Replication) is the textbook AP-leaning design under partition: each side keeps taking writes, vector clocks or last-writer-wins sort out conflicts later, and the operator's job is conflict resolution and anti-entropy, not keeping the write path up. Cassandra, Riak, and DynamoDB's eventual modes live in this neighborhood — with the important caveat that raising the quorum size on a request moves that request toward CP behavior without renaming the product.
+
+Spanner, etcd, and ZooKeeper sit at the other end: they use consensus (06.06 Consensus) so that a minority partition cannot make progress. Availability for a given key shrinks to the majority side, and the latency of every write includes the quorum round trip even when nothing is partitioned — the PACELC "Else → C" cost, paid continuously.
+
+<Callout type="gotcha">
+Calling a database "AP" or "CP" as if the label covered every API it exposes is usually wrong. The same cluster can reject writes that need a quorum while still serving stale reads from a local replica, or require quorum for one table and eventual consistency for another. Name the guarantee per operation path, the way 06.02 Consistency Models does — CAP is about what happens to that path when messages stop getting through.
+</Callout>
+
+## PACELC is the everyday decision
+
+Interviewers who stop at CAP leave the interesting half on the table. A feed read that can be 500 ms stale does not need a cross-replica round trip on every request; a seat reservation does. Both systems may survive partitions the same way — refuse unsafe writes — and still look nothing alike under load because one chose Else → L and the other Else → C.
+
+The failure mode of ignoring PACELC is quiet and expensive: you build a strongly consistent path for data that never needed it, then spend the next year explaining why p99 latency is dominated by waiting for a second zone to acknowledge a view-count increment. The failure mode of pretending CAP is the whole story is the opposite cartoon: treating every datastore as "pick AP or CP once" and never asking what the healthy-path latency budget can afford.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Prefer consistency (CP / Else→C) when"
+  againstTitle="Prefer availability or latency (AP / Else→L) when"
+  forItems={[
+    "A stale or conflicting write causes a hard invariant break — double-spend, double-book, two leaders for the same shard",
+    "Clients already coordinate through this store as a source of truth (locks, config, leader election in 06.07 Leader Election)",
+    "You can afford an extra same-region RTT — typically under a millisecond to a few milliseconds — on the write or linearizable-read path",
+    "During a partition, returning an error is better than returning a value that will be overwritten or conflicted later",
+    "Operationally you would rather page on unavailability than on silent divergence and merge bugs",
+  ]}
+  againstItems={[
+    "The product must keep accepting writes on both sides of a split — shopping carts, social posts, sensor ingest — and can reconcile later",
+    "Most reads tolerate hundreds of milliseconds to seconds of staleness, and quorum latency would blow the budget",
+    "Cross-region round trips already cost tens to a couple hundred milliseconds, so coordinating every read is a non-starter",
+    "Conflict resolution is tractable for this data (CRDTs, last-writer-wins with clear semantics, or human-visible merge)",
+    "The path under discussion is a cache or derived view, not the system of record — staleness is already in the contract",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Do not recite "you can't have all three." Say: "Partitions happen; when they do I have to choose whether this path refuses work or risks divergence. The rest of the time I'm choosing whether every request pays for coordination." Then bind it to one concrete path — inventory decrement versus like-count — so CAP and PACELC become two sentences about that path rather than a theorem dump. Expect the follow-up "so is Cassandra AP?": the sharp answer is that default Cassandra is AP-leaning under partition and Else→L under health, and that raising quorum on a key moves that key without rewriting the cluster.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "CAP is a partition-time dilemma: given that networks split, you cannot keep both linearizable consistency and availability for every request on every side.",
+    "Partition tolerance is not a feature you opt out of in a multi-machine system — 'CA' as a permanent label usually means the design has not named what happens when the network fails.",
+    "PACELC adds the healthy-path trade: even with no partition, stronger consistency costs latency on every coordinated operation.",
+    "Real systems are not globally AP or CP — the same cluster often mixes quorum paths and eventual paths depending on the invariant.",
+    "Prefer consistency when a stale answer breaks an invariant; prefer availability or low latency when divergence is reconcilable and the latency budget cannot absorb quorum RTTs.",
+    "In an interview, apply CAP/PACELC to one named operation path — not to the product as a whole — and state what you refuse or risk during a split.",
+  ]}
+/>

@@ -1,0 +1,162 @@
+---
+title: "Search Autocomplete"
+number: "03.02"
+summary: "Sub-100 ms prefix suggestions at billions of queries per day — trie topology, top-k at every node, and the update path nobody draws first."
+status: published
+free: true
+difficulty: deep
+estMinutes: 20
+tags: [autocomplete, trie, search]
+updated: "2026-09-15"
+---
+
+## The keystroke budget is 100 milliseconds
+
+Autocomplete sits on the critical path of every search box. The user types a character; within roughly 100 ms the dropdown must show relevant suggestions or the UI feels broken. That latency budget covers network round-trip, server lookup, ranking, and JSON serialization — the index lookup itself gets maybe 10–20 ms. Interviewers ask this prompt to see whether you reach for Elasticsearch when a trie would do, whether you understand precomputation versus query-time ranking, and whether you can size a read-heavy system where every keystroke is a request.
+
+The second tension is freshness versus speed. Query logs shift hourly — "coronavirus" dominates one month, a product launch dominates the next. A static trie built last Tuesday serves stale suggestions; rebuilding on every keystroke is absurd. The design lives in between: precomputed top-k at each prefix node, updated on a schedule or stream, served from memory at the edge.
+
+## Clarify: prefix in, ranked suggestions out
+
+> "I'll design typeahead for a general web search product — as the user types, return up to 10 ranked query suggestions. Personalization and spell correction are out of scope unless you want them. I'll assume English queries."
+
+**Functional requirements:**
+
+- Given `(prefix, limit)` return up to **10 suggestions** ranked by popularity/relevance.
+- Support prefixes from **1 character** upward; empty prefix may return trending queries.
+- **Case-insensitive** match on normalized text.
+- Optional: **category tags** per suggestion ("news", "shopping") — ask if needed.
+
+**Non-functional requirements:**
+
+- **Latency**: p99 under **100 ms** end-to-end; index lookup under **20 ms**.
+- **Availability**: 99.9% — stale suggestions beat an empty dropdown.
+- **Freshness**: suggestions reflect query trends within **24 hours** (adjustable).
+- **Scale**: queries per second at peak, distinct queries in corpus.
+
+**Out of scope:** full search results page, indexing the entire web, user login/history (unless personalization is in scope).
+
+Ask explicitly: "Is this query autocomplete (suggesting full queries like 'weather tokyo') or entity autocomplete (suggesting products/people names)?" Entity autocomplete adds a second index and different ranking — do not assume.
+
+## Capacity: every keystroke is a read
+
+| Assumption | Value | Derived |
+|---|---|---|
+| DAU | 100M | |
+| Searches per user per day | 5 | 500M searches/day |
+| Keystrokes before submit or abandon | ~8 per search | **4B prefix lookups/day** |
+| Average QPS | 4B / 86,400 | **~46k/s** |
+| Peak factor | 3× | **~140k/s** at peak |
+| Distinct query strings in corpus | 50M | Trie leaf count order-of-magnitude |
+| Avg suggestion response | 10 strings × 30 bytes + overhead | ~500 bytes |
+| Egress at peak | 140k × 500 B | **~70 MB/s** — CDN-friendly |
+
+**Memory for trie with top-k:** A naive trie of 50M strings averages ~20 bytes per node along paths — worst case hundreds of GB if every query is unique and long. Production systems **do not store the full trie of all queries** — they store **top-k (k=10–20) per prefix node** for prefixes that actually receive traffic, built from aggregated query logs. The long tail of prefixes that nobody types is never indexed. Say that out loud; it is the difference between a plausible design and a trie that cannot fit in RAM.
+
+**Update volume:** Query logs produce ~500M completed queries/day. Aggregation rolls them into prefix counts in a batch job or stream — write rate to the suggestion index is low (hourly or daily rebuild of hot prefixes), read rate is enormous.
+
+## High-level design
+
+<Steps>
+<Step title="Client debounces and requests suggestions">
+
+Browser/mobile fires `GET /v1/suggest?q=wea&limit=10` after **150 ms debounce** (trade typing smoothness against request count — 150 ms cuts requests roughly in half versus per-keystroke). Include a **session token** if personalization is later added. Cancel in-flight requests when the next character arrives (AbortController).
+
+</Step>
+
+<Step title="Edge cache serves hot prefixes">
+
+Request hits a **CDN/edge cache** keyed on `(q, locale, limit)`. Popular prefixes like "f", "fa", "fac" cache with **TTL 5–15 minutes**. Cache hit rate on head prefixes can exceed 90% — "weather", "facebook", "amazon" dominate. Miss falls through to origin.
+
+</Step>
+
+<Step title="Suggestion service looks up precomputed top-k">
+
+Origin **Suggestion Service** holds the **Autocomplete Index** in memory (sharded by first character or first two characters across a fleet of nodes). Lookup: walk the trie from the prefix root in O(prefix length) — typically ≤20 steps — and read the **pre-sorted top-10 list** stored at that node. No scoring at query time; ranking was done at build time.
+
+</Step>
+
+<Step title="Aggregation pipeline rebuilds the index">
+
+**Query Log Stream** (Kafka) ingests completed searches. An **Aggregation Job** (Flink or hourly Spark) rolls counts into `(prefix → {query: count})` maps, keeps top-k per prefix, filters spam/abusive queries. Output writes a new **index snapshot** to object storage. **Index Loader** on each suggestion node pulls the snapshot, **hot-swaps** in memory with double-buffering — no downtime during rebuild.
+
+</Step>
+</Steps>
+
+| Component | Role | Store |
+|---|---|---|
+| Query log ingest | Capture completed queries + timestamps | Kafka |
+| Aggregator | Prefix → top-k by count/recency | Flink / batch |
+| Autocomplete index | In-memory trie with top-k lists | RAM on suggestion nodes |
+| Edge cache | Head-prefix latency + origin shield | CDN |
+| Suggestion API | Stateless lookup | — |
+
+## Deep dive: top-k at every node, not a full trie
+
+### Why not Elasticsearch?
+
+Elasticsearch inverted indexes excel at full-text search over documents; prefix completion on 140k QPS with 20 ms p99 is expensive — each prefix query scans posting lists. **Completion suggesters** exist but still lag a hand-rolled trie with precomputed rankings for this narrow use case. Mention **09.13 Vector Search And Hybrid Retrieval** only if the interviewer asks about semantic suggestions — not the default autocomplete path.
+
+### Building top-k per prefix efficiently
+
+Naive approach: for each of 50M queries, insert into every prefix node's list — O(query_length × corpus_size), unusable.
+
+Production approach: from query logs, count full queries. For each query, update only **its own prefix chain** (at most ~30 nodes per query). Use a **min-heap of size k** at each node during the aggregation pass. Total work scales with log volume, not corpus². After aggregation, serialize the trie to a compact binary format (children as sorted arrays for cache-friendly traversal, top-k lists as fixed arrays of `(score, query_id)`).
+
+### Ranking beyond raw count
+
+Raw count favors evergreen head terms. Most systems blend:
+
+- **Frequency** over a 7-day window
+- **Recency boost** — queries spiking in the last hour rise faster
+- **Manual curation blocklist** — remove offensive suggestions before they reach the index
+
+Compute the blend at aggregation time; store final scores so query path is a pure lookup.
+
+<Callout type="warn">
+If you store only popularity and never refresh, your autocomplete becomes a history museum — "covid symptoms" stays top-ranked years later. Tie freshness to the aggregation window and mention a **decay function** (exponential decay on counts) or sliding window counts. Interviewers notice when candidates treat the index as static.
+</Callout>
+
+### Sharding the index
+
+Single-node RAM limits (~256 GB practical) cap corpus size. Shard by **first character** (26+ shards) or **first two characters** (676 shards) — each node serves a subset. A **router** in front hashes the prefix to the correct shard. Uneven distribution ("s" is hotter than "x") may need **virtual shards** or splitting hot first-char buckets.
+
+## Precomputed trie versus query-time search
+
+<Tradeoff
+  forTitle="Precomputed top-k trie when"
+  againstTitle="Query-time index lookup when"
+  forItems={[
+    "p99 latency under 20 ms on the index path — ranking must be done before the query arrives",
+    "Read QPS is 100k+ and the corpus is millions of popular queries, not billions of documents",
+    "Suggestions are query strings from logs — the answer set is a small ranked list, not full documents",
+    "Freshness measured in hours is acceptable — hourly or daily rebuild fits the product",
+    "You can shard by prefix in memory and serve from a CDN for head terms",
+  ]}
+  againstItems={[
+    "Suggestions must search a large entity catalog (products, users) with attributes — inverted index or dedicated search engine fits better",
+    "Personalization per user changes ranking on every request — precomputed global top-k is insufficient",
+    "Corpus updates must appear in suggestions within seconds — streaming partial updates to a trie are complex",
+    "Prefix match is fuzzy or typo-tolerant — spell correction (09.15 Did You Mean And Spell Correction) belongs on the query path",
+    "Team already operates Elasticsearch at scale and latency budget is 200 ms, not 50 ms",
+  ]}
+/>
+
+## In an interview
+
+Open: "Autocomplete is a read-heavy prefix lookup — I'll precompute top-10 at each node and serve from memory behind a CDN." Three minutes clarify (query vs entity autocomplete), four minutes capacity (keystrokes × debounce = QPS), ten minutes on trie + aggregation pipeline, eight on sharding and freshness.
+
+Follow-ups: "User types faster than debounce?" (cancel stale requests, only latest matters), "How update without downtime?" (double-buffer swap), "Malicious queries?" (blocklist in aggregator, rate limit suggest API).
+
+Volunteer: "The failure mode is rebuilding the index synchronously on one node — swap takes 30 seconds and p99 spikes. Double-buffer and rollout snapshots gradually." Shows operational thinking.
+
+<KeyTakeaways
+  items={[
+    "Treat every keystroke as a read at peak — debounce on the client, CDN-cache head prefixes, and shard the in-memory index by first character",
+    "Store precomputed top-k ranked lists at trie nodes; query time is O(prefix length) lookup with zero scoring",
+    "Build top-k from query log aggregation with min-heaps per prefix — never insert every query into every prefix naively",
+    "Refresh via snapshot rebuild on a schedule; hot-swap with double-buffering so index updates do not stall serving",
+    "Blend frequency with recency decay at aggregation time — raw all-time counts produce stale, embarrassing suggestions",
+    "Query autocomplete (from logs) wants a trie; entity autocomplete (products, people) wants an inverted index — clarify which you are designing",
+  ]}
+/>

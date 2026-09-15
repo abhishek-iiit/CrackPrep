@@ -1,32 +1,102 @@
 ---
 title: "Data Retention And Deletion"
 number: "14.10"
-summary: "Data Retention And Deletion — notes in progress."
-status: draft
+summary: "How to engineer retention windows and deletion so data actually disappears from primaries, replicas, backups, and derived stores — not just from the user-facing row."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [retention, deletion, lifecycle, storage]
+updated: "2026-09-15"
 ---
 
-## The problem
+## `DELETE FROM` is the beginning of the problem
 
-What breaks without this, and the situation that forces the decision.
+Retention is a statement about time: how long each class of data remains queryable, and what happens when that clock expires. Deletion is the mechanism that enforces it. In a distributed product, a row removed from the primary is still in replicas for a while, in WAL and backups for longer, in a search index and analytics lake until those pipelines catch up, and in object storage until a lifecycle rule runs. Engineering retention means designing **expiration, erasure, and verification** across that whole graph — not only the OLTP table.
 
-## How it works
+14.11 Privacy And Data Retention covers why regulators and users demand erasure and how to frame purpose limitation. This lesson is the mechanical pipeline: hot/cold tiers, tombstones, batch reapers, and proving a delete completed.
 
-The mechanism, step by step.
+## Classify before you expire
 
-## Tradeoffs
+Different classes need different clocks:
+
+| Class | Typical retention shape | Deletion style |
+| --- | --- | --- |
+| Session / cache | Minutes–days | TTL eviction |
+| Operational logs | Days–weeks hot | Index lifecycle / roll |
+| User content | Product policy + legal hold exceptions | Soft delete then hard purge |
+| Audit / security logs | Months–years, often immutable | Append-only with WORM; restricted purge |
+| Analytics events | Hot window + cold archive | Partition drop / lifecycle |
+
+Legal holds and abuse investigations **pause** deletion for specific ids. A retention job that ignores holds will destroy evidence; a hold system that never lifts will retain forever. Build both.
+
+## A deletion pipeline that converges
+
+<Steps>
+  <Step title="Mark intent">
+    Soft-delete or write a tombstone with `delete_after` / `purged_at` null (03.13 Soft Delete). User-visible absence can happen here while hard purge is async.
+  </Step>
+  <Step title="Propagate to derived stores">
+    Emit a delete event (02.08 Event Contracts) so search, caches, CDNs, and recommendation features remove or filter the entity. Idempotent consumers; retries expected.
+  </Step>
+  <Step title="Hard purge primary data">
+    After the grace period, batch-delete rows/partitions or drop cold partitions by date. Prefer partition drops for time-series — O(1) metadata vs row-by-row churn.
+  </Step>
+  <Step title="Expire blobs">
+    Object-storage lifecycle rules keyed by prefix or object tags; do not rely on the app to remember every key if the inventory is large.
+  </Step>
+  <Step title="Verify">
+    Spot-check ids should 404 everywhere that mattered; metrics track purge lag by store. Backup expiry is a separate clock — know when a deleted row can still be restored (14.07).
+  </Step>
+</Steps>
+
+<Callout type="warn">
+Soft delete without a hard-purge job is infinite retention with extra latency. Soft delete without tombstone sync to secondary indexes is "deleted in Postgres, alive in Elasticsearch" — the most common retention bug in interview designs and in production.
+</Callout>
+
+## Hot and cold as retention machinery
+
+Moving data to cold storage (04.14 Hot And Cold Storage Archival) is not deletion; it is a cost and access trade. Retention policy must say whether cold copies count as "kept" for legal purposes and when *they* expire. Partitioning by time makes both archive and drop operationally cheap; a monolithic heap table makes "delete everything older than 90 days" a multi-day locking adventure (pair with 14.05 for safe bulk ops).
+
+Crypto-shredding — deleting encryption keys for per-user wrapped data — can make blobs unreadable faster than overwriting petabytes. It only works if every copy was encrypted under keys you control and backups cannot resurrect old keys.
+
+## Failure modes to instrument
+
+- **Purge lag** — tombstone age in each derived system.
+- **Orphan blobs** — objects without metadata references (and the reverse).
+- **Backup resurrection** — restoring a week-old backup reintroduces deleted users unless purge is re-applied.
+- **Infinite retries** — delete events that fail forever need a dead-letter and an owner.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Async tombstone + hard purge when"
+  againstTitle="Synchronous hard delete when"
+  forItems={[
+    "Multiple derived stores must converge and cannot share one transaction",
+    "Grace periods and undo (user restore from trash) are product requirements",
+    "Bulk time-based expiry is cheaper as partition drops and lifecycle rules",
+    "Legal holds must selectively pause purge without blocking all retention",
+    "Primary delete latency must stay low for interactive user requests",
+  ]}
+  againstItems={[
+    "A single store holds the only copy and immediate hard delete meets policy",
+    "Regulatory requirement demands synchronous erasure confirmation you can actually give",
+    "Volume is tiny and dual systems do not exist — complexity is pure overhead",
+    "You cannot staff purge lag monitoring — soft deletes will silently accumulate",
+    "Crypto-shredding already renders copies unreadable and policy accepts that as erasure",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Describe retention as a multi-store convergence problem: "I soft-delete with a tombstone, fan out delete events to indexes and caches, hard-purge after a grace period, and expire objects with lifecycle rules — then I track purge lag because backups still hold history until their retention elapses." Distinguish engineering deletion from privacy rationale (14.11). Name orphan indexes and backup resurrection as failure modes before being asked.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Retention is a per-class time policy; deletion is a pipeline that must reach primaries, derived stores, blobs, and eventually backups",
+    "Soft delete without a hard-purge job and secondary-index propagation is not retention enforcement",
+    "Time-based partitions and object lifecycle rules scale better than row-by-row deletes for large histories",
+    "Legal holds must pause purge for specific entities without disabling retention for everyone else",
+    "Measure purge lag per store; treat 'deleted in one database' as incomplete until verification says otherwise",
+    "Restoring backups can resurrect deleted data — backup retention clocks are part of the deletion design",
+  ]}
+/>

@@ -1,0 +1,102 @@
+---
+title: "Evaluate Reverse Polish Notation"
+number: "02.48"
+summary: "Operators come after operands — a stack accumulates numbers and applies each operator to the two most recent values."
+status: published
+free: true
+difficulty: core
+estMinutes: 12
+tags: [stack, array]
+updated: "2026-09-15"
+---
+
+## Infix parsing is overkill for postfix
+
+Given an array of tokens representing an expression in Reverse Polish Notation (postfix), evaluate it. Valid operators: `+`, `-`, `*`, `/`. Division truncates toward zero. For `["2","1","+","3","*"]` → `(2 + 1) * 3 = 9`.
+
+Evaluating infix needs precedence and parentheses — shunting-yard or a parse tree. Postfix has no ambiguity: every operator immediately follows its operands. The natural structure is a **stack**: push numbers, pop two when you hit an operator, push the result.
+
+## Stack-driven evaluation
+
+Walk tokens left to right. If the token is a number, push it. If it is an operator, pop `b` then `a` (order matters for `-` and `/`), compute, push back. After the last token, the stack holds one value — the answer.
+
+<Steps>
+<Step title="Initialize an empty number stack">
+  Each number token will be pushed here.
+</Step>
+<Step title="On operator, pop b then a">
+  For subtraction and division: result is a op b, not b op a.
+</Step>
+<Step title="Push result and continue">
+  After processing all tokens, stack[0] is the answer.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function evalRPN(tokens: string[]): number {
+  const stack: number[] = [];
+
+  for (const token of tokens) {
+    if (token === "+" || token === "-" || token === "*" || token === "/") {
+      const b = stack.pop()!;
+      const a = stack.pop()!;
+      switch (token) {
+        case "+": stack.push(a + b); break;
+        case "-": stack.push(a - b); break;
+        case "*": stack.push(a * b); break;
+        case "/": stack.push(Math.trunc(a / b)); break;
+      }
+    } else {
+      stack.push(Number(token));
+    }
+  }
+
+  return stack.pop()!;
+}
+```
+
+Time **O(n)** — one pass over tokens. Space **O(n)** for the stack in the worst case (all numbers before any operator).
+
+<Callout type="warn">
+  Use `Math.trunc(a / b)` for division — JavaScript `/` on negatives does not truncate toward zero with `Math.floor`.
+</Callout>
+
+<Tradeoff
+  forTitle="Stack evaluation when"
+  againstTitle="Build parse tree when"
+  forItems={[
+    "Input is already postfix — stack evaluation is O(n) and direct",
+    "You need the numeric result, not an expression tree or infix string",
+    "Operators are binary and tokens are valid — no error recovery needed",
+    "Same stack pattern as 02.05 Valid Parentheses and calculator variants",
+    "Interview setting: under 20 lines, easy to verify on a whiteboard",
+  ]}
+  againstItems={[
+    "Input is infix — you need shunting-yard to convert first",
+    "You must support variables, functions, or unary operators — postfix stack needs extensions",
+    "You need to serialize the expression back, not just evaluate",
+    "Tokens include multi-digit numbers embedded in strings — still fine, but lexer complexity rises in custom parsers",
+    "Repeated evaluation on the same expression — compile to tree once, evaluate many times",
+  ]}
+/>
+
+## In an interview
+
+Restate: `["4","13","5","/","+"]` → 4 + (13/5) = 6. Confirm division truncates toward zero, expression is always valid, no parentheses.
+
+Say out loud that postfix means every operator applies to the two most recent stack values — pop order is b then a. Mention truncation-toward-zero before coding division.
+
+Follow-ups: Basic Calculator (infix with parentheses — shunting-yard), or design an expression evaluator class. The bug interviewers watch for is pop order (`a - b` vs `b - a`) and using `Math.floor` instead of trunc toward zero.
+
+<KeyTakeaways
+  items={[
+    "Reverse Polish Notation evaluates with a single stack — push numbers, apply operators to top two",
+    "Pop order matters: b pops first, then a; compute a op b for - and /",
+    "Division truncates toward zero — use Math.trunc, not Math.floor, for negative results",
+    "Time O(n), space O(n) — linear scan with stack depth bounded by operand count",
+    "Postfix needs no precedence rules — that is why stack evaluation is sufficient",
+    "Same stack family as 02.05 Valid Parentheses; infix variants add shunting-yard first",
+  ]}
+/>

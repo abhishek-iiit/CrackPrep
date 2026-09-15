@@ -1,32 +1,122 @@
 ---
 title: "Reaction Modeling"
 number: "11.10"
-summary: "Reaction Modeling — notes in progress."
-status: draft
+summary: "Why a like is both an edge and a counter, how multi-react types change the key, and where denormalized counts are allowed to lag."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 14
+tags: [reactions, likes, counters, data-modeling]
+updated: "2026-09-15"
 ---
 
-## The problem
+## A like is two writes pretending to be one
 
-What breaks without this, and the situation that forces the decision.
+Tap a heart and the product promises three things at once: your reaction is recorded (you can unlike later, friends may see that you liked it), the post's visible count goes up by one, and the action feels instant. Those are different data problems. The durable edge — user U reacted to post P with type T — must be exact and idempotent. The count shown under the post is a denormalized aggregate that can lag by a fraction of a second and often should, because millions of concurrent taps on one viral post will not serialize through a single row increment without becoming the outage.
 
-## How it works
+Reaction modeling is the schema and write-path discipline that keeps those two representations honest. Get the edge wrong and people double-like or lose the ability to unlike. Get the count wrong and the UI flickers, under-counts, or hot-rows a single posts table until likes time out.
 
-The mechanism, step by step.
+10.13 Live Reactions High Throughput Design covers the extreme fan-in path for live broadcasts. This lesson is the everyday model those systems still sit on: what is stored, what is unique, and what is allowed to be approximate.
 
-## Tradeoffs
+## The edge is the source of truth
+
+Store reactions as a relation keyed so a user cannot land two of the same semantic reaction on one target without an explicit product rule.
+
+```text
+reactions
+  target_type   # post | comment | message
+  target_id
+  user_id
+  reaction_type # like | love | laugh | ...
+  created_at
+  PRIMARY / UNIQUE (target_id, user_id, reaction_type)
+  -- or UNIQUE (target_id, user_id) if only one reaction per user per target
+```
+
+Two product modes dominate:
+
+- **Single reaction per user per target** (classic like, or one-of-many emoji that replaces the previous). Unique on `(target_id, user_id)`. Changing from 👍 to ❤️ is an update (or delete+insert) of one row, and the counts for both types must move.
+- **Independent types** (like and bookmark both allowed). Unique on `(target_id, user_id, reaction_type)`.
+
+Idempotency is not optional. Retries from flaky mobile networks will replay the same tap — 02.09 Retries Timeouts And Idempotency. A unique constraint turns "like twice" into a no-op conflict you acknowledge as success, which is what the user meant.
+
+Who reacted lists ("Liked by …") are queries on this edge table (or a cached sample). Do not try to recover the set from a counter.
+
+## Counts are denormalized on purpose
+
+A `posts.like_count` column, a Redis counter keyed by `post:{id}:likes`, or per-type counters (`love_count`, …) exist so feed hydration does not `COUNT(*)` the edges for every post in a timeline page. Feed generation in 11.07 Feed Generation Push Pull Hybrid already hydrates dozens of posts per open — each hydration paying a COUNT is how the reactions table becomes the site's busiest read.
+
+<Steps>
+  <Step title="Write the edge first, with the uniqueness guarantee">
+    Insert (or upsert) the reaction row. If the insert is a duplicate, stop — do not increment again. Deletes (unlike) remove the row and schedule a decrement only when a row was actually removed.
+  </Step>
+  <Step title="Update counts asynchronously or in a tightly bounded sync path">
+    Low-scale: update the count in the same transaction as the edge. High-scale: publish `reaction_added` / `reaction_removed` and let workers increment sharded counters, or use Redis `INCR` with periodic flush to durable storage. The author's own UI can optimistic-increment locally without waiting for the global counter.
+  </Step>
+  <Step title="Hydrate feeds from the denormalized counts">
+    Timeline entries carry or join the cached counts. Periodically reconcile counters against the edge table for posts that drift (job retries, lost decrements, manual moderation deletes).
+  </Step>
+</Steps>
+
+| Representation | Exact? | Role |
+| --- | --- | --- |
+| Edge row | Yes | Authorship, unlike, "who reacted", abuse audits |
+| Per-post counters | Soft-exact | Feed and detail page display |
+| Sharded / approximate counters | Approximate under merge | Viral posts, live rooms (see 10.13) |
+| Sampled "liked by" faces | Sample | Social proof without loading full sets |
+
+<Callout type="tip">
+Optimistic UI on the client — bump the heart and the number immediately, roll back on hard failure — hides counter lag and retries without teaching users to mash the button. The server remains the authority for the edge; the animation is not a second database.
+</Callout>
+
+## Multi-react, removes, and targets
+
+**Switching emoji** under single-reaction mode needs a single transactional or carefully ordered update: decrement old type, increment new type, replace the edge. Doing this as two unlocked steps produces nights where both counts include the same user.
+
+**Unlike** is a first-class write. Soft-deleting reactions (03.13 Soft Delete) without decrementing counts is a common drift bug — if you soft-delete for audit, the count path must treat soft-deleted edges as absent.
+
+**Targets** are polymorphic: posts, comments, messages, even photos in a gallery. Either use a generic `(target_type, target_id)` or separate tables per target if you need different sharding. Polymorphic keys make global "all reactions by user" easy and "all reactions on post" filters slightly clumsier; dedicated tables invert that. Pick based on which query owns the product.
+
+**Privacy.** "Who liked" may be visible only to the author, or to everyone. That is an authorization rule on the edge query, not a different storage model — but it means you should not embed full reactor lists inside a publicly cached post document.
+
+## Hot posts
+
+A celebrity post under a pure `UPDATE posts SET like_count = like_count + 1` scheme serializes writers on one row. Move increments to a write-optimized counter store, shard by `hash(user_id) % N` and sum on read, or accept approximate display counts during the storm and reconcile later. The edge table still needs partition strategy by `target_id` so all likes for one post do not create a single database hotspot without planning — 04.06 Hot Partitions.
+
+Do not drop the edge "to save writes" on viral content unless the product truly does not allow unlike or "who liked." Once you drop edges, you cannot restore those features without a miracle.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Keep durable per-user edges when"
+  againstTitle="Counters-only (or sketches-only) when"
+  forItems={[
+    "Users must unlike, switch reaction type, or see whether they already reacted",
+    "Authors or viewers can open a 'who reacted' list, even if sampled beyond a threshold",
+    "Abuse, spam, or legal flows need to attribute a reaction to an account",
+    "Exactness per user matters more than peak increment throughput",
+    "You can move count increments off the hot posts row while still writing edges elsewhere",
+  ]}
+  againstItems={[
+    "The surface is fire-and-forget (ephemeral live emoji bursts) with no unlike and no attribution UI",
+    "Peak react rate on one target exceeds what edge inserts can sustain even when sharded",
+    "Only an approximate aggregate is shown and reconciliation cost beats storage of edges",
+    "Retention policy forbids storing per-user social signals for long periods",
+    "You are prototyping and a single integer on the post is enough until the product asks for unlike",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Open with the split: "I store a unique reaction edge for correctness, and a denormalized counter for read paths — never COUNT on the feed hydrate." Walk an unlike and a duplicate retry. If they ramp traffic, move increments off the posts row and mention sharding or async aggregation before inventing CRDTs unprompted.
 
-<KeyTakeaways items={["", "", ""]} />
+Ask whether multiple reaction types replace or stack — that single product question changes the unique key and the count update. Name optimistic UI so latency talk does not force a synchronous global counter on the request path.
+
+<KeyTakeaways
+  items={[
+    "A reaction is an idempotent edge plus a denormalized count — collapsing both into one posts-row increment fails uniqueness and hot-row realities",
+    "Enforce uniqueness on (target, user) or (target, user, type) so retries and double-taps cannot double-count",
+    "Feed hydration must read counters, not COUNT edges; reconcile drift offline",
+    "Switching reaction types and unlikes are count moves as well as edge mutations — design them as one logical operation",
+    "Viral targets need sharded or async counters; do not abandon edges unless the product truly has no unlike or attribution",
+    "Polymorphic targets and privacy of 'who reacted' are product rules layered on the same edge model, not reasons to skip it",
+  ]}
+/>

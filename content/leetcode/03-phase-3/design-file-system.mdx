@@ -1,0 +1,125 @@
+---
+title: "Design File System"
+number: "03.44"
+summary: "Path segments form a trie — createPath must walk an existing prefix and attach the leaf; get walks or returns -1."
+status: published
+free: true
+difficulty: core
+estMinutes: 14
+tags: [design, trie, hash-map]
+updated: "2026-09-15"
+---
+
+## Paths are hierarchical keys, not flat strings
+
+Implement a file system supporting:
+
+- `createPath(path, value)` — create a new file at an absolute path like `/a/b/c`. Return `true` if created, `false` if the path already exists **or** any parent directory is missing.
+- `get(path)` — return the value at a path, or `-1` if the path does not exist.
+
+Paths always start with `/`. Intermediate segments are directories; the final segment is the file that stores the integer value. You cannot create `/a/b/c` unless `/a/b` already exists as a directory chain — partial creation is forbidden.
+
+A flat `Map<string, number>` keyed by the full path works for `get`, but `createPath`'s parent-must-exist rule requires checking every prefix. Splitting on `/` and walking a **trie** (prefix tree) of directory nodes is the natural fit — same machinery as 02.21 Implement Trie, but values live only on leaf file nodes.
+
+## Trie of path segments
+
+Each node holds `children: Map<string, Node>` and `value: number` (use `-1` or a sentinel for directory-only nodes with no file).
+
+**createPath:** split `path.slice(1)` on `/`. Walk segments except the last — if any child is missing, return false. On the last segment, if the child already exists (file or directory), return false. Else create leaf with `value`.
+
+**get:** walk all segments. If any child missing, return `-1`. Return the node's `value` at the end — directories without a stored file should not be queried successfully on LeetCode's tests.
+
+<Steps>
+<Step title="Split path into segments">
+  `'/a/b/file'.slice(1).split('/')` → `['a','b','file']`.
+</Step>
+<Step title="createPath — walk parents">
+  For segments `[0..n-2]`, descend; abort false if a child is absent.
+</Step>
+<Step title="createPath — attach leaf">
+  Last segment must not exist; create node with value, return true.
+</Step>
+<Step title="get — full walk">
+  Descend every segment; return value or -1.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+type TrieNode = {
+  children: Map<string, TrieNode>;
+  value: number;
+};
+
+class FileSystem {
+  private root: TrieNode = { children: new Map(), value: -1 };
+
+  createPath(path: string, value: number): boolean {
+    const parts = path.slice(1).split("/");
+    let node = this.root;
+
+    for (let i = 0; i < parts.length - 1; i++) {
+      const part = parts[i];
+      if (!node.children.has(part)) return false;
+      node = node.children.get(part)!;
+    }
+
+    const leaf = parts[parts.length - 1];
+    if (node.children.has(leaf)) return false;
+
+    node.children.set(leaf, { children: new Map(), value });
+    return true;
+  }
+
+  get(path: string): number {
+    const parts = path.slice(1).split("/");
+    let node = this.root;
+
+    for (const part of parts) {
+      if (!node.children.has(part)) return -1;
+      node = node.children.get(part)!;
+    }
+
+    return node.value;
+  }
+}
+```
+
+Time **O(L)** per operation where L is path length in segments. Space **O(total nodes created)**.
+
+<Tradeoff
+  forTitle="Segment trie when"
+  againstTitle="Flat path map when"
+  forItems={[
+    "Parent directories must exist before creating nested files — prefix structure is explicit",
+    "Paths share prefixes (/a/b/x, /a/b/y) — nodes reuse directory segments",
+    "Follow-up adds listDir or delete — trie localizes subtree operations",
+    "02.21 Implement Trie is the same child-map pattern without path separators",
+    "Segment count per path is modest (≤ 10) — Map per node is fine",
+  ]}
+  againstItems={[
+    "Only full-path create and get, no parent-existence rule — Map<string, value> suffices",
+    "Paths are single-level (/file only) — one map entry per file",
+    "You need lexicographic listing of millions of paths — sorted flat map may be simpler",
+    "Content-addressable storage keyed by hash — no hierarchy",
+    "Read-heavy with infrequent writes — immutable path snapshot + map rebuild",
+  ]}
+/>
+
+## In an interview
+
+Clarify: absolute paths, leading slash, create fails if parent missing or path exists. Draw `/a` → `/a/b` → create `/a/b/c` — two directory nodes then a value leaf.
+
+Say: "I split on `/` and walk a trie; directories are internal nodes, files store the integer at the leaf."
+
+Bug: creating intermediate segments during createPath when parent check should fail; returning 0 instead of -1 for missing paths. Follow-ups: delete path, list children of a directory, update value in place.
+
+<KeyTakeaways items={[
+  "Design File System maps path segments to a trie — each / component is one edge.",
+  "createPath requires every parent segment to exist; only the final segment is newly created.",
+  "get walks the full path; any missing segment returns -1.",
+  "O(L) per operation where L is segment count; shared prefixes share trie nodes.",
+  "02.21 Implement Trie is the same child-map structure without file values on leaves.",
+  "Flat Map<string, number> handles get but awkwardly enforces parent-existence on create.",
+]} />

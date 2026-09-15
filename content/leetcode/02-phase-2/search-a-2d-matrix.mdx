@@ -1,0 +1,104 @@
+---
+title: "Search a 2D Matrix"
+number: "02.43"
+summary: "Rows and columns are sorted, so the matrix is one ascending sequence if you read it row-major — binary search on a virtual 1D array."
+status: published
+free: true
+difficulty: core
+estMinutes: 13
+tags: [binary-search, matrix]
+updated: "2026-09-15"
+---
+
+## Two nested loops ignore the global order
+
+Given an m × n matrix where each row is sorted ascending and the first element of each row is greater than the last element of the previous row, determine whether a target value exists.
+
+Brute force scans every cell: O(m × n). For m, n up to 100 that is 10⁴ cells — acceptable here, but the constraint structure screams for O(log(m × n)). The rows are sorted *and* the row breaks preserve global sorted order — if you flatten row-major, the entire matrix is one sorted array.
+
+## One sorted array, row-major indexing
+
+Treat the matrix as a virtual array of length `m * n`. Index `k` maps to `matrix[Math.floor(k / n)][k % n]`. Run standard binary search on `[0, m * n - 1]`, comparing `target` to the value at each virtual mid.
+
+<Steps>
+<Step title="Set left = 0, right = m * n - 1">
+  The search space is virtual indices, not (row, col) pairs directly.
+</Step>
+<Step title="Map mid to (row, col) and compare">
+  `row = Math.floor(mid / n)`, `col = mid % n`. Standard three-way branch on `matrix[row][col]`.
+</Step>
+<Step title="Return true on match, false when window empties">
+  Same loop invariant as 02.42 Binary Search on a 1D array.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function searchMatrix(matrix: number[][], target: number): boolean {
+  if (matrix.length === 0 || matrix[0].length === 0) return false;
+
+  const m = matrix.length;
+  const n = matrix[0].length;
+  let left = 0;
+  let right = m * n - 1;
+
+  while (left <= right) {
+    const mid = left + Math.floor((right - left) / 2);
+    const row = Math.floor(mid / n);
+    const col = mid % n;
+    const val = matrix[row][col];
+
+    if (val === target) return true;
+    if (val < target) {
+      left = mid + 1;
+    } else {
+      right = mid - 1;
+    }
+  }
+
+  return false;
+}
+```
+
+Time **O(log(m × n))**. Space **O(1)**.
+
+An alternative starts at the top-right corner (or bottom-left) and walks: if current > target go left, if current < target go down — also O(m + n), fine for this size but not the optimal log bound.
+
+<Tradeoff
+  forTitle="Virtual 1D binary search when"
+  againstTitle="Corner walk when"
+  forItems={[
+    "The matrix satisfies the strict row-break property — global row-major order holds",
+    "You want O(log(m × n)) and already know the 02.42 Binary Search template",
+    "m and n are large enough that O(m + n) corner walk is measurably slower",
+    "Follow-up may ask for count or range — binary search variants extend naturally",
+    "You prefer one uniform search space over ad-hoc two-pointer geometry",
+  ]}
+  againstItems={[
+    "The follow-up drops the row-break rule (each row sorted, first column sorted) — corner walk still works, virtual flatten does not",
+    "Matrix is small and O(m + n) is easier to explain under pressure",
+    "You need the actual (row, col) coordinates back, not just boolean existence",
+    "Rows have variable length — index math needs extra care",
+    "Interviewer asks you to derive the corner walk first as intuition before optimizing",
+  ]}
+/>
+
+## In an interview
+
+Restate with example: matrix `[[1,3,5,7],[10,11,16,20],[23,30,34,60]]`, target 3 → true, target 13 → false. Confirm the row-break property — this is what makes flattening valid.
+
+Say out loud that row-major order turns the 2D grid into one sorted sequence, so index mapping plus binary search applies directly. Mention the index-to-cell mapping bug before coding: `row = mid / n`, `col = mid % n`.
+
+Follow-ups: Search a 2D Matrix II (drop row-break — use top-right corner walk or binary search per row). The bug interviewers watch for is using `mid / m` instead of `mid / n` in the mapping.
+
+<KeyTakeaways
+  items={[
+    "When each row is sorted and row starts exceed previous row ends, the matrix is one sorted array in row-major order",
+    "Virtual index k maps to matrix[Math.floor(k / n)][k % n] — binary search on [0, m*n - 1]",
+    "Time O(log(m × n)), space O(1) — optimal for this constraint set",
+    "Corner walk from top-right is O(m + n) and survives when the row-break property is removed",
+    "The row/col mapping formula is the bug magnet — divide by n (columns), not m (rows)",
+    "Builds directly on 02.42 Binary Search; differs from 01.08 rotated-array tricks",
+  ]}
+/>

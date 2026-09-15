@@ -1,32 +1,84 @@
 ---
 title: "Horizontal Vs Vertical Scaling"
 number: "01.08"
-summary: "Horizontal Vs Vertical Scaling — notes in progress."
-status: draft
+summary: "Vertical scaling buys headroom with a purchase and no code change; horizontal scaling buys a higher ceiling by trading a compute problem for a coordination one."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [scaling, capacity-planning, infrastructure]
+updated: "2026-09-15"
 ---
 
-## The problem
+## A single machine has a ceiling you can see coming
 
-What breaks without this, and the situation that forces the decision.
+Every system starts on one machine, and for a long time that is the right call: one process, one datastore, no network hop between the request and the answer, and every consistency question that a distributed design has to solve does not exist because there is only one copy of anything. The question "horizontal or vertical" only becomes real once that one machine's numbers stop having headroom — CPU pinned at 80% during normal traffic, not just at peak, or memory sized against the working set with no room for growth.
 
-## How it works
+Vertical scaling is the first move almost everyone reaches for, because it is a purchase, not a redesign: move to a bigger instance, more vCPUs, more RAM, a faster disk, and the application code does not change at all. That is real leverage — a single afternoon's work can buy 2x or 4x the headroom with zero new failure modes. But the move has a ceiling, and the ceiling is closer than it looks. Cloud providers cap out their largest general-purpose instances in the hundreds of vCPUs and tens of terabytes of RAM — a moving number across providers and years, so treat any specific figure as a ballpark rather than a spec — and even before you hit that wall, the price curve stops being linear. Doubling from a mid-tier instance to the next size up roughly doubles the bill; doubling again into the top-end SKUs often costs noticeably more than double, because those machines serve a smaller market and providers price them that way.
 
-The mechanism, step by step.
+Horizontal scaling is the other move: add more machines instead of a bigger one. It has no ceiling in the same sense — you are not waiting for a manufacturer to build a bigger chip — but it is not free headroom, it is a trade. You are exchanging a compute problem for a coordination problem.
 
-## Tradeoffs
+## What horizontal scaling actually requires
+
+Adding a second machine only helps if work can be split across it, and splitting work is not automatic.
+
+- **Statelessness in the compute tier.** A request handled by machine A cannot depend on something only machine A remembers — a session in local memory, a file written to local disk — or a load balancer sending the next request to machine B breaks the user's flow. State has to move out to something every machine can reach: a shared cache, a shared database, a signed token the client carries.
+- **Something to route the traffic.** A second machine does nothing until requests are distributed across both. That is a load balancer's job — see 02.06 Load Balancers — and it is itself a new component with its own health checks, its own failure mode, and its own decision about algorithm (round robin, least connections, consistent hashing).
+- **A data layer that can actually take more writes.** Scaling the stateless compute tier horizontally is the easy half. The datastore underneath it is usually the one that hit its ceiling first, and scaling it horizontally means partitioning the data itself — see 04.05 Sharding And Partitioning — which is a different, harder problem: a query might now need to touch multiple shards, and a transaction that used to be local might need to span them.
+- **A story for partial failure.** With one machine, it is either up or down. With ten, at any moment one of them plausibly is down, or slow, or partitioned from the others, while the rest keep serving. The system has to keep working through that instead of treating it as exceptional.
+
+None of this is free, and all of it is invisible on a whiteboard box labeled "3x". The box implies triple the throughput; it does not show the load balancer, the session store, or the on-call engineer who now reasons about thirty machines instead of one.
+
+<Callout type="gotcha">
+Horizontal scaling of the stateless app tier is close to a solved problem — add machines behind a load balancer and you are most of the way there. Horizontal scaling of the datastore underneath it is not. It is common to design a system where the web tier scales out cleanly to absorb ten times the traffic while the single, unpartitioned database behind it is the actual ceiling on the whole system. Ask "which tier is stateful" before declaring a design horizontally scalable.
+</Callout>
+
+## Comparing the two
+
+| | Vertical (scale up) | Horizontal (scale out) |
+| --- | --- | --- |
+| Code changes required | Usually none | Often significant — statelessness, retries, idempotency |
+| Ceiling | Real, set by the largest instance a provider sells | Practically open-ended |
+| Cost curve | Roughly linear, then steep near the top-end SKUs | Roughly linear per added unit, plus a coordination tax |
+| Failure isolation | None — one machine, one blast radius | Better — one node failing degrades capacity, not total |
+| Downtime to scale | Usually yes — most providers require a stop/resize/start cycle | No — add a node while the rest keep serving |
+| Operational surface | One machine to patch, monitor, back up | N machines, plus the routing and coordination layer itself |
+| Where it fits | Early-stage systems, or a component that resists partitioning (a single strongly-consistent leader) | Any component whose load can be split across independent units of work |
+
+The row that decides most real designs is failure isolation. A vertically scaled machine at capacity is one bad deploy or one hardware fault away from a full outage. A horizontally scaled fleet degrades — losing one node out of twenty costs 5% of capacity, not all of it — which is why availability targets (01.05 Availability Durability Consistency And Cost) push designs toward horizontal scaling even before raw throughput does.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Scale horizontally when"
+  againstTitle="Scale vertically when"
+  forItems={[
+    "The workload is already near a single instance's ceiling, or will be within a planning horizon you can name",
+    "Availability matters as much as throughput — you want one node's failure to cost a slice of capacity, not all of it",
+    "The unit of work is naturally partitionable: independent requests, independent user shards, independent queue messages",
+    "Traffic is bursty and you want to add and remove capacity on a timescale of minutes rather than resizing a running machine",
+    "You are willing to pay the coordination cost up front — statelessness, a load balancer, a partitioned data layer — because the ceiling above is close",
+  ]}
+  againstItems={[
+    "The component is small, has clear headroom, and a bigger instance is a same-day fix with no code change",
+    "The workload has a piece that resists partitioning — a single strongly-ordered log, a single write leader for strict consistency",
+    "The team is small and the operational cost of N machines, service discovery, and distributed debugging is not worth paying yet",
+    "You have not yet measured that the current instance is actually the bottleneck — resizing is reversible in a way a distributed rewrite is not",
+    "Licensing or software architecture ties cost or complexity to node count in a way that makes fewer, bigger machines cheaper",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Name which tier you mean before answering "how would you scale this" — the stateless web tier and the datastore behind it almost never hit their ceilings at the same time, and conflating them is the most common gap. A strong answer sounds like: "The API layer is stateless, so I scale it horizontally behind a load balancer with no code changes. The database is the harder one — I would push it as far vertically as instance sizes allow, since that costs nothing in complexity, and only shard it once a single write-optimized primary can't keep up, because sharding is the one decision on this list that is expensive to undo."
 
-<KeyTakeaways items={["", "", ""]} />
+Expect the follow-up "what breaks first if you just keep adding machines" — the honest answer is usually the datastore, or the load balancer itself becoming a bottleneck at very high fan-out, and naming that before being asked is what separates having a plan from having a slide.
+
+<KeyTakeaways
+  items={[
+    "Vertical scaling changes nothing about the code and has a real ceiling; horizontal scaling has no such ceiling but requires statelessness, routing, and a partitioned data layer to actually work",
+    "The cost curve for vertical scaling is not linear all the way up — the largest instance tiers carry a price premium beyond what the extra capacity alone would justify",
+    "Scaling the stateless compute tier horizontally is comparatively easy; scaling the datastore horizontally means sharding, which is harder to undo than it is to do",
+    "Horizontal scaling buys failure isolation as much as throughput — one node failing costs a slice of capacity rather than all of it",
+    "Resizing a single machine usually costs downtime; adding a node to a horizontal fleet usually does not",
+    "Decide per tier, not for the whole system — the web tier and the database rarely hit their ceilings at the same time or need the same answer",
+  ]}
+/>

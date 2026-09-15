@@ -1,0 +1,111 @@
+---
+title: "Best Time to Buy and Sell Stock III"
+number: "03.42"
+summary: "Two transactions become four scalars — cheapest first buy, best first sell, cheapest second buy funded by that sell, best second sell."
+status: published
+free: true
+difficulty: deep
+estMinutes: 18
+tags: [dp, array, greedy]
+updated: "2026-09-15"
+---
+
+## One transaction was a scalar; two transactions need a ledger
+
+Given daily prices, find maximum profit with **at most two** complete buy-sell transactions. You cannot hold two positions at once — sell before the next buy.
+
+Brute force over all O(n²) buy-sell windows twice is O(n⁴). Splitting the array at every pivot and running the 01.02 one-pass algorithm on left and right is O(n²) — acceptable for n ≈ 10⁵ only if you are lucky, and it is not.
+
+The insight is a **state machine** with four rolling values tracked in one left-to-right scan:
+
+- `buy1` — cheapest price for the first open purchase
+- `sell1` — best profit after completing the first transaction
+- `buy2` — cheapest effective price for a second purchase, funded by `sell1` profit
+- `sell2` — best profit after two completed transactions
+
+Each price update refreshes all four in order. The invariant: after processing day `i`, each variable holds the optimum achievable by that day for its respective state.
+
+## Four-state one-pass update
+
+On price `p`:
+
+1. `buy1 = min(buy1, p)`
+2. `sell1 = max(sell1, p - buy1)`
+3. `buy2 = min(buy2, p - sell1)` — a second buy costs `p` but you already earned `sell1`
+4. `sell2 = max(sell2, p - buy2)`
+
+Example: `[3, 3, 5, 0, 0, 3, 1, 4]`. After the run, `sell2 = 6` (buy at 0, sell at 3, buy at 1, sell at 4).
+
+<Steps>
+<Step title="Initialize">
+  `buy1 = buy2 = Infinity`, `sell1 = sell2 = 0`.
+</Step>
+<Step title="For each price p">
+  Update buy1 → sell1 → buy2 → sell2 in that order — later states depend on earlier ones for the same day.
+</Step>
+<Step title="Return sell2">
+  Two transactions completed, or fewer if unprofitable.
+</Step>
+</Steps>
+
+<Callout type="gotcha">
+  Updating `buy2` before `sell1` on the same day double-counts or uses stale first-sell profit. Order matters within the loop body.
+</Callout>
+
+## Solution
+
+```ts
+function maxProfit(prices: number[]): number {
+  let buy1 = Infinity;
+  let sell1 = 0;
+  let buy2 = Infinity;
+  let sell2 = 0;
+
+  for (const p of prices) {
+    buy1 = Math.min(buy1, p);
+    sell1 = Math.max(sell1, p - buy1);
+    buy2 = Math.min(buy2, p - sell1);
+    sell2 = Math.max(sell2, p - buy2);
+  }
+
+  return sell2;
+}
+```
+
+Time **O(n)**. Space **O(1)**.
+
+<Tradeoff
+  forTitle="Four-scalar state machine when"
+  againstTitle="Split-array two-pass when"
+  forItems={[
+    "Exactly k = 2 transactions — four variables capture the full state without a 2D table",
+    "n up to 10⁵ — O(n) one pass is required; O(n²) split is too slow",
+    "No transaction fee or cooldown — pure buy/sell alternation",
+    "You are building toward 03.43 k-transaction generalization with buy/sell arrays",
+    "Interviewer expects the state-machine narrative, not nested loops over intervals",
+  ]}
+  againstItems={[
+    "k is large (≥ n/2) — unlimited-transaction greedy beats DP",
+    "Problem asks which days to trade — store argmin/argmax alongside scalars",
+    "Cooldown days between sells — add a 'rest' state to the machine",
+    "Input length under 500 — split-and-run 01.02 twice per pivot is acceptable to derive intuition",
+    "Three or more constraints (fee, cooldown, k) — full 2D DP by day and state is clearer",
+  ]}
+/>
+
+## In an interview
+
+Anchor on 01.02: one transaction is running min price plus running max profit. Extend: "Second buy is funded by first sell profit, so effective cost is `p - sell1`."
+
+Walk `[1,2,3,4,5]` — one transaction suffices; `sell2` equals `sell1`. Mention order of updates inside the loop.
+
+Bug: initializing `buy1`/`buy2` to 0 instead of Infinity. Follow-ups: 03.43 with general k, transaction fee, cooldown period.
+
+<KeyTakeaways items={[
+  "At most two transactions: track buy1, sell1, buy2, sell2 in one left-to-right pass.",
+  "buy2 = min(buy2, p - sell1) treats first-sell profit as capital for the second purchase.",
+  "Update order within each day: buy1 → sell1 → buy2 → sell2 — same-day dependencies.",
+  "O(n) time, O(1) space — the k = 2 special case of the general stock DP family.",
+  "01.02 Best Time to Buy and Sell Stock is the single-transaction base; this adds one more buy/sell pair.",
+  "Splitting the array at every index and running two one-pass scans is O(n²) — correct intuition, wrong complexity for large n.",
+]} />

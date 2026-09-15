@@ -1,32 +1,96 @@
 ---
 title: "SQL-Backed Key-Value Store"
 number: "03.02"
-summary: "SQL-Backed Key-Value Store — notes in progress."
-status: draft
+summary: "A key, a value, and a primary key index already cover most key-value workloads — before you add a second datastore, prove you've outgrown the first one."
+status: published
 free: true
 difficulty: core
 estMinutes: 12
+tags: [sql, key-value, postgres, schema]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The problem: adding a datastore is an operations decision wearing a performance costume
 
-What breaks without this, and the situation that forces the decision.
+"We need a key-value store" usually arrives as a performance statement, but what it actually commits you to is operational: a new process to deploy, a new failure domain to monitor, a new consistency model to reason about, a new set of credentials to rotate, a new thing that pages someone at 3am. None of that shows up in a benchmark. It shows up eighteen months later as a runbook nobody wrote.
 
-## How it works
+Most systems that ask for "a key-value store" have a workload of a few thousand operations a second, values under a few kilobytes, and lookups almost entirely by a single key. That workload fits inside three columns of a relational table you are already running, already backing up, and already granting access to. The decision to reach for Redis or DynamoDB instead should be made because you've measured that this table can't keep up — not because "key-value" sounds like a Redis problem by default.
 
-The mechanism, step by step.
+## The schema is almost the whole design
 
-## Tradeoffs
+```text
+CREATE TABLE kv_store (
+  key         TEXT PRIMARY KEY,
+  value       BYTEA,          -- or JSONB, if you want to query inside it
+  version     BIGINT NOT NULL DEFAULT 1,
+  expires_at  TIMESTAMPTZ,
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+
+The primary key on `key` is, in almost every relational engine, a unique B-tree (03.04) index built for free the moment the table exists. A point lookup by key is a B-tree descent — a handful of page reads, most of them served from the buffer cache once the working set is hot — which is exactly the operation a dedicated key-value store optimizes for. You are not building an index; you already have one.
+
+`GET` is `SELECT value FROM kv_store WHERE key = $1`. `PUT` is an upsert:
+
+```text
+INSERT INTO kv_store (key, value, version, updated_at)
+VALUES ($1, $2, 1, now())
+ON CONFLICT (key) DO UPDATE
+  SET value = EXCLUDED.value,
+      version = kv_store.version + 1,
+      updated_at = now();
+```
+
+Most relational engines have an equivalent — MySQL's `INSERT ... ON DUPLICATE KEY UPDATE` does the same job. The `version` column gives you optimistic concurrency for free: a caller that read version 4 and wants to write only if nobody else has written since adds `AND kv_store.version = 4` to the update and checks the row count it affected. That's compare-and-swap, built out of a WHERE clause.
+
+`DELETE` is a `DELETE ... WHERE key = $1`, or — if the value needs to survive briefly for audit or undo — a tombstone flag instead of an actual row delete, the same pattern immutable storage engines use for the same reason (07.09 LSM Tree Storage Engine covers that trade in a write-heavy setting).
+
+## TTL is a job you run, not a feature you get
+
+A dedicated cache expires keys two ways: lazily, by checking the expiry on read, and actively, via a background sweep that reclaims memory whether or not anyone reads the key again. A SQL-backed store gets the lazy half for free — filter `WHERE expires_at IS NULL OR expires_at > now()` on every read — and has to build the active half itself: a scheduled job running `DELETE FROM kv_store WHERE expires_at < now()` in batches, on an interval short enough that expired rows don't sit around indefinitely.
+
+That gap matters because of how the underlying engine handles updates and deletes at all. Most relational engines that support concurrent readers and writers without blocking each other do it with MVCC (03.07): an update doesn't overwrite a row in place, it writes a new version and marks the old one dead. A key-value table with a small number of extremely hot keys — a counter incremented on every request, a rate-limit bucket — can rack up dead versions faster than the engine's cleanup process reclaims them, and the failure mode is quiet: the table and its index bloat, sequential scans get slower because they skip past dead versions, and eventually someone notices the table is ten times its logical size. This is the one place a SQL-backed key-value store behaves noticeably worse than a purpose-built one, because a cache's in-place memory model has no equivalent problem.
+
+<Callout type="gotcha">
+A row that's updated thousands of times a second is the worst case for this design, not the typical case it's usually pitched for. If your "key-value" workload is actually "one counter, updated constantly," you want an in-memory structure or a sharded counter, not a table row — see 05.01 Caching Layers.
+</Callout>
+
+## Where it stops being the right answer
+
+The ceiling is a single primary's write throughput and connection budget. Every write goes through the same transaction log and the same lock manager as the rest of your relational workload, and a single primary tops out well before a purpose-built distributed key-value engine does. There's no built-in path to spread keys across multiple nodes the way a hash-partitioned store does natively — you would have to build that yourself, which is most of what 04.05 Sharding And Partitioning covers, or move the workload wholesale.
+
+The honest test is a measured one: track write latency and connection saturation on this table specifically, and when it's the binding constraint on the system rather than a hypothetical one, that's the signal to either scale the relational tier (03.10 Relational Database Scaling) or move this specific workload to a store designed for it.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Use SQL as your key-value store when"
+  againstTitle="Reach for a dedicated store when"
+  forItems={[
+    "Throughput is modest — thousands, not hundreds of thousands, of operations a second — and a single primary comfortably covers it",
+    "The key-value row needs to participate in the same transaction as the rest of your relational data",
+    "Operational simplicity matters more than shaving milliseconds: one datastore to back up, monitor, and secure instead of two",
+    "Lookups are by primary key, so the table's existing B-tree (03.04) index already gives you the O(log n) point lookup a KV store would build separately",
+    "You occasionally need a range query or a secondary lookup a pure key-value API can't express, and SQL already can",
+  ]}
+  againstItems={[
+    "Measured write or connection load would saturate a single primary — see 03.10 Relational Database Scaling or 04.05 Sharding And Partitioning for what comes next",
+    "Access is pure GET/PUT/DELETE at very high throughput, and a purpose-built write path (07.09 LSM Tree Storage Engine) is worth its operational cost",
+    "A small number of keys are overwritten constantly, and MVCC (03.07) version churn on those rows would outrun cleanup",
+    "You need TTL, clustering, and horizontal scaling built in, rather than a reaper job and a partitioning scheme you maintain by hand",
+    "Values are large blobs or the access pattern has extreme fan-out that doesn't sit well in a row-oriented table",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Introduce it as a deferral, not a default: "Before I add a cache or a KV store, this looks like a few thousand ops a second on small values — I'll put a `key`, `value`, `version` table behind the API I'd have built anyway, and revisit if the write rate or connection count says otherwise." That framing answers the follow-up before it's asked: what changes when this doesn't scale, and how would you know. Be ready to name the one place this design actually loses to a purpose-built store — hot-row update churn and the version bloat that follows — since that is the detail that separates having reasoned about it from having assumed SQL is always fine.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "A three- or four-column table with a primary key on the lookup field already gives you an indexed key-value store with no new infrastructure",
+    "PUT is an upsert (INSERT ... ON CONFLICT DO UPDATE or its engine equivalent), and a version column turns that into optimistic concurrency for free",
+    "TTL requires an active cleanup job in SQL; a dedicated cache does that sweep for you",
+    "Rows updated very frequently are the worst case for this design, because MVCC version churn on hot keys outruns cleanup and bloats the table",
+    "The ceiling is a single primary's write throughput and connection budget, not a fixed rule about when SQL 'isn't allowed' to be a key-value store",
+    "Reach for a dedicated key-value or cache engine once load is measured against this table specifically, not because the workload is merely named 'key-value'",
+  ]}
+/>

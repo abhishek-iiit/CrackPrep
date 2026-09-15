@@ -1,32 +1,110 @@
 ---
 title: "Social Network Database Modeling"
 number: "11.05"
-summary: "Social Network Database Modeling — notes in progress."
-status: draft
+summary: "Users, posts, and edges look like three tables until timelines, privacy, and celebrity fan-out force denormalized read models that no longer match the write schema."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 15
+tags: [data-modeling, social, feeds, denormalization]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The ER diagram is not the product
 
-What breaks without this, and the situation that forces the decision.
+A social network prompt invites a tidy schema: `users`, `posts`, `follows`, maybe `likes`. That model can store the truth. It cannot, by itself, serve a home timeline at read-time for a user who follows five thousand accounts, or hide a post from everyone except mutuals, or show a celebrity's new post to tens of millions of followers without melting the primary. Database modeling here means deciding **which facts are source of truth** and **which derived views are materialized for the read path** — and accepting that those two shapes diverge as soon as non-functional targets show up.
 
-## How it works
+01.11 Extensible Data Modeling covers evolution generally; 03.01 Relational Database Design covers normalization. This lesson is the social-specific fork: graph edges, append-only posts, and timeline read models.
 
-The mechanism, step by step.
+## Core entities and the questions they hide
 
-## Tradeoffs
+Start with nouns you can point to in the product:
+
+- **User / profile** — stable id, handle, display fields, auth subject. Separate "account" from "profile document" if creators get multiple faces later; do not invent that split on day one without a requirement.
+- **Post (or activity)** — author id, body or media pointers, created-at, visibility. Treat edits and deletes as first-class (soft delete flags, edit revisions) if the product promises them; see 03.13 Soft Delete when tombstones enter indexes.
+- **Edge** — follow, block, mute, friendship. Direction and semantics matter: follow is often asymmetric; friendship is mutual; block must suppress delivery even when a follow edge still exists. 11.06 Social Graph Follows And FlockDB goes deep on storing edges at scale.
+- **Reaction / reply / repost** — edges or rows hanging off a post. Counters are derived; the raw event is the source of truth if you need audit or "who liked."
+
+Functional requirements decide which of these exist. Non-functional requirements decide whether a follower's home feed is a **query** over edges + posts or a **precomputed list** of post ids.
+
+### Visibility is a data-model concern, not a UI filter
+
+Public, followers-only, close-friends, and private DMs are different authorization predicates. Encode visibility on the post (or on an audience table) so every read path — home feed, profile grid, search indexer, push notification — consults the same rule. Bolting "filter in the app" on after the fact is how blocked authors still appear in push fan-out. Model block and mute as edges checked on *delivery*, not only on profile view.
+
+## Normalized write model vs denormalized read model
+
+A defensible write schema for a mid-scale product:
+
+| Store | Contents | Role |
+| --- | --- | --- |
+| Users | id, handle, profile fields | Auth and identity |
+| Posts | id, author_id, created_at, visibility, body/media refs | Source of truth for content |
+| Follow edges | follower_id, followee_id, created_at | Source of truth for graph |
+| Optional counters | likes_count, reply_count on post row or side table | Approximate or exact rollups |
+
+A home timeline query at read time looks like: load followee ids for viewer → fetch recent posts by those authors → merge-sort by time → apply visibility/blocks → paginate. That works until the fan-in (accounts you follow) or the QPS makes the merge miss the latency budget. Then you introduce a **timeline read model**: for each viewer, a list of post ids (often in Redis or a wide row / partition keyed by user), written at publish time (push), read time (pull), or both. 11.07 Feed Generation Push Pull Hybrid owns that design; the modeling lesson is that the timeline table is **not** the posts table. It is a cache-shaped index with invalidation and backfill rules.
+
+<Callout type="note">
+Celebrity accounts break naive push: one post × 50M followers is 50M timeline writes. The data model must allow a hybrid — materialize timelines for ordinary users, leave mega-followees as pull-on-read — without changing the posts source of truth. If your schema assumes "every followee is pushable," celebrity onboarding becomes a Sev-1.
+</Callout>
+
+## Modeling patterns that show up repeatedly
+
+### Posts are append-mostly; profiles are mutable
+
+Key posts by `(author_id, created_at, post_id)` or a snowflake id that roughly sorts by time (04.09 UUID vs ObjectId vs Snowflake) so profile grids and "posts by user" scans stay efficient. Do not update post rows for every like — increment a counter or append a reaction row. Mutable post bodies need versioning if you show "edited" state.
+
+### Counters lie unless you define how much
+
+Exact counts under concurrent likes need atomic increments or periodic reconciliation. Approximate counts — cached integers with lag, or sketches when the write rate is extreme (10.01 Counting At Scale) — are fine for display if the product accepts it. Store the authoritative like edges somewhere if "unlike" and "list of likers" matter; a single integer cannot answer those queries later.
+
+### Media is not in the post row
+
+Store object-storage keys / CDN URLs and processing state on a media table or as structured fields, not BLOBs in the OLTP post row. Direct upload flows (13.01 Direct To Object Storage Upload) attach to post ids after processing; the feed read model should carry enough to render a card without joining five tables on the hot path — which often means denormalizing author handle and avatar URL into the timeline entry at write time, accepting that a profile rename needs a repair job.
+
+### Pagination keys belong in the model
+
+Home feeds should paginate by `(created_at, post_id)` cursors, not `OFFSET`. Keyset pagination (04.12) is a modeling choice: your timeline entries must expose a stable sort key. Offset pagination on a moving feed duplicates and skips under concurrency.
+
+## What to put in which database
+
+At interview scale it is enough to say:
+
+- **Relational primary** for users, posts metadata, and edges while relationships are simple and transactions matter (create post + enforce constraints).
+- **Edge-optimized store or careful sharding** when follow graph QPS dominates — 11.06 and 04.04 Graph Database Decision Boundary.
+- **Cache / wide-column / log** for per-user timeline materializations and session-speed reads.
+- **Object storage** for bytes; **search index** as a projection, not the source of truth (09.10).
+
+Do not invent five databases before the latency budget demands them. Do name the hinge: "If read-time merge cannot hit p99, I add a timeline read model keyed by viewer."
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Keep a normalized read-time merge when"
+  againstTitle="Materialize per-user timelines when"
+  forItems={[
+    "Follow fan-in is modest and a merge of recent posts by followees meets the p99 latency target",
+    "Freshness after follow/unfollow must be immediate without backfilling a write-time fan-out",
+    "Storage cost and dual-write complexity dominate, and QPS still fits the primary plus replicas",
+    "Privacy rules change often and you do not want to rewrite millions of precomputed rows on each policy tweak",
+  ]}
+  againstItems={[
+    "Home feed QPS and fan-in make read-time joins miss the latency budget even with caching of follow lists",
+    "You can pay write amplification on publish (or a hybrid push/pull) to keep reads a simple key lookup",
+    "Most users have bounded follow graphs and celebrities can be special-cased as pull",
+    "The product needs a stable cursor over a pre-ranked list (ads, downranking) that is expensive to recompute on every request",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Draw the source-of-truth tables first — users, posts, edges — then say explicitly which read path cannot use them raw. Propose a timeline materialization only after stating the latency or fan-out number that forces it. Call out visibility and block checks on delivery, counters as derived data, and media as references. If asked "why not one graph database for everything," separate social graph traversal needs (11.06, 04.04) from post storage and timeline serving — different access patterns, often different systems.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Social schemas split into source-of-truth entities (users, posts, edges) and derived read models (timelines, counters, search projections)",
+    "Visibility, block, and mute belong in the data model and must apply on every delivery path, not only in the UI",
+    "Read-time merge of followees' posts works until fan-in and QPS break the latency budget; then materialize per-user timelines",
+    "Celebrity fan-out makes naive push impossible — the model must allow hybrid pull for mega-accounts",
+    "Denormalize just enough into the timeline entry for card render (author display fields, media refs), and plan repair when those fields change",
+    "Paginate feeds with stable cursors on sort keys; offsets on a live social feed skip and duplicate under concurrency",
+  ]}
+/>

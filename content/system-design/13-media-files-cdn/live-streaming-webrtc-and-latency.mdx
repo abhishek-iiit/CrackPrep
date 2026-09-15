@@ -1,32 +1,85 @@
 ---
 title: "Live Streaming WebRTC And Latency"
 number: "13.08"
-summary: "Live Streaming WebRTC And Latency — notes in progress."
-status: draft
+summary: "Why HLS/DASH live sits in seconds of latency, when WebRTC or low-latency CMAF is worth the fan-out cost, and how the glass-to-glass budget actually gets spent."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 15
+tags: [live-streaming, webrtc, latency, hls]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Live is not VOD with a shorter file
 
-What breaks without this, and the situation that forces the decision.
+VOD can buffer aggressively, pick a bitrate after a few seconds of observation, and hide jitter behind a large player buffer. Live cannot: every second of buffer you add is a second the viewer sits behind reality. A sports bettor, a auction bidder, and a viewer watching a recorded concert all say "live" and mean different glass-to-glass budgets — roughly sub-second, a few seconds, or 10–30 seconds respectively. The protocol choice is almost entirely a function of that budget and of how many concurrent viewers must see the same stream.
 
-## How it works
+Classic HLS or DASH live encodes into segments of 2–6 seconds, publishes a playlist that lists a sliding window of those segments, and has the player fetch them over HTTP via a CDN. That path scales the way any CDN object scales — cheaply into the millions — and pays for it with latency usually measured in 10–30+ seconds end to end once encode, segment duration, playlist refresh, and player buffer are stacked. Low-latency HLS/DASH shortens segments (or uses chunked CMAF transfer) and shrinks the buffer; you can land in the 3–7 second range with careful packaging, still on HTTP and still CDN-friendly. WebRTC (and similar real-time media stacks) push media over UDP with aggressive jitter buffers measured in tens to hundreds of milliseconds — glass-to-glass under a second is realistic — but fan-out is no longer "put an object on a PoP."
 
-The mechanism, step by step.
+## Where the latency budget goes
 
-## Tradeoffs
+Glass-to-glass is the sum of contributions that do not care about your slide deck:
+
+| Stage | Typical cost (order of magnitude) | Notes |
+| --- | --- | --- |
+| Capture + encode | ~100 ms–1 s | Software encode and large GOPs add more; hardware and short GOPs help |
+| Packaging / segment duration | Dominant for HLS | A 6 s segment alone floors latency near that size before the player buffers more |
+| Ingest transport | Tens–hundreds of ms | RTMP/SRT/WHIP to the origin; re-encode ladders add another pass |
+| CDN / edge hop | Small per hop for HTTP; large if origin-shield misses | Live mid-segment often needs origin pull carefully tuned |
+| Player buffer | Seconds for HLS; sub-second for WebRTC | Stability versus latency is the explicit trade |
+
+If the product needs chat that reacts to the video in near lockstep, or a host who calls on a raised hand, a 20-second HLS delay makes the social layer feel broken even when video quality is fine. If the product is a keynote replayed to 500k viewers, that same delay is invisible and the CDN economics dominate.
+
+## Three shapes of live delivery
+
+<Steps>
+  <Step title="Broadcaster ingest">
+    Camera or encoder pushes to an ingest point (RTMP, SRT, or WHIP for WebRTC). That single contribution stream is transcoded into a ladder of renditions — the same idea as 13.05 Video Transcoding Pipeline, but under a live deadline instead of a batch queue.
+  </Step>
+  <Step title="Distribution choice">
+    **HLS/DASH via CDN** for large fan-out and latency tolerance. **Low-latency CMAF/HLS** when a few seconds is acceptable and HTTP caching must remain. **WebRTC SFU** when sub-second matters and viewer count is hundreds to low thousands per session (more with a specialized real-time CDN).
+  </Step>
+  <Step title="Playback and adaptation">
+    HTTP players adapt bitrate by switching segments (13.06 Adaptive Bitrate And CDN Decider). WebRTC adapts via congestion control and simulcast/SVC layers. Failure modes differ: HLS under stress shows rebuffering; WebRTC under stress shows freeze, freezes, or quality cliffs as layers drop.
+  </Step>
+</Steps>
+
+An SFU (selective forwarding unit) receives one upstream and forwards selected layers to subscribers without mixing — far cheaper than a full MCU mix, still O(viewers) on the media plane. That is why "just use WebRTC for the football final" fails: you have reinvented a real-time CDN, and the bill and the ops surface follow.
+
+<Callout type="note">
+Hybrid designs are common: WebRTC for the interactive stage (host + guests), HLS for the audience of record. The audience watches a deliberately delayed CDN stream; only the people in the session need sub-second. Do not force one protocol to serve both roles unless the audience size fits the SFU.
+</Callout>
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Prefer HLS/DASH (including LL-HLS) when"
+  againstTitle="Prefer WebRTC (or real-time UDP) when"
+  forItems={[
+    "Concurrent viewers are large — tens of thousands and up — and CDN HTTP fan-out is the economic model",
+    "Glass-to-glass of several seconds (or 10–30 s for standard HLS) is acceptable for the product",
+    "You need mature midrolls, DRM, and device coverage that HTTP streaming already has",
+    "Ops teams already run packaging + CDN and should not own media-plane congestion control",
+    "Recording and DVR from the same segment store matters more than sub-second interaction",
+  ]}
+  againstItems={[
+    "Interaction requires sub-second glass-to-glass — calls, auctions, live tutoring, host/guest stages",
+    "Viewer count per session fits an SFU or real-time edge network you are prepared to run or buy",
+    "A multi-second delay would break the social or transactional loop even if video itself looks fine",
+    "You can accept narrower device support and a harder debugging story (UDP, ICE, NAT) for the latency win",
+    "Failover and scaling plans exist for the media plane — not only for an HTTP origin",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Open with the budget, not the acronym: "I need to know glass-to-glass — under a second, a few seconds, or tens of seconds — and the concurrent viewer count; those two numbers pick HLS versus low-latency HTTP versus WebRTC." Be ready to walk the latency stack (segment duration and player buffer dominate HLS) and to say why WebRTC fan-out does not magically equal CDN fan-out. If asked how you would do a million-viewer sports stream with interactive hosts, name the hybrid: WebRTC on stage, HLS to the audience.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Live latency is a budget spent on encode, segment duration, transport, and player buffer — not a single protocol switch",
+    "Standard HLS/DASH live scales via CDN HTTP but typically lands in tens of seconds glass-to-glass once segments and buffers stack",
+    "Low-latency HLS/CMAF can reach a few seconds while remaining CDN-friendly; it does not match WebRTC's sub-second regime",
+    "WebRTC delivers sub-second media with SFU fan-out that is fundamentally more expensive per viewer than cached HTTP segments",
+    "Hybrid designs — WebRTC for interactive participants, HLS for the large audience — match protocol cost to who needs the latency",
+    "Pick the protocol from glass-to-glass and concurrency first; quality ladders and DRM follow the distribution path you chose",
+  ]}
+/>

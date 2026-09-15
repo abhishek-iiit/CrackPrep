@@ -1,0 +1,82 @@
+---
+title: "Contains Duplicate"
+number: "01.03"
+summary: "Membership is O(1) with a set; sorting works too but costs O(n log n) and mutates order."
+status: published
+free: true
+difficulty: intro
+estMinutes: 8
+tags: [hash-set, array]
+updated: "2026-09-15"
+---
+
+## Same value twice?
+
+Given an integer array, return true if any value appears at least twice, false if every element is distinct.
+
+The naive approach compares every pair — O(n²). For n = 10⁵ that is roughly 5×10⁹ comparisons. The judge expects linear or near-linear time.
+
+Two standard patterns beat brute force: **hash set membership** in one pass, or **sort then scan adjacent equal elements**. The set is the direct translation of the question ("have I seen this before?"). Sorting reuses order to colocate duplicates.
+
+## Set membership in one pass
+
+Insert each number into a set. Before inserting, check whether it is already present. First duplicate found → return true. Finish the loop → return false.
+
+The invariant: the set contains exactly the distinct values from the prefix processed so far.
+
+Alternative: sort a copy (or the input if mutation is allowed), then walk `i = 1..n-1` checking `nums[i] === nums[i-1]`. Same answer, different cost profile.
+
+## Solution
+
+```ts
+function containsDuplicate(nums: number[]): boolean {
+  const seen = new Set<number>();
+
+  for (const n of nums) {
+    if (seen.has(n)) return true;
+    seen.add(n);
+  }
+
+  return false;
+}
+```
+
+Time **O(n)** expected, space **O(n)** for the set. Sorting alternative: **O(n log n)** time, **O(1)** extra space if in-place sort is permitted (TypeScript's `sort` is in-place on the array).
+
+<Tradeoff
+  forTitle="Hash set when"
+  againstTitle="Sort then scan when"
+  forItems={[
+    "You need true O(n) expected time on n up to 10⁵",
+    "Early exit on first duplicate — set finds it without sorting the whole array",
+    "Original order must be preserved and you cannot mutate the input",
+    "Values are hashable integers — no collision engineering needed",
+    "The problem is only existence, not which duplicate or how many",
+  ]}
+  againstItems={[
+    "Memory is tight and O(n) auxiliary space is unacceptable",
+    "The array is already sorted or nearly sorted — adjacent scan is O(n)",
+    "You also need the duplicate value or count — sorting groups equal keys",
+    "Follow-up asks for the duplicate set or sorted unique output anyway",
+    "Input is small enough that sort + scan is simpler to write under pressure",
+  ]}
+/>
+
+## In an interview
+
+Restate: return boolean, any duplicate suffices. Example: `[1, 2, 3, 1]` → true, `[1, 2, 3, 4]` → false.
+
+Offer both approaches and pick the set for O(n) unless the interviewer cares about space. Mention empty array and single element (always false).
+
+Follow-ups: return the duplicate value, find all duplicates (01.31 Longest Consecutive Sequence uses a set differently), or detect duplicate within k distance (sliding window + set). Bug to name early: using `===` on objects or nested structures when the question is about value equality.
+
+<KeyTakeaways
+  items={[
+    "Contains Duplicate is a pure membership problem — a hash set gives O(n) expected time with O(n) space",
+    "Sort then compare neighbors achieves O(n log n) time and can use O(1) extra space if mutation is OK",
+    "Brute force O(n²) is the baseline to mention, not the solution to ship",
+    "Early return on first duplicate avoids unnecessary work in the set approach",
+    "Preserving input order favors the set; needing sorted output anyway favors sort-first",
+    "Single-element and empty arrays return false — no pair exists to duplicate",
+  ]}
+/>

@@ -1,0 +1,155 @@
+---
+title: "Word Ladder II"
+number: "03.23"
+summary: "03.22 finds the length — this variant needs every shortest transformation sequence, so BFS builds a layer graph and DFS backtracks only along minimum-depth edges."
+status: published
+free: true
+difficulty: deep
+estMinutes: 20
+tags: [bfs, backtracking, graph]
+updated: "2026-09-15"
+---
+
+## Shortest is not enough — enumerate them all
+
+Same rules as 03.22 Word Ladder: one letter changed per step, every word must be in `wordList`. Return **all** shortest transformation sequences from `beginWord` to `endWord`. If none exist, return `[]`.
+
+Running BFS until you hit `endWord` gives one shortest path. Running BFS again and again with words removed finds others, but that is fragile and not obviously correct when multiple branches reconverge. The clean split: **BFS assigns each word its minimum distance from `beginWord` and records only edges that advance one level**; **DFS from `endWord` walks backward along those edges** to emit every full chain.
+
+The traps: including a longer path because you did not freeze the BFS layer when the end was first reached; duplicate paths from redundant edges in the graph; forgetting to reverse paths built from end to start.
+
+## Layered BFS, then backward DFS
+
+BFS level by level. When exploring `word → next`, add directed edge `word → next` only if `next` is unseen (first time at this depth) or already at depth `dist[word] + 1` (parallel shortest route). Stop adding new words once `endWord` has been assigned a distance — deeper words cannot belong to a shortest ladder.
+
+Then DFS from `endWord`: at each step, move to predecessors whose distance is exactly one less. When you reach `beginWord`, reverse the collected path and append to results.
+
+<Steps>
+<Step title="BFS with distance map and adjacency from shorter to next level">
+Delete words from the pool when they are processed at a level (optional optimization) or rely on distance checks.
+</Step>
+<Step title="Stop expanding new depths after endWord is first labeled">
+Words discovered later are not on a shortest path.
+</Step>
+<Step title="DFS backward from endWord along valid edges">
+Only follow neighbors `prev` where `dist[prev] + 1 === dist[current]`.
+</Step>
+<Step title="Reverse each complete path before pushing to output">
+Paths are built end → start during DFS.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function findLadders(
+  beginWord: string,
+  endWord: string,
+  wordList: string[]
+): string[][] {
+  const words = new Set(wordList);
+  if (!words.has(endWord)) return [];
+
+  const neighbors = (word: string): string[] => {
+    const res: string[] = [];
+    for (let i = 0; i < word.length; i++) {
+      for (let c = 97; c <= 122; c++) {
+        const ch = String.fromCharCode(c);
+        if (ch === word[i]) continue;
+        const next = word.slice(0, i) + ch + word.slice(i + 1);
+        if (words.has(next)) res.push(next);
+      }
+    }
+    return res;
+  };
+
+  const graph = new Map<string, string[]>();
+  const dist = new Map<string, number>();
+  dist.set(beginWord, 0);
+
+  let frontier = new Set<string>([beginWord]);
+  let reachedEnd = false;
+
+  while (frontier.size && !reachedEnd) {
+    for (const w of frontier) words.delete(w);
+
+    const nextFrontier = new Set<string>();
+    for (const w of frontier) {
+      for (const nxt of neighbors(w)) {
+        if (!graph.has(w)) graph.set(w, []);
+        if (!dist.has(nxt)) {
+          graph.get(w)!.push(nxt);
+          dist.set(nxt, dist.get(w)! + 1);
+          nextFrontier.add(nxt);
+          if (nxt === endWord) reachedEnd = true;
+        } else if (dist.get(nxt) === dist.get(w)! + 1) {
+          graph.get(w)!.push(nxt);
+        }
+      }
+    }
+    frontier = nextFrontier;
+  }
+
+  if (!dist.has(endWord)) return [];
+
+  const result: string[][] = [];
+  const path: string[] = [endWord];
+
+  const dfs = (word: string): void => {
+    if (word === beginWord) {
+      result.push([...path].reverse());
+      return;
+    }
+    for (const prev of graph.get(word) ?? []) {
+      if (dist.get(prev)! + 1 === dist.get(word)) {
+        path.push(prev);
+        dfs(prev);
+        path.pop();
+      }
+    }
+  };
+
+  dfs(endWord);
+  return result;
+}
+```
+
+BFS is **O(n · L · 26)** as in 03.22; DFS cost is proportional to the number of shortest paths (exponential in the worst case). Space **O(n)** for maps plus output.
+
+<Tradeoff
+  forTitle="BFS layer graph + backward DFS when"
+  againstTitle="Repeated forward BFS / brute path search when"
+  forItems={[
+    "You must return every shortest sequence, not just one or the count",
+    "Multiple shortest routes share prefixes — distance labeling prevents exploring longer detours",
+    "wordList size is in the thousands — one structured BFS beats many reruns",
+    "Interview expects you to extend 03.22 Word Ladder cleanly rather than invent ad hoc pruning",
+    "Backward DFS from a single end label avoids forward branching explosion until the layer structure is known",
+  ]}
+  againstItems={[
+    "Only one path is needed — 03.22's forward BFS with parent pointer suffices",
+    "n is tiny and interviewer wants explicit enumeration of all paths regardless of length",
+    "Graph is static and queried many times — precompute all-pairs shortest path offline",
+    "Memory for the full layer graph is tighter than rerunning BFS — rare at interview scale",
+    "Problem variant asks for any path, not shortest — DFS without BFS preprocessing is enough",
+  ]}
+/>
+
+## In an interview
+
+Clarify: all **shortest** ladders only; order of sequences in output usually unconstrained; return `[]` if impossible. Walk the `"hit" → "cog"` example and show two equal-length routes if both exist.
+
+Explain the two phases before coding: BFS for distances + forward edges on shortest layers, then DFS backward. Mention stopping BFS once `endWord` gets its label.
+
+Follow-ups: bidirectional BFS for distance only, return count of shortest paths without listing them. Bug: continuing BFS after the end level and polluting the graph with longer edges.
+
+<KeyTakeaways
+  items={[
+    "Word Ladder II separates shortest-path discovery (BFS) from path enumeration (backward DFS)",
+    "Record edge u→v only when v is first seen at dist[u]+1, or when v is already at that same distance for parallel routes",
+    "Stop expanding to new BFS levels once endWord is labeled — deeper words cannot lie on a shortest ladder",
+    "Build paths from endWord toward beginWord, then reverse — forward DFS from start duplicates work across shared suffixes",
+    "Output size can be exponential in n even when input is modest — the algorithm is correct but not polynomial in output size",
+    "03.22 Word Ladder is the same graph with a strictly easier ask: one length instead of all chains",
+  ]}
+/>

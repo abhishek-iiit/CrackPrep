@@ -1,32 +1,80 @@
 ---
 title: "Recent Searches System Design"
 number: "09.17"
-summary: "Recent Searches System Design — notes in progress."
-status: draft
+summary: "Per-user history that reappears instantly on focus: what to store, where it lives, and how privacy and multi-device sync constrain the design."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: intro
+estMinutes: 10
+tags: [search, recent-searches, personalization, privacy]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The cheapest relevance signal is what this user already asked
 
-What breaks without this, and the situation that forces the decision.
+Before personalization models and related-search graphs, there is a simpler feature: show the signed-in user their last few queries when the box is focused. It costs almost no ranking science. It cuts retyping on mobile. It also creates a privacy surface and a consistency problem — the same user on phone and laptop, history that must disappear when they clear it, and queries that should never be written to a shared device screen.
 
-## How it works
+Recent searches are **per-user state**, not a corpus feature. They are closer to a small keyed list in a user-data store than to the inverted index. Mixing them into the global suggest index (09.14 Autocomplete System Design) is how one customer's queries leak into another's typeahead.
 
-The mechanism, step by step.
+## Read path first: it has to feel local
 
-## Tradeoffs
+When the search box focuses, history must appear in a blink. That usually means:
+
+1. **Client cache** — last N queries in local storage or memory for the active session, painted immediately.
+2. **Authoritative store** — user-id → ordered list of `{query, timestamp}` with a small cap (often 10–20), fetched to hydrate other devices and survive reinstalls when the product promises sync.
+3. **Merge rules** — dedupe case-insensitively, move a repeat query to the top rather than storing duplicates, drop empty strings.
+
+Write path: after a submitted search (not after every autocomplete keystroke), upsert into the list, trim to N, and optionally push an async update so the request path does not wait on a remote write. Guests get client-only history or nothing — be explicit, because "recent searches" on a shared browser without a clear account boundary is a privacy bug.
+
+| Storage choice | Latency | Multi-device | Notes |
+| --- | --- | --- | --- |
+| Local only | Best | No | Fine for guest or privacy-first modes |
+| Primary DB row / JSON column | Good enough at low QPS | Yes | Simple; watch row churn |
+| KV / Redis per user key | Very fast reads | Yes with replication story | Cap memory; set TTL if product allows expiry |
+| Search cluster document per user | Tempting, wrong default | Accidental | Couples history to search ops and risk of mis-routing into shared indexes |
+
+<Callout type="gotcha">
+Clearing recent searches must clear every copy — client cache, sync store, and any analytics-derived personalization that echoed those strings into the UI. A "cleared" control that only empties localStorage while the phone still shows the same queries on next login teaches users the feature is lying.
+</Callout>
+
+## What never belongs in the list
+
+Apply the same sensitivity filters you would before logging queries into long-term analytics: password-reset tokens pasted into the box, credit-card-shaped strings, explicit allow/deny categories for regulated domains if you operate in them. Recent searches are displayed in plaintext on the screen; treat them as visible PII.
+
+Incognito or private mode should disable sync writes. Account logout should drop the client cache. Those are product requirements that look like edge cases and show up in screenshots when missed.
+
+Related searches (09.16 Related Searches) and spell correction (09.15 Did You Mean And Spell Correction) may *use* aggregate history; they must not *display* another user's raw strings. Keep the pipelines separate: recent = private list; related = aggregated recommendations.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Persist and sync recent searches when"
+  againstTitle="Keep history local or omit it when"
+  forItems={[
+    "Users routinely continue a task across phone and desktop and retyping is measurable friction",
+    "You already have an authenticated user-data store with per-user isolation you trust",
+    "Clear-history and logout semantics can be implemented across client and server copies",
+    "The list is capped and write volume is one append per submitted query, not per keystroke",
+    "Personalization features will re-rank autocomplete using this list and need a consistent source of truth",
+  ]}
+  againstItems={[
+    "The product is mostly anonymous or Kiosk-like, where on-screen history is a liability",
+    "Compliance prefers minimal retention of query text tied to user ids",
+    "You cannot yet guarantee isolation from any shared suggest or related-search pipeline",
+    "Cross-device sync is out of scope and local storage already satisfies the UX",
+    "Support burden from 'why does my partner see my searches' would dominate the feature's value",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Keep the design small on purpose: "Recent searches are a capped per-user list, painted from a client cache, optionally synced through a user-data KV — not stored in the search index." Mention write-on-submit, dedupe, clear-everywhere, and guest versus signed-in behavior. If asked how it ties to autocomplete, say it re-ranks private candidates on the client or suggest response, never by inserting user strings into the global prefix artifact. That single boundary is the substance of the topic.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Recent searches are private per-user state — a small ordered list — not part of the shared inverted index or global suggest trie",
+    "Paint from a client cache for instant focus UX; sync through a user-scoped store only when multi-device continuity is a real requirement",
+    "Write on submitted queries, dedupe and cap the list, and never record every keystroke as history",
+    "Clear and logout must invalidate every copy of the list or the control is dishonest",
+    "Filter sensitive strings before display; on-screen history is plaintext PII",
+    "Use recent searches to re-rank personal suggestions; never mix them into another user's related or autocomplete data",
+  ]}
+/>

@@ -1,32 +1,110 @@
 ---
 title: "Immutable Versioned Data Files"
 number: "07.06"
-summary: "Immutable Versioned Data Files — notes in progress."
-status: draft
+summary: "Why storage engines refuse to edit files in place — new versions replace old ones, readers pin snapshots, and deletes become tombstones that outlive the data they hide."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [storage, immutability, versioning, snapshots]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Editing a file under readers is how you invent torn pages
 
-What breaks without this, and the situation that forces the decision.
+An in-place update looks simple: find the bytes that hold a key, overwrite them with the new value, done. Under a single writer with no concurrent readers it sometimes even works. The moment a reader can open the file while a writer is mid-update — or a crash can land between "write the new length" and "write the new payload" — you have torn reads, half-applied records, and no clean story for what a snapshot means.
 
-## How it works
+The alternative almost every modern storage engine picks is to stop editing. A data file, once closed and published, is **immutable**: its bytes never change. An update is a new record in a new file (or at the end of an append-only active file that will itself become immutable when rotated). A delete is a **tombstone** — a marker that shadows older values — not an erasure of the old bytes. Version order is carried in the data as sequence numbers or file generation ids, not as "whatever currently sits at this offset."
 
-The mechanism, step by step.
+That single choice — immutable versioned files — is what makes crash recovery tractable, what makes snapshot isolation cheap, and what forces compaction into existence. Everything in 07.07 through 07.12 is downstream of it.
 
-## Tradeoffs
+## What "versioned" actually means on disk
+
+Immutability alone is not enough. If every write produced a brand-new file and readers had no rule for which file wins, you would have a pile of conflicting truths. Versioning supplies the rule.
+
+Typical pieces:
+
+- **Sequence number or write timestamp** on every record, monotonically increasing from the writer's point of view, so "newer" is a comparison, not a guess.
+- **File generation / SSTable id** recorded in a manifest — a small, carefully updated catalog of which files are live. Publishing a new file is an atomic manifest update, not a rewrite of the file itself.
+- **Tombstones** for deletes, carrying the same sequence number scheme, so a delete can shadow every older value for that key until compaction proves no older value can still be visible to any snapshot that still exists.
+
+```text
+Logical key "user:42" over time
+
+  file-001  seq=100  value=A
+  file-003  seq=140  value=B     ← current for readers at seq≥140
+  file-007  seq=200  tombstone   ← current: key is absent
+```
+
+Nothing in `file-001` was rewritten when B arrived. Nothing in `file-003` was erased when the tombstone arrived. Readers that opened a snapshot at sequence 150 still correctly see B even while newer writers see the tombstone — because the old files are still there and still readable.
+
+<Steps>
+  <Step title="Write by appending or flushing a new immutable file">
+    Never patch an existing published file. The active memtable or active log absorbs the write; when it rotates, the result is a new immutable file registered in the manifest. 07.10 Memtable WAL And SSTable walks that pipeline for LSM engines.
+  </Step>
+  <Step title="Publish via the manifest, not by renaming over the old path">
+    Readers discover files through the manifest (or an equivalent file set). Swapping which generation is current is a metadata operation. The old file remains until no snapshot and no compaction input still needs it.
+  </Step>
+  <Step title="Read newest-to-oldest until the first hit">
+    A point lookup walks candidate files from newest to oldest (or merges by sequence number). The first value or tombstone for the key is the answer. Older files are not wrong — they are historical.
+  </Step>
+  <Step title="Drop files only when nothing can still see them">
+    Compaction or merge writes a replacement file that preserves every key version still required by open snapshots, then unlinks the inputs. Space reclamation is deferred and explicit; it is not "we overwrote the bytes so they are gone."
+  </Step>
+</Steps>
+
+## What immutability buys that in-place update cannot
+
+**Crash safety without torn pages.** A partially written new file is simply not published — the manifest still points at the previous generation. There is no window where half a record is the live truth at an offset readers already know. Checksums on the new file (07.04) reject a torn flush before publication.
+
+**Readers do not block writers, and writers do not invalidate open readers.** A reader holding a snapshot continues to see a consistent cut of the files that existed when the snapshot opened. Writers add files; they do not mutate the ones the reader is scanning. That is the storage-engine analogue of MVCC (03.07), implemented with files instead of row versions inside pages.
+
+**Compression and checksums are computed once.** An immutable block can be compressed and checksummed at flush time and never recomputed in place. In-place engines that update pages inside a compressed region pay recompression or give up compression on hot pages.
+
+**Replication and caching get simpler semantics.** An object or SSTable identified by id and generation is cacheable forever; invalidation is "stop referencing that id," not "byte 4096 changed." Byte-range indexes into those objects (07.05) stay valid for the life of the object.
+
+<Callout type="note">
+Immutability does not mean "data is never deleted from the universe." It means "this file's bytes do not change." Deletes still happen — as tombstones first, then as physical reclamation when compaction drops keys that no live snapshot can read. Operators who hear "immutable" and assume infinite retention are confusing file semantics with retention policy. Retention is a separate knob; immutability is how versions are represented until retention says they may go.
+</Callout>
+
+## The costs you accept on purpose
+
+Space amplification is the obvious one: multiple versions of the same key coexist until compaction. A hot key updated a thousand times can leave a thousand obsolete records across files. Leveled compaction keeps that bounded near ~1.1x in steady state for LSM engines; size-tiered and flat merge designs tolerate worse spikes — 07.12 Compaction And Amplification prices those strategies.
+
+Read amplification is the other: the current value might live in any of several files, so a lookup must consult more than one candidate. Bloom filters (04.13) and sparse indexes (07.11) exist specifically because immutable versioning multiplies the number of places a key might be.
+
+And operationally, you inherit a background job. Without compaction or merge, disk fills with history and reads slow as candidate counts climb. Immutability moves work off the foreground write path; it does not delete the work.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Prefer immutable versioned files when"
+  againstTitle="Prefer in-place updates when"
+  forItems={[
+    "Concurrent readers need stable snapshots while writers keep going — copy-on-write files give MVCC without page-level latching of the data itself",
+    "Crash recovery must reject partial writes cleanly by simply not publishing an incomplete file",
+    "Compression, checksums, and remote caching benefit from content that never changes under a stable id",
+    "The write path should stay append-only and sequential even when keys arrive in random order",
+    "You can run and provision compaction or merge to reclaim space and bound the number of versions readers must search",
+  ]}
+  againstItems={[
+    "A small hot working set is updated constantly and space amplification from versions would dominate the device before compaction could keep up",
+    "You need the absolute lowest point-read amplification and can accept page-level locking or MVCC inside a B-tree instead (03.04, 03.07)",
+    "Operational budget cannot include a background reclamation process whose lag becomes foreground latency",
+    "Strict in-place semantics are required by the surrounding system — some embedded or memory-mapped designs genuinely need mutable pages",
+    "The dataset is tiny and single-threaded, where immutability's machinery costs more than the problems it prevents",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Say the failure mode first: "If I update bytes in place under concurrent readers, I get torn reads and no clean snapshot story. So every published data file is immutable; updates are new versions; deletes are tombstones; a manifest decides which files are live." Then connect it to the bill: space and read amplification until compaction rewrites history down to what snapshots still need. If asked how this relates to LSM trees, answer that an LSM tree is one complete design built on exactly this file contract — memtable and WAL for the mutable tip, immutable SSTables for everything else (07.09).
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Immutable versioned data files never edit published bytes — updates append new versions, deletes write tombstones, and a manifest publishes which files are live",
+    "Version order lives in sequence numbers or generation ids, so readers can walk newest-to-oldest and stop at the first hit",
+    "Snapshots become cheap: open readers keep seeing the file set they pinned while writers only add files",
+    "Crash safety improves because a partial new file is simply unpublished; checksums reject torn flushes before the manifest moves",
+    "The deferred costs are space amplification from coexisting versions and read amplification from multiple candidate files",
+    "Compaction or merge is not optional decoration — it is the process that turns immutable history back into bounded live data",
+  ]}
+/>

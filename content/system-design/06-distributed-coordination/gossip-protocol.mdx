@@ -1,32 +1,93 @@
 ---
 title: "Gossip Protocol"
 number: "06.11"
-summary: "Gossip Protocol — notes in progress."
-status: draft
+summary: "Gossip spreads membership and state by peer-to-peer rumor: cheap, scalable, and eventually consistent — not a substitute for consensus on critical decisions."
+status: published
 free: true
 difficulty: core
 estMinutes: 12
+tags: [gossip, membership, epidemic, discovery]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Telling a thousand nodes without calling a thousand nodes
 
-What breaks without this, and the situation that forces the decision.
+A cluster of 500 nodes needs to know who is alive, which tokens each holds, and which peers are suspected dead. If every node heartbeats a central registry on a tight interval, the registry becomes both a bottleneck and a blast radius. If every node heartbeats every other node, the message count is quadratic and the network melts before the cluster does.
 
-## How it works
+Gossip protocols borrow the epidemic pattern: each node periodically picks a small random subset of peers, exchanges a compact digest of what it knows, and merges the result. Information spreads like a rumor — hop by hop — until, with high probability, everyone who is reachable has heard it. There is no global barrier and no leader required for the dissemination itself. Cassandra, Consul's LAN gossip (Serf), Swarm, and countless failure detectors are built on this shape.
 
-The mechanism, step by step.
+The guarantee is **eventual dissemination** among connected nodes, not linearizability. Two nodes can disagree about membership for a gossip interval or three; that is expected. If the decision is "who may take this write," gossip alone is the wrong layer (06.06 Consensus, 06.07 Leader Election).
 
-## Tradeoffs
+## How a round usually works
+
+Implementations differ, but the skeleton is stable:
+
+<Steps>
+  <Step title="Maintain a local view">
+    Each node keeps a membership table: peer id, address, heartbeat counter or version, and a status (alive, suspect, dead). Application state that piggybacks on gossip — token ranges, schema version, load hints — sits beside it with its own version numbers.
+  </Step>
+  <Step title="Pick peers and exchange digests">
+    On a tick (often hundreds of milliseconds to a second, tuned to cluster size), the node selects one or a few peers — random, or random among under-contacted peers — and sends a digest: not the full table, but hashes or max versions per peer so the receiver can request only what differs (push-pull gossip).
+  </Step>
+  <Step title="Merge by version">
+    For each peer record, the higher version wins. Tombstones or explicit "left" states propagate the same way so removals spread, with a grace period before forgetting so a flapping node does not thrash the table.
+  </Step>
+  <Step title="Suspect, then declare dead">
+    Missing heartbeats move a peer to suspect (Φ accrual detectors score how abnormal the silence is rather than using a single hard timeout). After enough evidence, status becomes dead and the rumor spreads. False suspicions happen under GC pauses and network blips — join the suspicion with application fencing if the node might still be acting (06.07 Leader Election).
+  </Step>
+</Steps>
+
+Infection-style analysis says that with fanout `f` and `n` nodes, the number of rounds to inform everyone scales like `O(log n)` under healthy connectivity — an order-of-magnitude reason gossip stays attractive at hundreds to thousands of nodes. Bandwidth per node stays roughly constant if you gossip a bounded digest rather than dumping full state every round.
+
+| Approach | Messages as n grows | Consistency | Fit |
+| --- | --- | --- | --- |
+| Central registry heartbeats | O(n) into one place | Strong if registry is consensus-backed | Small clusters, control planes |
+| Full-mesh heartbeats | O(n²) | Fresh but expensive | Tiny clusters only |
+| Gossip membership | ~O(n log n) total dissemination work, O(1)–O(f) per node per tick | Eventual | Large data-plane membership |
+| Consensus on every membership change | Majority RTT per change | Strong | When membership *is* the critical config |
+
+## What should ride on gossip — and what should not
+
+Good passengers: alive/dead hints, load and capacity advertisements, seed lists for finding someone to talk to, eventually consistent secondary indexes of "who owns which token," feature flags that tolerate lag.
+
+Bad passengers: anything where two disagreeing views cause divergent committed writes — account balances, leader identity for a primary without fencing, "delete this key" as the only copy of the tombstone without a stronger log. Gossip can *carry* a pointer to the authoritative store; it should not *be* the authoritative store for those decisions.
+
+<Callout type="note">
+Seed nodes and bootstrap are the cold-start problem gossip cannot solve alone: a brand-new node needs at least one address to infect. Fixed seeds, DNS, or a tiny metadata service (06.12 Metadata Service And Node Discovery) usually provide that first contact; gossip takes over once the local view is non-empty.
+</Callout>
+
+Network partitions produce dual views by design. When the partition heals, versions merge; conflict policies for application state must already exist. Membership flaps at the partition edge are normal — design clients to treat gossip membership as a hint that is confirmed on the data path.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Use gossip when"
+  againstTitle="Avoid gossip as the authority when"
+  forItems={[
+    "Cluster size is large enough that a central heartbeat fan-in or full mesh is operationally painful",
+    "The data being spread can be eventually consistent — membership hints, load, non-critical metadata",
+    "You want no single dissemination bottleneck and can tolerate multi-hundred-millisecond to few-second propagation lag",
+    "Failure detection should be decentralized so the detector cannot die with one registry node",
+    "Piggybacking small state digests on existing peer traffic is cheaper than a separate full-mesh sync",
+  ]}
+  againstItems={[
+    "Decisions require linearizable agreement — leader election safety, committed config, fencing tokens",
+    "Propagation delay of even a few seconds violates the product's freshness or safety needs",
+    "The cluster is tiny and a consensus-backed metadata service is simpler to reason about end to end",
+    "Security requirements forbid random peer contact without strong auth and anti-amplification controls",
+    "You need an immediate, cluster-wide barrier ('everyone has seen v12') rather than probabilistic epidemic spread",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Frame the scaling problem first: "I need membership for hundreds of nodes without a quadratic mesh or a hot registry." Then: "gossip digests on a timer, merge by version, Φ/suspect before dead." Immediately qualify: "clients treat membership as a hint; writes still fence through the primary or quorum." If asked how fast it spreads, say logarithmic rounds in cluster size under healthy networks — an estimate for intuition, not a hard SLA. Point at Cassandra/Consul as existence proofs, and at consensus for the config that must not fork.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Gossip disseminates membership and small state by periodic peer exchange — scalable and decentralized, with eventual consistency among reachable nodes.",
+    "Per-node work stays roughly bounded when digests and fanout are bounded; full-mesh heartbeats do not.",
+    "Suspect-then-dead failure detection reduces false kills, but GC and partitions still create wrong suspicions — fence on the data path.",
+    "Bootstrap needs seeds or a small discovery service; gossip cannot infect a node that knows nobody.",
+    "Ride gossip for hints and soft state; keep linearizable decisions in consensus or a strongly consistent metadata store.",
+    "After partitions heal, versions merge — design for temporary dual views rather than pretending gossip prevents them.",
+  ]}
+/>

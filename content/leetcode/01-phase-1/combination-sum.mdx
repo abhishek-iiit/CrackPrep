@@ -1,0 +1,102 @@
+---
+title: "Combination Sum"
+number: "01.21"
+summary: "Reuse is allowed but order does not matter — backtrack with a start index so you count combinations, not permutations."
+status: published
+free: true
+difficulty: core
+estMinutes: 14
+tags: [backtracking, recursion, array]
+updated: "2026-09-15"
+---
+
+## Same candidates, infinite reuse — permutations are the trap
+
+Given distinct integers and a target, return every **combination** of candidates that sums to the target. Each number may be used more than once. For `candidates = [2, 3, 6, 7]`, `target = 7`, the answer is `[[2,2,3], [7]]` — not `[3,2,2]` as a separate entry.
+
+The brute force generates every multiset of picks and deduplicates at the end. With target 40 and candidates `[2,3,5]`, that is a combinatorial explosion long before you filter permutations. The constraint that matters is **order does not count**: `[2,3,2]` and `[3,2,2]` are the same combination.
+
+## Backtrack with a start index
+
+Model the search as choosing, at each step, the next candidate from index `start` onward. That single rule kills permutations: once you have placed a `3`, you never look back at `2`.
+
+The invariant at each recursive frame: `path` holds a partial sum, `start` is the smallest index you may pick from next, and `remaining = target - sum(path)`.
+
+<Steps>
+<Step title="Sort candidates (optional but clean)">
+Sorting does not change valid combinations, but it makes pruning obvious: if `candidates[start] > remaining`, every later candidate is too large — stop exploring this branch.
+</Step>
+<Step title="Choose, explore, undo">
+At index `i`, either skip the candidate or append it and recurse with the **same** `i` (reuse allowed). After recursion, pop the last element. When `remaining === 0`, copy `path` into the result.
+</Step>
+<Step title="Prune early">
+If `remaining < 0`, return immediately. If sorted and `candidates[i] > remaining`, break the loop — no suffix can help.
+</Step>
+</Steps>
+
+<Callout type="gotcha">
+Using `i + 1` on every pick forbids reuse and misses valid answers like `[2,2,3]`. Using `0` every time generates permutations and forces a dedup pass. The correct move is recurse with `i`, not `i + 1`, while still iterating `i` from `start` forward.
+</Callout>
+
+## Solution
+
+```ts
+function combinationSum(candidates: number[], target: number): number[][] {
+  const result: number[][] = [];
+  candidates.sort((a, b) => a - b);
+
+  function backtrack(start: number, remaining: number, path: number[]): void {
+    if (remaining === 0) {
+      result.push([...path]);
+      return;
+    }
+    for (let i = start; i < candidates.length; i++) {
+      if (candidates[i] > remaining) break;
+      path.push(candidates[i]);
+      backtrack(i, remaining - candidates[i], path); // i, not i + 1 — reuse
+      path.pop();
+    }
+  }
+
+  backtrack(0, target, []);
+  return result;
+}
+```
+
+Time **O(N^(T/M))** in the worst case — N candidates, minimum value M, target T — because the recursion tree depth is bounded by T/M and each level branches up to N times. Space **O(T/M)** for the recursion stack plus output. In practice, sorting and the `> remaining` break cut most branches before they run.
+
+<Tradeoff
+  forTitle="Backtracking when"
+  againstTitle="Reach for DP or meet-in-the-middle when"
+  forItems={[
+    "You must enumerate every valid combination, not just count them",
+    "Candidates are positive and reuse is explicit — the start-index trick applies cleanly",
+    "N is modest (roughly under 30) and target is small enough that pruning keeps the tree manageable",
+    "The problem is a warm-up for Combination Sum II (no reuse) and Combination Sum III (fixed length)",
+    "Interview time is better spent on clear recursion than on optimizing count-only variants"
+  ]}
+  againstItems={[
+    "The follow-up asks only for the number of combinations — DP on target avoids building the full list",
+    "Target is huge (10^4+) with tiny coins — memoized recursion on (index, remaining) is safer than raw backtrack",
+    "Negative candidates appear — subset-sum DP with sign handling replaces this template",
+    "You need the k-th combination in lex order without materializing all of them first",
+    "Input size is large enough that even pruned backtracking blows memory on the output alone"
+  ]}
+/>
+
+## In an interview
+
+Restate: distinct positives, unlimited reuse, combinations not permutations. Walk the example `[2,3,6,7]` / `7` and show why `[2,2,3]` is one answer. Say you will backtrack with a start index before writing code — that one sentence separates you from the permutation bug.
+
+Expect follow-ups: **Combination Sum II** (each candidate once, duplicates in input — skip equal values at the same depth), **Combination Sum III** (exactly k numbers summing to n), or "count combinations only." Mention pruning with sorted candidates and early exit when the current candidate exceeds remaining.
+
+The bug to name first: recursing with `i + 1` when reuse is allowed, or starting every branch from index 0 and deduplicating afterward.
+
+<KeyTakeaways items={[
+  "Combination Sum is backtracking with unlimited reuse — recurse with index i, not i + 1, but only iterate i from start onward to avoid permutations.",
+  "The start index invariant: every combination appears in non-decreasing order relative to the sorted candidate list, so each multiset is generated exactly once.",
+  "Sort candidates and break when candidates[i] > remaining — that pruning is cheap and cuts most dead branches on typical inputs.",
+  "Worst-case time grows with target and minimum candidate value; space is recursion depth plus whatever you store in the output.",
+  "The same skeleton becomes Combination Sum II by advancing to i + 1 and skipping duplicate candidates at the same recursion depth.",
+  "If the interviewer only wants a count, switch to DP on (index, remaining) instead of materializing every path."
+]} />

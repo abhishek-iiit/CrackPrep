@@ -1,32 +1,65 @@
 ---
 title: "Counting At Scale"
 number: "10.01"
-summary: "Counting At Scale — notes in progress."
-status: draft
+summary: "Why an UPDATE on one counter row collapses under concurrent writes, and the three-part shape of every fix: batch, shard, or approximate."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: intro
+estMinutes: 9
+tags: [counters, contention, approximation]
+updated: "2026-09-15"
 ---
 
-## The problem
+## A number that everyone wants to change at once
 
-What breaks without this, and the situation that forces the decision.
+Somewhere behind "1.2M views" or "48 likes" is usually one row: `UPDATE posts SET view_count = view_count + 1 WHERE id = ?`. At ten writes a second this is invisible — the database serializes them, each one takes a fraction of a millisecond, and nobody notices. At ten thousand writes a second against the same row, every one of those writes is now waiting behind the one before it, because each has to lock the row, read the current value, add one, and write it back. The database is not slow. It is correct, and correctness on a single row is the bottleneck.
 
-## How it works
+This is a different problem from the query being slow. `SELECT COUNT(*) FROM likes WHERE post_id = ?` has its own cost — it scans or index-scans every matching row, so cost grows with the table rather than staying constant — but that is a read-side cost a cache can absorb. A hot counter row is a write-side cost, and a cache does not help a write: every increment still has to land somewhere, in order, without losing one.
 
-The mechanism, step by step.
+The two failure modes look different in production, too. The `COUNT(*)` query shows up as a slow endpoint, easy to spot in a trace. The hot row shows up as lock wait time that appears in no single query's execution plan — it presents as throughput that flatlines no matter how many application servers you add, because they are all still waiting on one row on one database instance.
 
-## Tradeoffs
+## Three ways out, and what each one gives up
+
+Every fix for a hot counter trades exactness or freshness for throughput. There is no version that keeps all three.
+
+- **Batch the increments.** Instead of writing to the database on every event, accumulate the count in memory — in the request-handling process, or in a fast in-memory store like Redis — and flush a single `UPDATE ... SET count = count + N` every second or every few hundred events. This turns thousands of row writes into one, at the cost of a small window where the durable count lags reality. 02.10 Batching covers the general pattern and its failure mode: a crash between the increment and the flush loses whatever was buffered and never written through.
+- **Shard the counter.** Split one row into many — `counter_id = post_id:0` through `post_id:15` — and increment a randomly chosen shard on write, summing all shards on read. No single row absorbs the full write rate; contention drops by roughly a factor of the shard count. The cost lands on reads, which now touch N rows instead of one, and on keys hot enough that even a sharded write path can saturate — the general problem is 04.06 Hot Partitions, and 04.05 Sharding And Partitioning covers picking a shard key.
+- **Stop counting exactly.** If the product only needs "48" to become "1.2K" rather than a number accurate to the unit, an approximate structure that tolerates concurrent, lossy updates can absorb far more write volume than an exact counter — this is the family of sketches the rest of this module covers, starting with 10.04 HyperLogLog Cardinality Estimation for distinct counts and 10.05 Mergeable Sketches For Analytics for why these structures combine cleanly across shards.
+
+None of these is free, and in practice they compose: a production view counter is usually sharded *and* batched, with an approximate display value shown to users while an exact reconciliation runs in the background. 10.02 View Counting At Scale and 10.03 Impression Counting System Design work through two concrete versions of that combination.
+
+<Callout type="note">
+The three fixes solve different bottlenecks. Batching reduces write *frequency*; sharding reduces write *contention*; approximation reduces write *precision*. A system with a contention problem that only batches will still serialize on the flush — batching a hot row just makes it a slightly-less-hot row that saturates a little later.
+</Callout>
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Keep an exact counter when"
+  againstTitle="Batch, shard, or approximate when"
+  forItems={[
+    "The number has a financial or legal consequence — billing, inventory, a rate limit's remaining quota — where being off by one is a bug, not noise",
+    "Write volume is low enough that row-level locking never queues — tens of writes a second against one row is fine on any mainstream database",
+    "The count must be readable in the same transaction that changed it, with no replication or cache lag",
+    "The count decreases as well as increases and needs to hit exactly zero — an approximate structure that cannot cleanly represent negative deltas breaks that",
+  ]}
+  againstItems={[
+    "The metric is display-only — a like count, a view count, a follower count — where users tolerate '1.2K' updating a few seconds late",
+    "Write volume against a single key can spike by orders of magnitude, as on a post that goes viral",
+    "You are counting distinct things (unique visitors, unique viewers) rather than summing events, which is a cardinality problem, not a sum",
+    "The read pattern already tolerates staleness — a dashboard refreshed every minute has no use for a number correct to the millisecond",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Name the bottleneck before you are asked to explain it: "A naive counter is one row that every write has to lock, so throughput is capped by however fast that one row can be updated in sequence, not by how many application servers I add." Then pick a fix that matches the actual requirement — batching if the count just needs to catch up periodically, sharding if writes are the bottleneck and reads can afford to fan out, approximation if the product genuinely does not need an exact number. Naming the tradeoff you are accepting — staleness, extra read cost, or precision — is what shows you understand this is a substitution, not a fix with no cost.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "A counter implemented as one row hits a write-throughput ceiling set by row-level locking, not by database hardware — adding servers does not help because they all queue on the same row",
+    "COUNT(*) and a hot counter row are different problems: one is an expensive read that scales with table size, the other is write contention that scales with concurrent writers",
+    "Batching increments trades a small durability and freshness window for turning many small writes into few larger ones",
+    "Sharding a counter across multiple rows trades read complexity — summing N rows instead of one — for removing the single point of write contention",
+    "Approximate counting trades exactness for throughput and is only acceptable when the consumer of the number can tolerate being wrong by a known, bounded margin",
+    "Production counters usually combine these — sharded writes, batched flushes, and an approximate value shown to users while an exact figure reconciles in the background",
+  ]}
+/>

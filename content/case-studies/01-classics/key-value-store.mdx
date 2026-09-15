@@ -1,0 +1,152 @@
+---
+title: "Key-Value Store"
+number: "01.04"
+summary: "A partitioned primary-replica store where the interview hinges on sharding, quorum reads, and what happens when a node disappears."
+status: published
+free: true
+difficulty: deep
+estMinutes: 22
+tags: [kv-store, sharding, replication]
+updated: "2026-09-15"
+---
+
+## Why interviewers ask for a key-value store
+
+Dynamo-style prompts strip away SQL and product features until only distributed systems primitives remain: partition keys across nodes, replicate for availability, tune consistency vs latency, and handle membership changes without losing data. It tests CAP tradeoff vocabulary in a concrete setting — not "what is CAP" but "your read got a stale value after a write; walk me through why." It connects directly to 01.03 Distributed Cache (caching is a layer above this) and 01.05 Unique ID Generator (coordination at scale).
+
+## Clarify: operations, size limits, consistency flavor
+
+**Functional:**
+
+- Operations — GET, PUT, DELETE only? Compare-and-set? Batch?
+- Key/value size limits — e.g. keys ≤ 1 KB, values ≤ 1 MB?
+- TTL on keys or permanent until deleted?
+- Listing keys or scan — usually out of scope for classic KV
+- Multi-key transactions — usually no
+
+**Non-functional:**
+
+- Durability — survive single node loss? Rack loss? Datacenter loss?
+- Consistency — eventual OK, or read-your-writes, or linearizable?
+- Availability target — 99.99%?
+- Latency — p99 GET under 10 ms within a region?
+- Write QPS vs read QPS — drives replica count and caching
+
+**Out of scope:** SQL queries, secondary indexes, full-text search, cross-key joins.
+
+Spoken boundary:
+
+> "Simple GET/PUT/DELETE, values up to 256 KB, partition by key hash, three replicas per shard, quorum reads and writes, eventual consistency with read repair — no secondary indexes."
+
+## Capacity: shards, replicas, and disk
+
+Assumptions.
+
+| Assumption | Value |
+| --- | --- |
+| Total data | 10 TB |
+| Peak read QPS | 1,000,000/s |
+| Peak write QPS | 100,000/s |
+| Value size (average) | 1 KB |
+| Replication factor | 3 |
+| Quorum | W=2, R=2 (N=3) |
+
+**Key count:** 10 TB / 1 KB ≈ **10 billion keys**.
+
+**Shards:** Target ~50 GB per shard for manageable rebalance → 10 TB / 50 GB ≈ **200 shards**. Each shard owns ~50M keys.
+
+**Per-shard read load:** 1M / 200 = **5,000 reads/s per shard** — one primary plus two replicas can serve this with local SSD if working set fits RAM; otherwise add a cache tier per shard.
+
+**Per-shard write load:** 100k / 200 = **500 writes/s** — WAL + replication lag must stay under SLA; 500/s is moderate for SSD.
+
+**Total storage with replication:** 10 TB × 3 = **30 TB** raw — plan compaction and tombstone cleanup.
+
+## High-level design: coordinator, partition, replicate
+
+| Component | Role |
+| --- | --- |
+| Client library | Routes by key hash; retries on timeout; merges quorum responses |
+| Coordinator node | Stateless; receives request, forwards to replica set |
+| Partition (shard) | Owns a key range via consistent hashing |
+| Replica nodes (3 per shard) | Store SSTables / WAL; one elected leader per shard for writes |
+| Gossip / membership | Tracks which nodes are alive; ring updates on add/remove |
+
+<Steps>
+<Step title="PUT / write path">
+
+Client hashes key → shard. Coordinator sends write to all N replicas; wait for W acknowledgments (e.g. W=2 of 3). Leader assigns version timestamp (vector clock or HLC). Append to commit log, apply to memtable. Return success after W acks — remaining replica catches up asynchronously.
+
+</Step>
+<Step title="GET / read path">
+
+Coordinator sends read to R replicas (R=2). Return value with highest version timestamp. If responses disagree, detect conflict — last-write-wins by timestamp or return both to application (if version vectors enabled). Schedule read repair if a stale replica is found.
+
+</Step>
+<Step title="Delete">
+
+Tombstone write with version — propagates like PUT. Compaction removes tombstones after grace period. Deletes must replicate before ack if durability required.
+
+</Step>
+</Steps>
+
+## Deep dive: partitioning, failure, and consistency knobs
+
+### Consistent hashing and virtual nodes
+
+Keys hash to a ring; each physical node holds multiple virtual nodes for even distribution. When node B fails, its vnodes' keys move to successors — only adjacent key ranges move, not the whole ring. When B returns, it reclaims ranges via hinted handoff or full sync from peers.
+
+### Quorum math
+
+N replicas, W write acks, R read acks. If W + R > N, reads overlap writes and you get strong consistency for that operation (e.g. N=3, W=2, R=2). Lower R for lower latency at cost of stale reads. W=1, R=1 is fastest and weakest — say that aloud when choosing.
+
+| Setting | Latency | Consistency | Survives |
+| --- | --- | --- | --- |
+| W=1, R=1 | Lowest | Eventual | Must catch up later |
+| W=2, R=2, N=3 | Medium | Strong overlap | 1 node loss during write |
+| W=3, R=1 | Write-heavy cost | Read may be stale briefly | All must ack write |
+
+### Hinted handoff and read repair
+
+Node down: coordinator writes to a temporary "hint" node outside the replica set; when the owner returns, hints replay. Background read repair: when R responses disagree, push the newer value to the lagging replica. Both are how eventual consistency converges without a central master for every key.
+
+### Split brain and anti-entropy
+
+Network partition can create divergent writes on both sides of the split. Mitigations: require odd N, use leader per shard with epoch numbers (Raft/Paxos per partition — heavier but cleaner), or accept conflict resolution via LWW and application merge. Merkle tree anti-entropy between replicas detects drift periodically.
+
+## Tradeoffs
+
+<Tradeoff
+  forTitle="Leader per shard (strong ordering) when"
+  againstTitle="Leaderless quorum (Dynamo-style) when"
+  forItems={[
+    "Clients need compare-and-set or conditional writes that must not race",
+    "Read-your-writes and linearizability are explicit requirements",
+    "Write rate per shard is moderate — single leader can keep up",
+    "Conflict resolution in the application is unacceptable",
+    "You can borrow Raft per partition — operational complexity is priced in",
+  ]}
+  againstItems={[
+    "Extreme write availability — any replica can accept writes during partition",
+    "Geographic multi-master with last-write-wins is acceptable",
+    "Application can merge conflicts (shopping cart, counters)",
+    "Lower tail latency on writes — no leader election on leader death mid-traffic",
+    "Simpler conceptual model for interview: hash, replicate, quorum, repair",
+  ]}
+/>
+
+## In an interview
+
+Open with the interface: "A flat GET/PUT store — I'll partition by consistent hash, three replicas, W=2 R=2 for balanced consistency." Draw the ring, one shard expanded to three replicas, coordinator sending parallel requests.
+
+Expect: how to add a node (move vnodes, stream data, dual-read during migration), what happens during partition (quorum may fail writes — availability vs consistency), and hot keys (split key into N sub-keys or add read replicas fronted by cache). Volunteer: "The subtle bug is reading immediately after write with R=1 from a replica that hasn't caught up — fix with R=2 or read-from-leader for the writer's session."
+
+<KeyTakeaways
+  items={[
+    "Clarify operations and consistency before sharding — quorum W and R are the main tuning knobs",
+    "Partition by consistent hash with virtual nodes; ~200 shards for 10 TB at 50 GB each is a defensible sketch",
+    "W + R > N gives overlapping quorums and strong reads; W=1 R=1 is fast and eventually consistent",
+    "Writes go to W replicas before ack; reads merge R responses by version and trigger read repair on mismatch",
+    "Node failure uses hinted handoff and anti-entropy; split brain needs epochs, leader election, or LWW with eyes open",
+    "1M reads/s and 100k writes/s at 10 TB implies ~5k reads and 500 writes per shard — check per-shard capacity before declaring done",
+  ]}
+/>

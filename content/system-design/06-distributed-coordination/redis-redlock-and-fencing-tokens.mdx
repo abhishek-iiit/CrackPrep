@@ -1,32 +1,111 @@
 ---
 title: "Redis Redlock And Fencing Tokens"
 number: "06.09"
-summary: "Redis Redlock And Fencing Tokens — notes in progress."
-status: draft
+summary: "Redlock's quorum algorithm for locking across independent Redis nodes, the real disagreement over whether its timing assumptions are safe, and the fencing-token fix both sides converge on."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: deep
+estMinutes: 21
+tags: [redis, redlock, fencing-tokens, locking]
+updated: "2026-09-15"
 ---
 
-## The problem
+## One Redis instance is a single point of failure wearing a lock's clothes
 
-What breaks without this, and the situation that forces the decision.
+The obvious way to build a distributed lock on Redis is `SET key value NX PX ttl` — set the key only if it does not exist, with an expiry, and delete it (checking the value first, so a client only deletes its own lock) to release. It is fast, simple, and wrong in exactly the way a single point of failure is always wrong: if that one Redis node goes down while a client holds the lock, every other client is now unable to acquire it until the node comes back, or — worse, if it is a primary with an asynchronous replica — a failover promotes a replica that never received the `SET` in the first place, and the new primary hands the same lock to a second client while the first still believes it holds it. Replacing one Redis instance with a primary-replica pair does not fix this; it just relocates the single point of failure to "whichever copy of the key the failover happened to pick."
 
-## How it works
+Redlock, proposed by Redis's original author (antirez) in 2016, is an attempt to fix this without giving up Redis's speed and simplicity, by adopting a majority-quorum idea instead of relying on any one node's replication.
 
-The mechanism, step by step.
+## The algorithm: acquire the same lock on a majority of independent nodes
 
-## Tradeoffs
+Redlock runs against `N` independent Redis instances — antirez's original writeup uses five, run as separate masters with no replication between them, specifically so that they fail independently rather than sharing a single point of failure.
+
+<Steps>
+  <Step title="Record the start time">
+    The client notes the current time before attempting anything, in milliseconds.
+  </Step>
+  <Step title="Try to acquire the lock on every instance, one at a time">
+    Using the same key and the same random value on each, with `SET NX PX`. Each attempt uses a timeout much smaller than the lock's own TTL, so a single unreachable instance costs a small, bounded delay rather than stalling the whole acquisition.
+  </Step>
+  <Step title="Check the quorum and the clock together">
+    The lock is considered acquired only if two things are both true: the client got a successful `SET` on a majority of the N instances (at least N/2 + 1), and the total elapsed time since step one is still less than the lock's TTL. Reaching a majority only after the TTL has effectively run out is treated as a failure.
+  </Step>
+  <Step title="Compute the real remaining validity">
+    If acquired, the lock is not valid for the full TTL — it is valid for the TTL minus the elapsed acquisition time minus a small clock-drift allowance, since independent nodes' clocks are assumed to drift by only a bounded amount. That shrunken window is what the client actually gets to work with.
+  </Step>
+  <Step title="On failure, unlock everywhere">
+    If the client did not reach quorum in time, it sends a delete to every instance — including ones it believes it failed against — so no partial lock is left behind for another client to trip over.
+  </Step>
+</Steps>
+
+The appeal is real: losing a minority of the five nodes to a crash, a restart, or a network blip does not stop the lock from working, and no single node's failure or slow failover can hand the lock to two clients the way the naive single-instance version can.
+
+## The disagreement: what "safe" means under a pause
+
+In early 2016 Martin Kleppmann published a widely-read critique arguing that Redlock's safety proof rests on a timing assumption distributed systems are not allowed to make: that the elapsed time a client measures locally bounds how long it actually takes to act. His scenario is a variant of the pause problem from 06.08 Distributed Locks And Leases — a client acquires the lock across a majority of instances well within the TTL, and is then paused for longer than the remaining validity window: a GC pause, a slow disk write blocking the event loop, a virtual machine being live-migrated. When it resumes, the lease has already expired and a second client has legitimately acquired the same lock and started working. Both clients now believe, correctly by the rules of the algorithm, that they hold the lock. His broader point was not narrowly about Redis: he argued that *any* lock service has this problem unless the resource being protected checks a fencing token, and that Redlock in particular adds risk on top of that because its safety also depends on reasonably synchronized clocks across independent nodes — a wall-clock jump from an NTP correction or a manually adjusted VM clock can shrink or extend a lock's effective validity in ways the algorithm has no way to detect.
+
+Antirez's response agreed with the fencing-token conclusion — he did not dispute that a paused client can resume believing it holds a lock it no longer does — but disagreed that this made Redlock uniquely unsafe. His argument was that the pause problem applies identically to a lock obtained from ZooKeeper, etcd, or any other service: no lock manager can stop the client's own process from pausing after acquisition and before use, so singling out Redlock for a flaw shared by the entire category is not a fair comparison. On the clock-drift point specifically, he argued the practical risk was overstated for the common case — Redlock tolerates any *one* instance having a badly wrong clock without breaking safety, since it only needs a majority to agree, and large simultaneous clock jumps across independently administered nodes are an operational failure worth guarding against directly (monotonic clocks, disciplined NTP) rather than a reason to discard the whole approach. His broader framing was that Redlock was never meant to substitute for a consensus system when you need a formally proven safety guarantee — it was meant to be a large, practical improvement in safety over a single Redis lock, for the many use cases (deduplicating a job, avoiding redundant work) where "very likely correct, and fast, and simple" beats "provably correct, and heavier."
+
+Neither side walked away from the actual technical claim: a lease of any kind, from any service, does not protect a resource from a client that paused past its deadline and does not know it. Where they differed was on how much that should worry you given Redlock's target use cases, and whether "use a fencing token" is a footnote or the headline.
+
+<Callout type="note">
+The two positions are not actually incompatible once you separate two different jobs a lock can do. Using a lock purely for **efficiency** — skip duplicate work, avoid a thundering herd — can tolerate an occasional double-execution; a wasted retry is the cost of being wrong. Using a lock for **correctness** — prevent two processes from corrupting the same record — cannot tolerate it at all, no matter which lock service granted it. Redlock, or any lease, is fine for the first job unmodified. For the second, both sides of the argument converge on the same fix.
+</Callout>
+
+## Fencing tokens: make the resource reject the stale holder
+
+A fencing token is a number that only ever goes up, issued by the lock service every time it grants the lock, and checked by the resource being protected — not by the lock client, and not by re-checking the clock.
+
+<Steps>
+  <Step title="The lock service hands out an increasing token with every grant">
+    Client A acquires the lock and receives token 33. The token is just a counter the lock service increments on every successful acquisition; it does not need consensus of its own beyond whatever the lock service already provides.
+  </Step>
+  <Step title="The client attaches the token to every write it makes to the protected resource">
+    Not to the lock service — to whatever storage, API, or downstream system the lock was guarding in the first place. "Write this value, and my authority to do so is token 33."
+  </Step>
+  <Step title="Client A pauses before finishing its write">
+    Long enough that its lease expires. It has no way to know this has happened yet — it is simply not running.
+  </Step>
+  <Step title="Client B acquires the same lock and gets token 34">
+    It proceeds to write, tagging its write with 34, and the resource records 34 as the highest token it has seen.
+  </Step>
+  <Step title="Client A resumes and sends its write, tagged 33">
+    The resource compares 33 against the highest token it has already accepted, 34, sees that 33 is stale, and rejects the write outright — regardless of whether client A still believes it holds the lock, and regardless of what either client's clock says.
+  </Step>
+</Steps>
+
+This closes the gap Kleppmann's scenario opens, because it does not depend on timing at all. It depends only on the resource enforcing a monotonically increasing check, which is a much smaller correctness surface than "no client anywhere ever pauses too long."
+
+The catch is that fencing only works if the resource itself is fencing-aware. A database with a version or token column can enforce this in the same write; an object write to a system with no such parameter, a message published to a queue with no ordering guarantee, or a call to a third-party API with no token field cannot be retrofitted this way without changing what that resource accepts. That is the real limitation — fencing tokens are not a drop-in add-on to an existing lock, they are a contract the protected resource has to participate in.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Redlock is a reasonable fit when"
+  againstTitle="Reach for a consensus-backed service, or add fencing, when"
+  forItems={[
+    "The lock protects an efficiency concern — deduplicating work, avoiding a cache stampede — where an occasional double-execution is a wasted retry, not a corruption bug",
+    "Redis is already the infrastructure in place, and running a separate ZooKeeper or etcd cluster purely for locking is not justified by the stakes",
+    "Sub-millisecond acquisition latency matters more than a formally proven safety guarantee",
+    "Losing a minority of independently-run Redis nodes must not stop new locks from being granted",
+  ]}
+  againstItems={[
+    "The lock exists to prevent two processes from corrupting the same piece of state, and a false 'I still hold it' after a pause is unacceptable at any probability",
+    "The resource being protected can enforce a fencing token — in which case the token, not the lock algorithm, is what is actually keeping you safe, and a simpler single-node lease works just as well underneath it",
+    "You need a documented, widely-scrutinized safety proof rather than a majority-vote heuristic — a consensus-based service (06.06 Consensus) is the more defensible choice to cite",
+    "Client pauses in your runtime — stop-the-world GC, live migration, thread starvation — are long and frequent enough that a TTL sized to avoid false expirations is also long enough to make the pause scenario routine, not theoretical",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Bring up Redlock only after naming what a single Redis lock can't survive: "A lock on one Redis node dies with that node, so Redlock spreads the same lock across an odd number of independent instances and requires a majority — that survives losing a minority of them." Then volunteer the disagreement rather than waiting to be pushed into it: acquiring a majority within the TTL does not guarantee the client is still inside that window by the time it acts, because nothing bounds how long a process can pause. Land on the fix, not just the critique — a fencing token, checked by the resource itself, closes the gap regardless of which lock service handed it out, and is worth having even under ZooKeeper or etcd. If asked which side of the Kleppmann/antirez exchange is "right," the honest answer is that they agree on the fencing-token fix and differ only on how much the underlying risk matters for Redlock's actual target use cases — that answer demonstrates you understand the tradeoff rather than just one side's blog post.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "A lock on a single Redis instance dies with that instance, and asynchronous replication can hand the same lock to two clients after a failover",
+    "Redlock acquires the same key across an odd number of independent Redis instances and requires a majority within the TTL, so a minority of node failures does not stop new locks from being granted",
+    "Kleppmann's critique: a client that pauses after acquiring the lock but before finishing its work can resume past the lease's expiry still believing it holds the lock, and Redlock's safety also assumes bounded clock drift across independent nodes",
+    "Antirez's response: the pause problem applies to any lock service, not uniquely to Redlock, and Redlock only needs a majority of clocks to be reasonable, not all of them",
+    "Both sides converge on the same fix: a fencing token, a monotonically increasing number issued at each grant, checked by the protected resource itself rather than trusted from the lock client",
+    "Fencing only works if the resource being protected can enforce the check — it is a contract the resource participates in, not a feature you can bolt onto an arbitrary API after the fact",
+  ]}
+/>

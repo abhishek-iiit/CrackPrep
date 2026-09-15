@@ -19,6 +19,8 @@ export type LessonMeta = {
   tags: string[];
   updated: string | null;
   url: string;
+  /** External problem link (LeetCode). Null for non-leetcode courses. */
+  problemUrl: string | null;
 };
 
 /** A lesson with its raw MDX body. Only getLesson returns this. */

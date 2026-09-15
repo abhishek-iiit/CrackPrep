@@ -1,32 +1,90 @@
 ---
 title: "View Counting At Scale"
 number: "10.02"
-summary: "View Counting At Scale — notes in progress."
-status: draft
+summary: "How to show a view count that survives viral write spikes by sharding, batching, and separating the display number from the durable truth."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [counters, views, sharding, batching]
+updated: "2026-09-15"
 ---
 
-## The problem
+## A view is not a like, and the write path knows it
 
-What breaks without this, and the situation that forces the decision.
+A like is intentional: the user taps once, you can enforce uniqueness per user, and the rate is bounded by how many people care enough to act. A view is ambient. Opening a feed, scrolling past a card, autoplaying a thumbnail — each one is a write candidate, and a viral post turns that candidate into tens of thousands of increments per second against the same key. 10.01 Counting At Scale named the general failure: one `view_count` row that every writer must lock. This lesson is the concrete fix for the display number users actually see.
 
-## How it works
+The product requirement is almost never "the integer must be exact at every millisecond." It is closer to "show something that grows in the right direction, does not jump backwards on a refresh, and does not melt the database when a clip goes viral." That gap — between a billing-grade counter and a social-proof counter — is what makes batching, sharding, and approximation acceptable rather than bugs.
 
-The mechanism, step by step.
+## Separate the hot path from the durable path
 
-## Tradeoffs
+Treat the view count as two numbers that eventually agree, not one number that every request must update.
+
+<Steps>
+  <Step title="Ingest on the edge, not on the row">
+    The request handler records that a view happened — usually by incrementing an in-memory or Redis counter keyed by content id, sometimes after a cheap dedupe window so the same user refreshing every 200 ms does not inflate the number. No durable row is touched yet. The latency budget for this step is a local memory write, not a database round trip.
+  </Step>
+  <Step title="Flush in batches on a timer or threshold">
+    A flusher wakes every second, or every few hundred buffered increments, and writes `count = count + N` for each dirty key. One flush replaces thousands of single-row updates. 02.10 Batching covers the crash window: anything still in the buffer when the process dies is lost unless you also append the raw events somewhere durable. For view counts, that loss is usually acceptable — a few hundred missed views on a multi-million total is invisible — but it must be a conscious choice, not an accident.
+  </Step>
+  <Step title="Shard the durable counter when one key still burns">
+    Even batched, a single viral key can saturate one row on flush. Split the durable counter into `N` shard rows (`post:42:0` … `post:42:15`), pick a shard at random on write, and sum on read. Contention drops roughly with `N`; read cost rises with `N`. Start with a small `N` (8–16 is a common ballpark) and raise it only for keys that actually heat up — sharding every post in the catalog wastes read work for no gain.
+  </Step>
+  <Step title="Serve a display value from cache, reconcile in the background">
+    The number shown next to the video comes from a cached aggregate that updates on flush or on a short TTL, not from summing shards on every page render. A slower job — or a periodic exact recount from an event log — corrects drift. Users see a smooth number; finance or creator dashboards that need closer-to-truth can read the reconciled path.
+  </Step>
+</Steps>
+
+Unique viewers are a different question. "How many times was this opened" is a sum; "how many distinct people opened it" is cardinality, and an exact set of viewer ids does not fit at viral scale. That is where 10.04 HyperLogLog Cardinality Estimation belongs — often as a parallel structure next to the total-view counter, not as a replacement for it.
+
+<Callout type="gotcha">
+Dedupe windows ("count at most one view per user per 30 seconds") feel like uniqueness but are not. They suppress refresh spam; they do not produce a true unique-viewer count. If the product copy says "unique views," you need a cardinality structure or an exact set — a short TTL on `(user, content)` is only a rate limit dressed as analytics.
+</Callout>
+
+## What actually fails in production
+
+The failure mode is rarely a wrong final number after a week. It is a hot key that makes the flush path itself contended: buffer size climbs, flush latency spikes, and the display cache lags far enough that two refreshes show the same stale figure while the event stream is still roaring. Operators notice it as Redis memory for dirty keys climbing, or as lock wait time on the shard rows during flush — the same shape as 10.01, just moved one layer down.
+
+The other failure is silent undercount after a flusher crash, which only becomes visible when someone compares the display total to a full recount from the raw event store. That comparison is why keeping raw view events (even sampled) next to derived counters matters — 10.07 Raw Events Vs Derived Analytics is the decision behind that split.
+
+| Concern | Typical choice for views | Why |
+| --- | --- | --- |
+| Write rate | Buffer + batch flush | Turns per-request DB writes into per-second aggregates |
+| Hot key | Sharded counter rows | Removes single-row lock ceiling on flush |
+| Unique viewers | HyperLogLog or exact set for small audiences | Distinct count ≠ sum of events |
+| Display read | Cached aggregate | Avoid summing shards on every impression of the count |
+| Crash loss | Accept small undercount, or dual-write to an event log | Product tolerance, not a universal rule |
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Build a batched, sharded view counter when"
+  againstTitle="Keep a single exact row when"
+  forItems={[
+    "Write volume against popular content can spike by orders of magnitude within seconds",
+    "The UI shows rounded or social-proof numbers (1.2K, 4.8M) rather than unit-accurate totals",
+    "A few seconds of lag or a small undercount after a crash is acceptable to the product",
+    "You can afford a background reconciliation path for creator or internal dashboards that need closer truth",
+    "Unique-viewer estimates can live beside totals via a sketch rather than forcing exactness on every view write",
+  ]}
+  againstItems={[
+    "The count is contractual — paid views, ad delivery guarantees, or audited creator payouts that cannot tolerate silent loss",
+    "Write rate stays low enough that one row never queues (tens per second, not thousands)",
+    "Reads must see the post-increment value in the same transaction as the write",
+    "The audience is small and exact unique membership fits in memory without sketches",
+    "You have no event log or reconciliation job, so any buffered loss is permanent and undetectable",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Lead with the bottleneck, not the architecture diagram: "A view counter is a single hot key under viral load, so I will not `UPDATE` one row per view — I buffer increments, flush in batches, and shard the durable counter so flush itself does not serialize." Then name what you are giving up — a short durability window, read-side fan-out across shards, and a display value that can lag — and say how unique viewers are a separate cardinality problem (HyperLogLog), not a harder sum. Expect the follow-up "what if the flusher dies?" Answer with either accepted undercount or dual-write to an append-only event stream that can rebuild the counter.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "View counting fails as write contention on one row, not as a slow SELECT — viral traffic turns every open into a competing increment on the same key",
+    "The usual production shape is buffer locally, flush in batches, shard the durable counter, and serve a cached display value while reconciliation catches up",
+    "Batching reduces write frequency; sharding reduces write contention; neither replaces the other, and flush can become the new hot path if you only batch",
+    "Unique viewers are a cardinality problem — HyperLogLog or an exact set — not a dedupe TTL on the total-view counter",
+    "Crash loss between buffer and flush is a product decision: accept a small undercount, or append raw events so the counter can be rebuilt",
+    "Show users a good-enough number; give audited or payout paths a slower exact or reconciled figure rather than forcing every request onto the exact path",
+  ]}
+/>

@@ -1,32 +1,114 @@
 ---
 title: "Short Poll Vs Long Poll Vs WebSocket"
 number: "11.02"
-summary: "Short Poll Vs Long Poll Vs WebSocket — notes in progress."
-status: draft
+summary: "Three ways to learn that something changed — timed GETs, held GETs, or a persistent socket — and a cost model that picks among them from freshness and concurrency, not fashion."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 14
+tags: [polling, websockets, realtime, cost]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Freshness has a price tag, and polling is how you see it
 
-What breaks without this, and the situation that forces the decision.
+Clients do not magically know the server changed. Something has to ask, wait, or stay connected. Short polling, long polling, and WebSockets are the three HTTP-era answers that show up in almost every feed, chat, or notification design. They differ less in "can they deliver an update" — all three can — than in *who pays how often*: request rate, open connections, and end-to-end delay from write to UI. The decision is a cost model with a freshness SLA attached, not a protocol preference.
 
-## How it works
+11.03 Long Polling Vs WebSockets goes deep on connection state, proxies, and timeouts once you have narrowed to those two. 11.04 WebSockets Vs SSE Vs Long Polling adds Server-Sent Events for the unidirectional case. This lesson stays on the three-way fork and the arithmetic that picks a starting point.
 
-The mechanism, step by step.
+## What each one does
 
-## Tradeoffs
+**Short poll.** The client issues a normal request on a timer — every 5 s, 30 s, 2 min — and the server answers immediately with the current state or "nothing new." Idle clients still generate traffic. Latency to learn about a change is up to one full interval on average half an interval.
+
+**Long poll.** The client requests; the server *holds* the response until an event arrives or a timeout fires (often 15–60 s). On response or timeout the client immediately opens the next hold. Freshness can be near push, but every delivery or timeout is still a full HTTP request lifecycle — headers, auth check, load-balancer accounting.
+
+**WebSocket.** After an HTTP Upgrade, a bidirectional framed channel stays open. The server pushes when it wants; the client can send without a new handshake. You pay connection state and heartbeats continuously, and you stop paying per-update HTTP overhead.
+
+| | Short poll | Long poll | WebSocket |
+| --- | --- | --- | --- |
+| Freshness | Bounded by interval | Near event-time (plus hold setup) | Near event-time |
+| Idle cost | Request every interval | One held connection + periodic timeout renewals | One connection + heartbeats |
+| Burst cost | Same as idle — timer does not care | One request per event (or batch) plus renewals | Frames on the existing socket |
+| Server memory | Mostly stateless per request | State for each held request | State for each open socket |
+| Infrastructure fit | Every CDN and cache understands GET | Needs long timeouts end-to-end | Needs sticky LB or a fan-out bus (see 11.01) |
+
+## A cost model you can run on a whiteboard
+
+Fix three inputs:
+
+- **C** — concurrent clients interested in updates
+- **U** — useful updates per second across those clients (global event rate × average interest, or per-client rate × C)
+- **F** — required freshness: maximum acceptable seconds from write to visible update
+
+Then compare order-of-magnitude **request or message rates** (a ballpark to reason with, not a benchmark):
+
+- **Short poll:** roughly `C / interval` requests per second, with `interval ≤ F`. Independent of U. If C = 100,000 and F = 5 s, you need interval ≤ 5 s → ≥ 20,000 empty-ish GETs/s even when U is tiny. Short poll taxes concurrency, not eventfulness.
+- **Long poll:** on the order of `U` completions per second when events are sparse, plus `C / timeout` renewals when idle (every held request eventually times out). If events are frequent, completions approach U and renewals drop. If events are rare, you still pay timeout churn.
+- **WebSocket:** steady **C** connections; application messages ≈ **U**; plus heartbeat traffic (e.g. C / 30 s). Connection count replaces request count as the scarce resource.
+
+### Worked sketch
+
+100k concurrent clients, each must see a badge update within 3 s. Average useful updates: 500/s globally (many clients share streams; per-client rate is low).
+
+- Short poll at 3 s → ~33k req/s baseline. Mostly 304s or empty payloads. Cheap per request, expensive in aggregate — auth, LB, and app QPS all see that floor.
+- Long poll with 30 s timeout → idle renewals ~3.3k req/s, plus ~500 completions/s when events flow. Far fewer requests than short poll; you now hold ~100k concurrent HTTP requests on the servers.
+- WebSocket → 100k sockets, ~500 push messages/s, heartbeats ~3k/s. Request QPS collapses; RAM and gateway count rise.
+
+Same freshness target, three different bottlenecks: request throughput, held-request capacity, or connection capacity. Name which resource you have headroom for.
+
+<Callout type="tip">
+If the freshness SLA is loose — "within a minute is fine" — short poll with a 30–60 s interval is often the correct answer, especially behind a CDN that can cache a public "latest version" document. Jumping to WebSockets because "realtime sounds better" buys operational surface area for a budget nobody asked for.
+</Callout>
+
+## Decision framework
+
+<Steps>
+  <Step title="Write the freshness number">
+    Maximum seconds from server commit to client UI. Sub-second interactive (typing, games, collab cursors) almost always wants a persistent channel. Multi-second feed badges and "new items available" often do not.
+  </Step>
+  <Step title="Estimate concurrent waiters vs event rate">
+    High C, low U favors long poll or WebSocket over short poll. High U to mostly the same C favors WebSocket so you are not completing an HTTP request per event. Low C makes all three fine — pick the simplest to operate.
+  </Step>
+  <Step title="Check whether the client must send often">
+    Bidirectional chatter (chat send, presence, Cursor moves) tilts to WebSocket so uploads are not separate POSTs. Read-mostly notifications can stay on long poll or, later, SSE (11.04).
+  </Step>
+  <Step title="Price the idle path">
+    Short poll: interval × C forever. Long poll: timeout renewals. WebSocket: heartbeats + RAM. If product usage is mostly idle tabs, short poll with a long interval or visibility-aware pausing (poll only when the tab is focused) can beat a permanent socket farm.
+  </Step>
+  <Step title="Name the first bottleneck you will hit">
+    App request QPS → leave short poll. Held connections through proxies → pressure-test long poll timeouts. Sticky sessions and gateway memory → budget for WebSockets via 11.01. Pick the mechanism whose bottleneck you can actually buy your way out of.
+  </Step>
+</Steps>
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Prefer short or long poll when"
+  againstTitle="Prefer WebSocket when"
+  forItems={[
+    "Freshness of tens of seconds is acceptable and you want zero sticky-connection machinery",
+    "Traffic is cacheable or CDN-friendly GETs and most clients are idle most of the time",
+    "The team already operates HTTP/JSON APIs and cannot yet run a connection gateway fleet",
+    "Client environments are hostile to persistent sockets (aggressive corporate proxies) and long poll has been proven through the same path",
+    "You need a progressive path: ship short poll this week, tighten interval or switch to long poll without a protocol rewrite",
+  ]}
+  againstItems={[
+    "Sub-second or continuous push is the product — chat, presence, multiplayer, collaborative editing",
+    "Event rate per waiting client is high enough that one HTTP completion per event wastes more CPU than holding a socket",
+    "Clients send frequently in both directions and you do not want a POST storm beside the receive path",
+    "You are already committed to connection gateways and a fan-out bus for other features, so marginal cost of another channel is low",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Do not recite definitions. Put numbers on the board: concurrent clients, freshness SLA, updates per second. Show that short poll cost is `C/interval`, long poll blends event completions with timeout renewals, and WebSocket cost is dominated by `C` connections. Then pick one and say what you will monitor — request QPS, held connections, or gateway RAM. Mention that long poll and WebSocket converge operationally once proxies and idle timeouts enter the chat (defer detail to 11.03 if time is short). Interviewers are listening for the cost model, not for "WebSockets are realtime."
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Short poll, long poll, and WebSocket all deliver updates; they differ in whether you pay per interval, per hold/completion, or per open connection",
+    "Short-poll QPS scales with concurrent clients divided by the interval — independent of how rare real events are",
+    "Long poll approaches push freshness but still completes an HTTP request per event or timeout, and holds one request per waiter",
+    "WebSocket shifts the scarce resource from request rate to connection state, heartbeats, and sticky routing",
+    "Write freshness (F), concurrency (C), and useful update rate (U) before choosing; the bottleneck you can afford picks the mechanism",
+    "Loose freshness plus idle clients often make short poll the cheapest correct design, not a legacy fallback",
+  ]}
+/>

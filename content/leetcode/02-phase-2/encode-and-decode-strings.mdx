@@ -1,0 +1,115 @@
+---
+title: "Encode and Decode Strings"
+number: "02.09"
+summary: "Joining with a delimiter fails when words contain the delimiter; length-prefix framing makes boundaries unambiguous."
+status: published
+free: true
+difficulty: core
+estMinutes: 13
+tags: [string, design]
+updated: "2026-09-15"
+---
+
+## Delimiters break when the payload contains them
+
+Design an encoder/decoder for a list of strings into one string and back. The input words can contain any characters — letters, digits, `#`, commas, Unicode — and the round trip must be lossless.
+
+The naive join `strs.join(',')` dies the moment a word contains a comma: `["hello,world", "foo"]` encodes ambiguously. Escaping helps but gets ugly when the escape character itself appears in data. Length-prefix framing sidesteps the ambiguity: store **how many characters follow**, then a separator, then exactly that many bytes — no scanning for terminators inside the payload.
+
+This is the same idea as TLV fields on the wire and length-prefixed protobuf strings: the reader never guesses where a field ends.
+
+## Length, delimiter, payload — repeat
+
+For each word `w`, append `len(w) + '#' + w`. The `#` separates the length digits from the payload only when lengths are written in decimal without `#` in the length itself — decimal length never contains `#`.
+
+Decoder walks the buffer:
+
+1. Read digits until `#` → length L.
+2. Skip `#`.
+3. Take the next L characters as one word.
+4. Continue from the byte after the payload.
+
+No backtracking, no escape rules, no dependence on alphabet.
+
+<Steps>
+<Step title="Encode: for each str, append String(len) + '#' + str">
+  Concatenate all encoded chunks into one string.
+</Step>
+<Step title="Decode: parse length until '#'">
+  Integer parse the prefix; advance past `#`.
+</Step>
+<Step title="Slice exactly len characters as the next word">
+  Push to result; move index forward by len.
+</Step>
+<Step title="Repeat until the buffer is exhausted">
+  Empty input list encodes to "" and decodes to [].
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function encode(strs: string[]): string {
+  return strs.map((s) => `${s.length}#${s}`).join("");
+}
+
+function decode(s: string): string[] {
+  const result: string[] = [];
+  let i = 0;
+
+  while (i < s.length) {
+    let j = i;
+    while (s[j] !== "#") j++;
+    const len = parseInt(s.slice(i, j), 10);
+    i = j + 1;
+    result.push(s.slice(i, i + len));
+    i += len;
+  }
+
+  return result;
+}
+```
+
+Time **O(N)** where N is the total number of characters across all strings — each character is written once and read once. Space **O(N)** for the encoded string and the output array.
+
+<Callout type="gotcha">
+Using a fixed delimiter without length — `join('|')` — fails when words contain `|`. Escaping every delimiter occurrence in every word works but decode must mirror escape rules exactly; one missed edge case corrupts every field after it. Length-prefix is simpler to prove correct.
+</Callout>
+
+<Tradeoff
+  forTitle="Length-prefix framing when"
+  againstTitle="Escape-based delimiters when"
+  forItems={[
+    "Payload can contain any character including the delimiter itself",
+    "You need a proof-sketchable format in an interview without a full escape spec",
+    "Total size is bounded and one linear scan decode is enough",
+    "Same pattern appears in RPC framing, Redis bulk strings, and netstring-style protocols",
+    "Words vary widely in length — storing decimal length cost is O(number of strings), negligible vs payload",
+  ]}
+  againstItems={[
+    "Alphabet is restricted and guaranteed not to contain the delimiter — CSV is fine",
+    "Human readability matters more than arbitrary bytes — JSON array of strings is acceptable overhead",
+    "Binary data with null bytes — use byte lengths and Uint8Array, not UTF-16 string lengths",
+    "Streaming protocol needs chunk boundaries without full length known upfront — delimiter or chunk headers differ",
+    "Extremely length-sensitive wire format — fixed-width length fields (4-byte big-endian) beat decimal digits",
+  ]}
+/>
+
+## In an interview
+
+Restate round-trip requirement with a malicious input: `["a#b", "##"]` must survive. Confirm empty list, empty strings in the list, and very long words.
+
+Draw one encoded example on the board: `3#cat4#dog#` style. Say decode never searches inside payload for structure — only reads L then L chars.
+
+Follow-ups: binary strings, serialize 2D string matrix, detect corrupted stream. Bug: using `split('#')` on the whole buffer — lengths and payloads get confused when `#` appears inside a word.
+
+<KeyTakeaways
+  items={[
+    "Encode and Decode Strings needs unambiguous boundaries — length-prefix plus payload beats naive join",
+    "Format per word: decimal length, '#', then exactly that many characters",
+    "Decode parses length, skips '#', slices len chars — O(total characters) time",
+    "Delimiter-based joins fail when delimiter appears in data unless you add escaping rules",
+    "Empty strings encode as '0#' — zero length, still unambiguous",
+    "The framing pattern generalizes to any serialized stream where fields are variable-length byte runs",
+  ]}
+/>

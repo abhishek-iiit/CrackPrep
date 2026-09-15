@@ -1,0 +1,165 @@
+---
+title: "URL Shortener"
+number: "01.01"
+summary: "A read-heavy redirect service where the write path is cheap and the redirect path must be fast, cacheable, and collision-free."
+status: published
+free: true
+difficulty: deep
+estMinutes: 20
+tags: [redirect, caching, id-generation]
+updated: "2026-09-15"
+---
+
+## Why interviewers ask for a URL shortener
+
+The prompt is small enough to finish in forty-five minutes and large enough to expose whether you think in actors and ratios. It has two paths with opposite economics: a creator who shortens a link a few times a day and a follower who hits that link thousands of times per second. That asymmetry forces caching, ID generation, and redirect semantics into the conversation whether you planned for them or not. It also rewards the clarification habit — naming actors and the read/write ratio before drawing — because the same product can mean analytics dashboards, custom aliases, and auth, or it can mean two endpoints and a redirect.
+
+## Clarify: two verbs, two latency budgets
+
+Batch the questions. You want a one-sentence problem statement back before you draw.
+
+**Functional — what must exist:**
+
+- Can anyone create a short link, or only logged-in users?
+- Is the short code auto-generated, user-chosen, or both? If custom, what happens on collision?
+- Does shortening return immediately, or can creation be async?
+- On redirect: permanent (301) or temporary (302)? That choice affects caching at browsers and CDNs.
+- Do we need click analytics (count, referrer, geo), and how fresh must that data be?
+- Can creators delete or expire links? Can ops block abusive links immediately?
+
+**Non-functional — what constrains how:**
+
+- Redirect latency target at p99 — 50 ms? 200 ms?
+- Availability for redirects — 99.9% is a common assumption; creation can be slightly weaker.
+- Durability — if we accept a write, the mapping must survive server restarts.
+- Uniqueness — two different long URLs must never map to the same short code; two identical long URLs might share one code (dedup) or not — ask.
+
+**Out of scope to declare early:** user accounts, link editing, QR codes, malware scanning, multi-region active-active, billing.
+
+A spoken script that lands the boundary:
+
+> "I'll design anonymous shorten-and-redirect with auto-generated codes, 301 redirects, and async click counting. Out of scope: custom domains, auth, and link editing — tell me if you want one of those instead."
+
+### Name the actors
+
+| Actor | Verb | Volume | Latency tolerance |
+| --- | --- | --- | --- |
+| Creator | POST long URL → short code | Low | Hundreds of ms OK |
+| Follower | GET short code → redirect | Enormous | Tens of ms at p99 |
+| Analytics viewer | Read counts | Low | Minutes stale OK |
+| Abuse/ops | Disable link | Rare | Must take effect quickly |
+
+The read/write ratio is the hinge. If redirects dominate, the design is a cache with a database behind it, not a database with a cache in front.
+
+## Capacity: assumptions you can multiply on a whiteboard
+
+State these as assumptions, not facts.
+
+| Assumption | Value | Why it matters |
+| --- | --- | --- |
+| New short URLs per month | 100M | Sets write rate and ID consumption |
+| Average redirect:write ratio | 500:1 | Makes this a read-path problem |
+| Peak factor on redirects | 3× average | Provision for peak, not mean |
+| Long URL stored | ~2 KB (2,048 bytes) | Row size in DB |
+| Short code length | 7 chars, base62 | ~3.5 trillion codes — enough headroom |
+| Retention | 5 years default TTL | Storage growth |
+| Analytics events | 1 per redirect, ~100 bytes | Separate write stream |
+
+**Write rate:** 100M / (30 × 86,400) ≈ **40 writes/s** average, ~**120/s at peak** — trivial for one primary.
+
+**Read rate:** 40 × 500 = 20,000/s average → **~60,000 redirects/s at peak**. That number justifies a CDN edge cache and an in-memory layer; a single Postgres without cache does not survive it.
+
+**Storage (5 years):** 100M/month × 60 months = 6B mappings. At ~2.5 KB per row (long URL + metadata + indexes), **~15 TB** — partition by short-code hash or time bucket.
+
+**Analytics ingest:** ~60k events/s at peak if every redirect is counted. Batch to a queue and aggregate asynchronously; do not write one row per click on the redirect hot path.
+
+<Callout type="gotcha">
+Redirect and create have different consistency needs. A follower hitting a link milliseconds after creation must see it — route the creator's own first redirect to the primary or invalidate the cache entry on write. Analytics can lag; redirects cannot.
+</Callout>
+
+## High-level design: cache-first redirect, durable mapping store
+
+| Component | Role |
+| --- | --- |
+| API / redirect servers | Stateless; handle POST /urls and GET /{code} |
+| ID service | Generates unique short codes (or encodes a counter) |
+| SQL primary | Durable mapping: short_code → long_url, created_at, expiry |
+| Redis cache | Hot path: code → long_url; ~99%+ hit rate at steady state |
+| CDN | Cache 301 responses for anonymous followers at the edge |
+| Analytics pipeline | Queue → stream processor → columnar store / rollup tables |
+
+<Steps>
+<Step title="Create — POST /api/v1/urls">
+
+Client sends `{ "long_url": "https://..." }`. API validates URL (length, scheme, blocklist). ID service returns a unique code — base62 encoding of a 64-bit ID or a random 7-char string with collision retry. Insert row in SQL primary. Optionally warm Redis with the new mapping. Return `{ "short_url": "https://short.ly/abc1234" }`. Target p99 under 200 ms; this path is not cache-critical.
+
+</Step>
+<Step title="Redirect — GET /{code}">
+
+Request hits CDN first. On miss, redirect server checks Redis. On hit, issue 301 with `Location` header — sub-millisecond inside the datacenter. On miss, read SQL (or read replica), populate Redis with TTL, redirect. Never block redirect on analytics — emit an async event to the queue after responding.
+
+</Step>
+<Step title="Analytics — async">
+
+Consumer reads click events (code, timestamp, referrer, IP). Aggregate into hourly rollups for dashboards. Stale by a few minutes is acceptable; the redirect already completed.
+
+</Step>
+</Steps>
+
+## Deep dive: short codes and the hot read path
+
+### Generating collision-free codes
+
+Three approaches interviewers expect you to compare:
+
+1. **Auto-increment counter + base62.** A dedicated ID service (or DB sequence) increments; you encode the integer as a 7-character string. Pros: no collision handling, roughly sortable by time. Cons: single writer bottleneck at extreme scale — sharded counters or 01.05 Unique ID Generator patterns (Snowflake) fix that.
+2. **Random base62 + retry on collision.** Generate 7 random chars; on unique-index violation, retry. At 6B codes in 3.5T space, collision probability stays negligible until the table is very full.
+3. **Hash of long URL (MD5 truncated).** Dedupes identical URLs automatically. Cons: preimage attacks and predictable codes if input space is small — usually rejected unless dedup is an explicit requirement.
+
+Pick one and say why. For a classic interview, counter + base62 is the cleanest story.
+
+### Cache key design and invalidation
+
+Key: `url:{code}` → long URL string. TTL: match link expiry or a cap (e.g. 24 h) so deleted links fall out. On delete/block: delete Redis key synchronously before acknowledging ops — stale cache here means serving a banned URL. CDN 301 caching is harder to purge; use shorter CDN TTL (minutes) for links ops might block, or 302 if instant revocation matters more than edge performance.
+
+### Database schema and indexing
+
+Primary key on `short_code` (fixed length, hash index friendly). Secondary index on `long_url` only if dedup is required — it doubles write cost. Partition by hash prefix of code when row count exceeds single-node comfort (~100M+ rows per shard).
+
+## Tradeoffs
+
+<Tradeoff
+  forTitle="301 + CDN edge cache when"
+  againstTitle="302 + short CDN TTL when"
+  forItems={[
+    "Followers are anonymous and repeat hits on popular links dominate — edge cache cuts origin load by orders of magnitude",
+    "Links rarely change or get revoked — a day-long CDN TTL is acceptable",
+    "You need minimum origin QPS — 60k/s at peak cannot all hit Redis",
+    "SEO and bookmark semantics favor permanent redirects",
+    "Analytics are async anyway — a cached redirect does not skip counting if you emit the event at the edge or on first origin hit",
+  ]}
+  againstItems={[
+    "Ops must disable abusive links within seconds — CDN-cached 301s are painful to purge",
+    "A/B destination testing or rotating landing pages requires mutable targets",
+    "Authenticated redirects where the destination depends on the viewer",
+    "Compliance requires guaranteed fresh lookup on every click",
+    "You accept higher origin load in exchange for instant revocation",
+  ]}
+/>
+
+## In an interview
+
+Open with the ratio: "This is a read-heavy redirect service — I'll assume roughly 500 redirects per create and design the redirect path first." Spend three to five minutes on clarify, then capacity in two minutes with round numbers on the whiteboard. Draw CDN → redirect tier → Redis → SQL for reads, and a separate small write path through an ID service.
+
+Follow-ups to expect: custom aliases (unique index + user_id), how to scale past one Redis (hash partitioning by code prefix), what happens when Redis dies (fall through to SQL — slower but correct), and collision handling for random codes. Volunteer the failure mode: "If I cache before the SQL commit completes, a fast follower could 404 — so I write-through to Redis after the transaction commits, or the creator's first hit bypasses cache."
+
+<KeyTakeaways
+  items={[
+    "URL shortening is a read-path problem — clarify the redirect:create ratio before choosing storage; 500:1 pushes CDN and Redis to the center of the diagram",
+    "Two actors, two latency budgets: creators tolerate hundreds of milliseconds; followers need tens of milliseconds at p99 on redirect",
+    "Generate short codes with a counter + base62 or random base62 + unique index; say explicitly how you avoid and detect collisions",
+    "Never block redirect on analytics — emit click events asynchronously after issuing the 301",
+    "301 plus CDN caching is the performance choice; 302 plus short TTL is the revocation choice — pick based on whether ops must kill links instantly",
+    "Capacity math to own: ~40 creates/s and ~60k redirects/s at peak for 100M new links/month at 500:1 — storage ~15 TB over five years at 2 KB per row",
+  ]}
+/>

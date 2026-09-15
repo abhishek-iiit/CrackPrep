@@ -1,0 +1,118 @@
+---
+title: "Design Add and Search Words Data Structure"
+number: "02.22"
+summary: "Exact-match tries fail on '.' wildcards; DFS at wildcard nodes explores every branch while still pruning dead prefixes."
+status: published
+free: true
+difficulty: core
+estMinutes: 15
+tags: [trie, dfs, design]
+updated: "2026-09-15"
+---
+
+## Exact match is not enough — '.' breaks the walk
+
+Design a structure supporting `addWord(word)` and `searchWord(word)` where `'.'` matches any single letter. Example: after adding `"bad"` and `"dad"`, `search(".ad")` must return true (matches both), but `search("b..")` matches `"bad"` only if such a word exists.
+
+A hash set gives O(1) exact lookup but cannot handle wildcards — you would scan every stored word and compare character by character, O(N × L) per query. A plain trie handles `search("bad")` in O(L), but a `'.'` at position 0 means the root has 26 possible first steps. One wildcard does not explode to checking all words; it explodes to checking all **children at that node**. Two wildcards in a 7-letter pattern can still be manageable; the trie prunes any branch where the next literal character has no child.
+
+## Trie plus DFS at wildcards
+
+Build the same trie as 02.21 Implement Trie Prefix Tree. `addWord` is `insert`. `searchWord` walks the trie recursively:
+
+- Literal character: follow that child; fail if missing.
+- `'.'`: try **every** existing child from the current node.
+- At end of pattern: return `node.isEnd`.
+
+The invariant: when the recursion is at `(node, index)`, the path from root to `node` matches `word[0..index)`.
+
+<Steps>
+<Step title="addWord — standard trie insert">
+  One node per character; mark isEnd on the last node.
+</Step>
+<Step title="searchWord — recursive dfs(node, i)">
+  Base case: i === word.length → return node.isEnd. If word[i] is literal, descend one child. If '.', OR the results of dfs on each child.
+</Step>
+<Step title="Pruning happens automatically">
+  A literal mismatch returns false immediately; dead subtrees are never entered.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+class WordNode {
+  children: Map<string, WordNode> = new Map();
+  isEnd = false;
+}
+
+class WordDictionary {
+  private root = new WordNode();
+
+  addWord(word: string): void {
+    let node = this.root;
+    for (const ch of word) {
+      if (!node.children.has(ch)) node.children.set(ch, new WordNode());
+      node = node.children.get(ch)!;
+    }
+    node.isEnd = true;
+  }
+
+  search(word: string): boolean {
+    return this.dfs(this.root, word, 0);
+  }
+
+  private dfs(node: WordNode, word: string, i: number): boolean {
+    if (i === word.length) return node.isEnd;
+    const ch = word[i];
+    if (ch === '.') {
+      for (const child of node.children.values()) {
+        if (this.dfs(child, word, i + 1)) return true;
+      }
+      return false;
+    }
+    if (!node.children.has(ch)) return false;
+    return this.dfs(node.children.get(ch)!, word, i + 1);
+  }
+}
+```
+
+`addWord` is **O(m)**. `searchWord` is **O(26^k × m)** worst case where k is wildcard count — linear in word length per branch, branching factor up to 26 per `.`. With few wildcards and sparse tries, practical performance is much better.
+
+<Tradeoff
+  forTitle="Trie + DFS when"
+  againstTitle="Scan all words when"
+  forItems={[
+    "Wildcards are sparse — most characters are literals that prune the search tree early",
+    "Many words share prefixes — you do not re-compare shared stems on every query",
+    "Word length m is bounded (≤ 25 on LeetCode) — recursion depth is safe",
+    "Adds are frequent and must stay O(m) — rebuilding a list on each add is wasteful",
+    "Follow-up may add more patterns — the trie generalizes to prefix and board search",
+  ]}
+  againstItems={[
+    "No wildcards ever — hash set or plain trie search is O(m) with no branching",
+    "Every query is mostly wildcards — you approach checking every leaf anyway",
+    "N is tiny (under 100 words) — linear scan is simpler and fast enough",
+    "Memory is extremely constrained — trie node overhead beats a flat string array",
+    "Interviewer wants the brute force first to show you understand the wildcard cost",
+  ]}
+/>
+
+## In an interview
+
+Clarify: `'.'` matches exactly one letter, not zero or many. Multiple `'.'` are allowed. Empty string is usually not in scope.
+
+Start with the trie from 02.21 — do not rewrite insert. Explain that `search` becomes DFS because a wildcard is a **branching point**, not a failed match. Draw `".ad"` hitting root → try b, d, … → `'b'` child continues to `'a'` → `'d'` → check isEnd.
+
+Proactive bug: returning true when you reach the end of the pattern without checking `isEnd` — `"ba"` would match `"bad"` incorrectly. Another: treating `'.'` as "skip this character" without consuming a node — wildcards still advance one level in the trie.
+
+Follow-ups: add `delete`, support `'*'` matching any suffix, or combine with board DFS (02.23 Word Search II).
+
+<KeyTakeaways items={[
+  "Store words in a trie; addWord is identical to trie insert from 02.21.",
+  "Wildcard search is DFS on the trie — at '.', try every child; at a literal, follow one child.",
+  "The base case checks isEnd, not merely reaching the end of the pattern string.",
+  "Literal characters prune aggressively; cost explodes only where wildcards force multi-way branching.",
+  "Worst-case search is exponential in wildcard count but linear in dictionary size is avoided when prefixes differ early.",
+  "Without wildcards, skip DFS entirely — a straight trie walk is O(m).",
+]} />

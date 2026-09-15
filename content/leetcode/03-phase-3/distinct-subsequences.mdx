@@ -1,0 +1,100 @@
+---
+title: "Distinct Subsequences"
+number: "03.28"
+summary: "Count ways to pick characters of s in order to spell t — each dp step either skips s[i-1] or pairs it with t[j-1] when they match."
+status: published
+free: true
+difficulty: deep
+estMinutes: 18
+tags: [dynamic-programming, string]
+updated: "2026-09-15"
+---
+
+## Order preserved, characters optional
+
+Given strings `s` and `t`, return the number of **distinct subsequences** of `s` that equal `t`. A subsequence deletes zero or more characters without reordering — `"rabb"` has `"rab"` twice from different index choices.
+
+Brute force — enumerate all 2^|s| subsequences — dies at |s| = 1000. The count obeys the same prefix structure as 03.27 Edit Distance: **`dp[i][j]`** = ways to form `t[0..j-1]` using characters from `s[0..i-1]`.
+
+When `s[i-1] !== t[j-1]`, you must skip that character of `s`: `dp[i][j] = dp[i-1][j]`. When they match, either skip or use the match: `dp[i][j] = dp[i-1][j] + dp[i-1][j-1]`. Base: empty `t` is formable in exactly one way from any prefix of `s` — `dp[i][0] = 1`.
+
+The traps: 32-bit overflow on large counts (LeetCode accepts 64-bit in practice for this problem); confusing with counting distinct **substrings**; forgetting that non-matching characters still propagate `dp[i-1][j]`.
+
+## Fill the table
+
+Initialize column 0 to 1. Double loop `i` over `s`, `j` over `t`. Apply the skip/use recurrence. Return `dp[m][n]`.
+
+<Steps>
+<Step title="Set dp[i][0] = 1 for all i">
+Empty target string t is matched by deleting all of s — one way.
+</Step>
+<Step title="If s[i-1] === t[j-1], add dp[i-1][j-1]">
+Using this match is optional — add to ways that skip s[i-1].
+</Step>
+<Step title="Always carry dp[i-1][j]">
+Every character of s can be ignored.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function numDistinct(s: string, t: string): number {
+  const m = s.length;
+  const n = t.length;
+  const dp = Array.from({ length: m + 1 }, () => new Array(n + 1).fill(0));
+
+  for (let i = 0; i <= m; i++) dp[i][0] = 1;
+
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      dp[i][j] = dp[i - 1][j];
+      if (s[i - 1] === t[j - 1]) {
+        dp[i][j] += dp[i - 1][j - 1];
+      }
+    }
+  }
+
+  return dp[m][n];
+}
+```
+
+Time **O(m · n)**. Space **O(m · n)**, or **O(n)** with a single row iterated carefully (fill j descending when reusing one row).
+
+<Tradeoff
+  forTitle="2D counting DP when"
+  againstTitle="Recursion + memo / generating subsequences when"
+  forItems={[
+    "|s| and |t| up to 1000 — O(mn) is the standard solution",
+    "You need exact count of alignments, not existence — boolean DP from 01.20 Word Break is insufficient",
+    "Same table geometry as 03.27 Edit Distance but addition replaces min",
+    "Duplicate characters in s matter — index choices are distinct even when letters repeat",
+    "Space can shrink to one row if interviewer asks",
+  ]}
+  againstItems={[
+    "|s| is tiny (≤ 20) — enumerate subsets for intuition before optimizing",
+    "Ask is only whether count > 0 — early-exit DP or two-pointer greedy on sorted unique chars",
+    "Need to list all matching subsequences — backtrack from full table, not count alone",
+    "03.29 Interleaving String asks existence of one interleaving — boolean DP is simpler",
+    "Modulo arithmetic required at scale — mention if follow-up uses large primes",
+  ]}
+/>
+
+## In an interview
+
+Example: `s = "rabbbit"`, `t = "rabbit"` → 3 (three ways to choose which `b` to drop). Clarify subsequence vs substring; distinct index choices count separately.
+
+State `dp[i][j]` aloud before coding. Emphasize `dp[i][0]=1` — empty t always reachable.
+
+Follow-ups: modulo 10⁹+7, space optimization, return one witness subsequence. Bug: initializing `dp[0][j]` to 1 for j>0 — only empty t has one way.
+
+<KeyTakeaways
+  items={[
+    "Distinct Subsequences counts alignments: dp[i][j] = ways to form t's prefix from s's prefix",
+    "Non-match: dp[i][j] = dp[i-1][j] — always allowed to skip s[i-1]",
+    "Match: add dp[i-1][j-1] to count ways that use s[i-1] for t[j-1]",
+    "Base dp[i][0] = 1 for all i — empty t from any s prefix has exactly one subsequence",
+    "O(m·n) time; related to 03.27 Edit Distance table but sums instead of minimizing cost",
+    "Repeated letters in s create multiple distinct index choices — do not deduplicate by character value",
+  ]}
+/>

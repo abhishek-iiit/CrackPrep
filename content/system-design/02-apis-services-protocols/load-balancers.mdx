@@ -1,32 +1,90 @@
 ---
 title: "Load Balancers"
 number: "02.06"
-summary: "Load Balancers — notes in progress."
-status: draft
+summary: "'Alive' and 'able to serve this request well' are different claims, and an algorithm that can't tell them apart keeps feeding a struggling replica."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [load-balancing, health-checks, availability, routing]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The problem: "healthy" and "about to fall over" look identical to a shallow check
 
-What breaks without this, and the situation that forces the decision.
+Once a service has more than one instance behind it, every incoming request needs an answer to "which one" — and a naive answer works fine until an instance degrades rather than dies outright. A crashed process is the easy case: it stops accepting connections, and anything watching for that can route around it immediately. A struggling process is the actual hard case — it's still accepting TCP connections, still returning 200s from its health endpoint, and quietly taking 8 seconds to do what its siblings do in 80 milliseconds because a downstream dependency it needs is degraded. A load balancer that can only tell "alive" from "dead" keeps sending it an equal share of traffic, and the fleet's overall latency degrades by exactly the fraction of traffic aimed at the sick instance — which, under round robin, is 1/N no matter how sick it is.
 
-## How it works
+That's the actual job description: distribute load across a pool of interchangeable replicas, using both an algorithm for the common case and a mechanism for noticing when a replica stops behaving like the others.
 
-The mechanism, step by step.
+## Where the decision gets made: L4 vs L7
 
-## Tradeoffs
+A load balancer operating at L4 (transport layer) forwards based on IP and port without inspecting the payload — fast and protocol-agnostic, but unable to route on anything inside the request, like a URL path or a header. An L7 load balancer terminates and parses far enough into the request to route on that content: path-based routing, header-based routing, even cookie-based session affinity. L7 costs more CPU per request, since it has to parse the protocol, and adds a hop where TLS is typically terminated, but it's what makes path-based routing and the gateway-adjacent behaviors in 02.05 API Gateway vs Load Balancer possible in the first place.
+
+## Picking an algorithm
+
+<Steps>
+  <Step title="Round robin (or weighted round robin)">
+    Send request N+1 to the next server in the list, cycling through. Weighted round robin gives faster or larger instances a proportionally bigger share. Simple, and correct when every request costs about the same and every instance is equally capable — it says nothing about how loaded an instance currently is, only whose turn it is.
+  </Step>
+  <Step title="Least connections">
+    Send the request to whichever backend currently has the fewest open connections. This adapts to uneven request cost automatically — an instance stuck on a few slow requests naturally gets fewer new ones, because its connection count stays high. It needs the balancer to track live connection counts per backend, which round robin doesn't require at all.
+  </Step>
+  <Step title="Least response time / power-of-two-choices">
+    Pick based on observed latency rather than just connection count, or, a common cheap approximation, sample two backends at random and send the request to whichever of the two is less loaded. Power-of-two avoids the cost of tracking exact global state across every backend while still avoiding round robin's blindness to load.
+  </Step>
+  <Step title="Hash-based routing">
+    Route by a hash of some request property — client IP, a session cookie, a resource key — so the same input consistently lands on the same backend. Necessary whenever a backend holds state a repeat request wants to reuse. 02.07 Consistent Hashing Load Balancing covers what happens to this scheme when the backend pool itself changes size.
+  </Step>
+</Steps>
+
+| Algorithm | Adapts to uneven request cost? | Needs live backend state? | Good fit |
+| --- | --- | --- | --- |
+| Round robin | No | No | Uniform request cost, uniform instance capacity |
+| Weighted round robin | Partially (via static weights) | No | Uniform cost, heterogeneous instance sizes |
+| Least connections | Yes | Yes (open connection count) | Variable request duration |
+| Least response time / P2C | Yes, and more precisely | Yes (latency samples) | High-variance request cost, large fleets |
+| Hash-based | No — that's not its job | No | Session affinity, cache locality |
+
+## Telling a replica is actually healthy
+
+Health checks come in two flavors, and most production setups run both. **Active** checks poll an endpoint on a fixed interval and eject a backend that fails enough consecutive checks. **Passive** checks watch real traffic — a backend returning a run of 5xxs or timing out gets ejected without waiting for the next scheduled probe, which reacts faster but only after some live requests have already paid for the failure.
+
+<Callout type="gotcha">
+A TCP-level or shallow HTTP health check only proves the process is alive and listening — it says nothing about whether the process can actually do its job. A common failure: the health endpoint returns 200 because the web server is up, while the database connection pool behind it is exhausted and every real request times out. The fix is a health check that actually exercises the dependency — pings the database, checks the cache connection — not just the process's own liveness. Cheap to skip, and exactly the gap that turns a partial outage into every replica quietly failing while the load balancer insists everything is green.
+</Callout>
+
+Health checks that are too aggressive create their own failure mode: an interval short enough, or a failure threshold low enough, that a brief GC pause or a momentary network blip ejects a perfectly healthy instance. If enough instances flap out simultaneously under shared load pressure, the survivors absorb the redistributed traffic and fail too — a thundering-herd cascade the health check caused rather than caught.
+
+Session affinity, "sticky sessions," is the other mechanism worth naming directly: routing a client to the same backend on every request, usually via a cookie, so session state held only on that instance stays reachable. It's a shortcut that avoids externalizing session state, and it costs evenness of load — a backend with a disproportionate share of long-lived sticky sessions can't be rebalanced without breaking those sessions — and it complicates scaling down, since you can't just remove an instance; you have to drain its sticky sessions first. Most systems that scale past a modest size move session state to a shared cache instead and drop stickiness entirely.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Reach for connection- or latency-aware balancing (least connections, P2C) when"
+  againstTitle="Round robin is enough when"
+  forItems={[
+    "Request cost varies significantly — some requests take milliseconds, others take seconds, on the same pool",
+    "Instance capacity is heterogeneous, or degrades unevenly under real load rather than failing cleanly",
+    "The fleet is large enough that even a small fraction of misrouted traffic to a struggling node matters",
+    "You already have the infrastructure to track live connection counts or latency samples per backend",
+  ]}
+  againstItems={[
+    "Requests are roughly uniform in cost and every instance is provisioned identically",
+    "Simplicity and predictability of routing matter more than squeezing out uneven-load edge cases",
+    "The pool is small enough that a health check ejecting a bad instance outright is fast enough to matter more than fine-grained load awareness",
+    "You don't yet have visibility into per-backend load, and building it isn't worth it at current scale",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Pick the algorithm from the actual traffic shape, out loud: "requests here range from a 5 ms cache hit to a 2-second report generation, so round robin would send an equal share to whichever instance is buried under slow requests — I'd use least connections instead." Then name the health check gap before being asked: a shallow liveness check will keep routing to an instance whose database connection is exhausted, so the check needs to exercise the real dependency, not just confirm the process is listening.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "A load balancer's job splits into two parts: an algorithm for the common case, and a mechanism for noticing when a replica stops behaving like its siblings",
+    "Round robin assumes uniform request cost; when that assumption breaks, it sends an equal share of traffic to a struggling instance regardless of how struggling it is",
+    "Least connections and least response time adapt to uneven load by tracking live backend state, at the cost of that state actually being maintained accurately",
+    "A shallow health check only proves the process is listening — it has to exercise the real dependency chain to catch the case where the process is up but the database behind it isn't",
+    "Overly aggressive health checks can eject healthy instances and cause a thundering-herd cascade among the survivors, turning a monitoring mechanism into the outage",
+    "Sticky sessions trade even load distribution and easy scale-down for avoiding externalized session state — most systems past a modest scale externalize the state instead",
+  ]}
+/>

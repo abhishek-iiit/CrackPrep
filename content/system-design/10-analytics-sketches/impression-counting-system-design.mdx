@@ -1,32 +1,89 @@
 ---
 title: "Impression Counting System Design"
 number: "10.03"
-summary: "Impression Counting System Design — notes in progress."
-status: draft
+summary: "Counting ad or feed impressions under fraud, uniqueness windows, and billing pressure — where approximate display math and exact settlement paths must diverge."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 14
+tags: [impressions, ads, counters, fraud]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Impression is a view with money attached
 
-What breaks without this, and the situation that forces the decision.
+A content view can be wrong by a few percent and the product still works. An ad impression often cannot. Someone is paying per thousand impressions, a campaign budget caps spend, and a publisher gets paid on delivered volume. The write rate looks like view counting — high cardinality of creative ids, bursty traffic, hot campaigns — but the consumer of the number is a ledger, not a badge next to a thumbnail.
 
-## How it works
+That changes the architecture before any sketch enters the picture. You still need the throughput tricks from 10.01 Counting At Scale and 10.02 View Counting At Scale: do not lock one row per impression event. You also need a path that can answer "how many billable impressions did creative X deliver between 14:00 and 15:00 UTC" with an auditable trail, which a lossy in-memory counter alone will never give you.
 
-The mechanism, step by step.
+## Two pipelines sharing one event
 
-## Tradeoffs
+The durable design almost always splits **ingestion** from **settlement**.
+
+<Steps>
+  <Step title="Emit an impression event once, with enough identity to dedupe">
+    On render (or on a validated viewability signal), write an event: campaign id, creative id, placement, user or device id, timestamp, and a request id. Prefer append-only storage — a log or event bus — over updating a counter in the request path. The request returns after the event is accepted locally or acknowledged by the log; it does not wait for billing math.
+  </Step>
+  <Step title="Apply fraud and validity filters before the count that money sees">
+    Bot scores, impossible geography, stacked iframes, below-the-fold never-viewable inventory — these drop or quarantine events. Filtering after a counter has already incremented forces expensive negative adjustments. Filtering on the stream before settlement keeps the money counter monotonic in the direction you want.
+  </Step>
+  <Step title="Dedupe inside a uniqueness window">
+    Contracts often say "one countable impression per user per creative per N minutes" or similar. That is an exact membership question for the window, not a HyperLogLog estimate. For short windows and bounded keys, a Redis set or a Bloom filter of recent `(user, creative)` pairs can absorb the check — 04.13 Bloom Filters fits when a false positive only skips a countable impression (slight undercount), which is usually safer for the buyer than a false negative that double-charges. For strict contractual uniqueness, use an exact structure or a deterministic store keyed by the dedupe tuple.
+  </Step>
+  <Step title="Aggregate into time buckets for serving and billing">
+    Roll valid events into per-creative, per-minute or per-hour counters — 10.06 Bucketed Time Window Aggregation — and keep the raw or filtered event log long enough to re-aggregate when definitions change. Real-time dashboards read the buckets; invoices read a settled daily aggregate produced by a batch job that can be replayed.
+  </Step>
+</Steps>
+
+Approximate structures still belong on the **ops and product** side: "roughly how many impressions is this campaign pacing toward right now," unique reach estimates via HyperLogLog, heavy creative detection via 10.08 Count-Min Sketch. They do not replace the settlement counters.
+
+<Callout type="warn">
+Mixing "viewable impression," "rendered impression," and "billed impression" into one counter is a recurring incident class. Each definition has different filters and different contractual meaning. Name the metric in the schema (`impression_rendered`, `impression_viewable`, `impression_billable`) and never let a dashboard silently switch which one it sums.
+</Callout>
+
+## Capacity shape that shows up in interviews
+
+Order-of-magnitude, not a benchmark: a large feed can produce tens of thousands of impression events per second at peak. If each event is a few hundred bytes on the wire and you retain raw events for 30–90 days for dispute, storage and scan cost dominate long before counter memory does. That is why derived buckets exist — so routine queries never scan the raw log — and why 10.07 Raw Events Vs Derived Analytics is part of this design rather than an afterthought.
+
+| Path | Exactness | Latency | Typical consumer |
+| --- | --- | --- | --- |
+| Request-path buffer / Redis INCR | Best-effort | Milliseconds | Pacing UI, rate limits |
+| Stream + filtered aggregates | High, replayable | Seconds to minutes | Ops dashboards |
+| Daily settlement job | Audited | Hours | Invoices, partner reports |
+| Reach / unique estimates (HLL) | Approximate | Seconds | Planning, frequency caps (soft) |
+
+Frequency capping ("show this ad at most 3 times per user per day") sits between these rows. Soft caps can use sketches or eventually consistent counters; hard caps that affect spend need exact or strongly consistent per-user state, which does not scale the same way as global campaign totals — shard by user, not by campaign, for that state.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Split hot approximate counters from settlement when"
+  againstTitle="Count only in one exact store when"
+  forItems={[
+    "Impression volume is high enough that per-event database updates cannot keep up",
+    "Billing, disputes, or partner audits require replayable filtered event history",
+    "Fraud and viewability rules change and past deliveries may need reclassification",
+    "Product dashboards can tolerate seconds of lag while money waits for a settled batch",
+    "Uniqueness windows and frequency caps need different consistency than global campaign totals",
+  ]}
+  againstItems={[
+    "Volume is small and a single transactional counter meets both UI and invoice needs",
+    "There is no durable event log — approximate counters then become the only truth and cannot be audited",
+    "Legal or contractual language demands unit-accurate counts with no separate settlement path",
+    "You cannot operationally run two definitions of 'impression' without confusing operators",
+    "The business only needs a display badge, not billable delivery — then 10.02 View Counting At Scale is the lighter fit",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Separate money from chrome immediately: "I will append impression events, filter for fraud and viewability, dedupe by contract window, then aggregate into time buckets for dashboards and a replayable settlement job for billing — the request path never updates the invoice counter directly." Be ready to say where Bloom filters or exact sets enforce uniqueness, where HyperLogLog estimates reach, and why Count-Min Sketch helps find hot creatives without storing every key. The follow-up is usually fraud or double-counting: walk the idempotency key (`request_id` or `(user, creative, window)`) and state whether a false positive undercounts or overcounts under your choice of structure.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Impression counting inherits view-counting write pressure but adds contractual exactness — approximate display counters and auditable settlement must be separate paths",
+    "Append events first, filter for fraud and viewability, then aggregate; incrementing a money counter in the request path makes corrections and disputes painful",
+    "Uniqueness windows are membership problems — exact sets or carefully biased Bloom filters — not HyperLogLog estimates",
+    "Time-bucketed aggregates serve dashboards; raw or filtered logs exist so settlement can be replayed when definitions change",
+    "Name metric variants explicitly (rendered vs viewable vs billable) — collapsing them into one counter is a common production failure",
+    "Sketches belong on pacing, reach, and heavy-hitter detection; invoices belong on replayable aggregates built from filtered events",
+  ]}
+/>

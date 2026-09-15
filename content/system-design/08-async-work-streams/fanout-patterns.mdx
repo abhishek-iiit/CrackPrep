@@ -1,32 +1,100 @@
 ---
 title: "Fanout Patterns"
 number: "08.09"
-summary: "Fanout Patterns — notes in progress."
-status: draft
+summary: "Push, pull, and hybrid fan-out — when to write N copies at write time versus merge at read time, and how follower count flips the decision."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 15
+tags: [fanout, feeds, async, push-pull]
+updated: "2026-09-15"
 ---
 
-## The problem
+## One write, many readers — pay now or pay later
 
-What breaks without this, and the situation that forces the decision.
+Fan-out is the shape that appears whenever one event must become visible to many consumers: a post into every follower's feed, a notification to every device on an account, an inventory change into every regional cache. The producer emits once. The system must still decide *when* the N copies or N notifications get materialized — at write time (push), at read time (pull), or some hybrid of both.
 
-## How it works
+Wrong choice does not usually throw an error. It shows up as write latency that climbs with celebrity follower counts, or as read latency that climbs with timeline length, or as a queue that never drains after a viral post (08.04 Queue Lag). The decision is a cost-accounting problem dressed as an architecture diagram.
 
-The mechanism, step by step.
+Social feeds are the textbook case — 11.07 Feed Generation Push Pull Hybrid goes deep on that product — but the same three patterns apply to any "one fact, many inboxes" problem, including cache invalidation fan-out and multi-subscriber notification delivery.
 
-## Tradeoffs
+## Three patterns, one hinge
+
+The hinge number is **fan-out cardinality**: how many destinations does a typical write hit, and how skewed is the distribution?
+
+**Push (fan-out on write).** On publish, enqueue work that writes the item into each follower's precomputed inbox or timeline store. Reads become cheap — load the inbox, maybe merge a small live tail. Writes become expensive in proportion to destination count. A user with 100 followers is fine; a user with 10 million followers turns one HTTP request into millions of inbox writes unless you bound and async it carefully (08.01 Delegation And Async Work).
+
+**Pull (fan-out on read).** Store the post once. On read, fetch the viewer's follow graph, pull recent posts from those authors, and merge-sort. Writes stay O(1). Reads cost O(following) with a latency cliff as graphs grow, and you need aggressive caching of author timelines to stay inside a few hundred milliseconds at p99.
+
+**Hybrid.** Push for the common case (normal accounts, bounded follower counts). Pull or "skip push" for outliers (celebrities, brands). The viewer's feed becomes: precomputed inbox for ordinary follows, plus a live pull for a small set of high-fan-out authors. Most production feed systems land here once the follower distribution goes heavy-tailed — and consumer social graphs always do.
+
+| | Push | Pull | Hybrid |
+| --- | --- | --- | --- |
+| Write cost | O(destinations) | O(1) | O(destinations) for normal; O(1) for celebrities |
+| Read cost | O(page size) from inbox | O(following) merge | Inbox + small celebrity merge |
+| Failure mode | Write amplification; queue lag after viral posts | Slow timelines; thundering reads on popular authors | Complexity: two paths must stay consistent enough |
+| Best fit | Low/medium cardinality, read-heavy | Write-heavy or extremely skewed destinations | Real social graphs with a celebrity tail |
+
+## Making push survivable
+
+Push without a queue is how you couple publish latency to follower count. The request path should persist the post and enqueue a fan-out job (or emit an event — 08.03 Event Bus For Product Events), then return. Workers walk the follower list in chunks, write inbox rows in batches, and respect 02.11 Backpressure when the inbox store or the queue starts falling behind.
+
+Chunking matters. A single job that tries to write 2 million inbox rows will hold a lease forever, fail mid-way, and retry from scratch unless you checkpoint progress (last follower cursor). Treat celebrity fan-out as a workflow of chunks — closer to 08.07 DAG Workflow Orchestration than to one fire-and-forget message — or do not push those authors at all.
+
+Idempotency is mandatory. At-least-once delivery of fan-out jobs means the same post can be written to the same inbox twice; the inbox key should be `(viewer_id, post_id)` so duplicates collapse. 02.09 Retries Timeouts And Idempotency applies to every chunk, not just the parent job.
+
+<Callout type="warn">
+Push fan-out multiplies storage. One post stored once in a canonical posts table is cheap; one post copied into 500k inboxes is 500k rows, indexes, and later deletes when the post is removed or the viewer unfollows. Budget for write amplification *and* for the delete/repair path — orphaned inbox rows are how feeds show posts that "shouldn't be there" weeks after an unfollow.
+</Callout>
+
+## Making pull fast enough
+
+Pull only works inside a latency budget if author timelines are cheap to fetch. Cache each author's recent posts (05.01 Caching Layers), bound how far back you merge, and stop when you have filled the page. Do not pull the entire history of every followee on every home request — that design works in a demo with 20 follows and dies in production with 2,000.
+
+The other pull hazard is the popular author: millions of viewers refreshing means millions of identical fetches of the same timeline. Cache that timeline aggressively; the celebrity skip-list in a hybrid design exists partly so those fetches are shared work rather than per-viewer inbox writes.
+
+## How to choose in practice
+
+Ask three questions in order:
+
+1. **What is p50 / p99 destination count per write?** If p99 is tens or low hundreds, push is usually simpler and reads stay fast. If p99 is hundreds of thousands, pure push needs serious async infrastructure or will melt.
+2. **What is the read/write ratio on the fan-out surface?** Feeds are often 100:1 or worse reads-to-writes — that favors paying at write time when cardinality allows it.
+3. **How skewed is the graph?** If the top 0.1% of authors account for a huge fraction of total edge crossings, hybrid is not optional; it is how you stop optimizing for the median while the tail burns the fleet.
+
+Notifications and device fan-out follow the same logic with different constants: a user with three devices is push; a broadcast to every user in a country is a campaign system with batching and rate limits, not a per-row inbox write storm.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Prefer push (or hybrid-push) when"
+  againstTitle="Prefer pull (or hybrid-pull) when"
+  forItems={[
+    "Reads vastly outnumber writes and must stay fast as the destination set grows into the high hundreds",
+    "Destination cardinality per write is bounded for most producers — p99 is manageable with async workers",
+    "Viewers expect an instant, pre-merged inbox rather than a computed merge on every open",
+    "You can afford inbox storage and have a clear story for deletes, unfollows, and fan-out repair",
+    "Celebrity or broadcast outliers can be carved out into a pull path so pure push never faces millions of destinations inline",
+  ]}
+  againstItems={[
+    "A typical write fans out to hundreds of thousands or millions of destinations with no safe skip list",
+    "Write rate is high and amplifying each write by N would dominate cost and queue depth",
+    "Destination sets change rapidly (follow/unfollow churn) and keeping pushed copies correct is harder than merging at read",
+    "Freshness of the canonical item matters more than a precomputed copy that can lag the source of truth",
+    "The product can tolerate a slightly slower read in exchange for a simple O(1) publish path",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Say the hinge out loud early: "Fan-out cardinality decides whether I push into inboxes at write time or merge at read time; social graphs are skewed, so I assume hybrid unless the numbers say otherwise." Then put a round number on the board — e.g. push below ~10k followers, pull above, hybrid in between — and mark it as an assumption you would revise with real percentiles.
 
-<KeyTakeaways items={["", "", ""]} />
+Expect the follow-up "what about a celebrity posting during peak." Answer with async chunked push *or* skip-to-pull, plus the lag metric you watch while the fan-out drains. Naming queue lag and write amplification before the interviewer asks is the difference between having heard of Twitter's fan-out and having designed for it.
+
+<KeyTakeaways
+  items={[
+    "Fan-out is the decision of when to pay for N destinations — at write time (push), at read time (pull), or both (hybrid)",
+    "Push makes reads cheap and writes proportional to destination count; pull makes writes cheap and reads proportional to graph size",
+    "Heavy-tailed follower graphs make pure push unsafe for celebrities and pure pull painful for everyone — hybrid is the usual production answer",
+    "Push must be asynchronous, chunked, and idempotent; inline fan-out couples publish latency to the largest follower list",
+    "Pull needs cached author timelines and a bounded merge or it fails the read latency budget as follow counts grow",
+    "Choose using p99 fan-out cardinality, read/write ratio, and skew — not using which pattern is more famous",
+  ]}
+/>

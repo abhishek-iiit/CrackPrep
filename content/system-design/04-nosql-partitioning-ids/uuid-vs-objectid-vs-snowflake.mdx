@@ -1,32 +1,81 @@
 ---
 title: "UUID vs ObjectId vs Snowflake"
 number: "04.09"
-summary: "UUID vs ObjectId vs Snowflake — notes in progress."
-status: draft
+summary: "A 128-bit random UUID, a 96-bit ObjectId, and a 64-bit Snowflake id trade coordination, sortability, and index locality differently."
+status: published
 free: true
 difficulty: core
 estMinutes: 12
+tags: [ids, uuid, mongodb, snowflake]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Same job, three incompatible bit budgets
 
-What breaks without this, and the situation that forces the decision.
+All three exist to answer the same question — what is this row's unique identifier, when more than one process might be creating rows at once — and all three answer it with a fixed-width value assembled with no coordination beyond a one-time setup. Past that, they agree on almost nothing: how many bits they spend, whether the value sorts by creation time, and what has to be true about the environment that generates them.
 
-## How it works
+Picking one without knowing what the other two would have cost you is how a team ends up with a 36-character string doing a 64-bit integer's job, discovering the difference only once the index no longer fits in memory.
 
-The mechanism, step by step.
+## The three schemes
 
-## Tradeoffs
+**UUIDv4** is 128 bits, generated from a cryptographically random source, with a handful of fixed bits reserved to mark the version. There is no structure to extract — no timestamp, no machine identity, nothing. Uniqueness comes entirely from the size of the random space: the odds of two UUIDv4s colliding are low enough to treat as zero for any practical system size. It needs nothing from its environment except a decent random number generator, which makes it the only one of the three that a disconnected client — a mobile app writing offline, an edge device — can mint safely on its own.
+
+**MongoDB's ObjectId** is 96 bits, 12 bytes, built from a 4-byte Unix timestamp in seconds, a 5-byte random value fixed per process at startup, and a 3-byte counter that increments per id within that process. The timestamp makes it roughly sortable by creation time — to the second, not finer — and the per-process random component means two processes essentially never collide without needing to coordinate a worker id up front. It is native to MongoDB's own `_id` field, so reaching for it outside a MongoDB-backed system mostly buys you 96 bits of structure you could get more cheaply another way.
+
+**Snowflake-style ids** are 64 bits: a millisecond timestamp, a worker id, and a per-millisecond sequence counter, packed into a single integer. They sort by time down to the millisecond, they are compact enough to be a genuinely efficient primary key and index entry, and generation is entirely local once a worker has its id. The cost lives entirely in that last clause — some coordination has to happen once, to guarantee no two workers in the fleet share a worker id. 04.10 Snowflake ID Design works through the bit layout and the throughput math in full.
+
+| | UUIDv4 | ObjectId | Snowflake |
+| --- | --- | --- | --- |
+| Width | 128 bits | 96 bits (12 bytes) | 64 bits |
+| Sortable by creation time | No | Roughly, to the second | Yes, to the millisecond |
+| Needs coordination to generate | None | None | One-time worker id assignment |
+| Collision source if misused | Practically none at any realistic scale | Same process, same second, counter overflow (very unlikely) | Two workers sharing one worker id |
+| Typical string form | 36 characters with hyphens | 24 hex characters | A plain integer, or base62-encoded shorter |
+| Index locality as a primary key | Poor — random insert position in a B-tree | Fair — roughly time-ordered | Good — mostly append-at-the-edge |
+| Native home | Anywhere, no server needed | MongoDB's `_id` | Twitter, Discord, Instagram-style sharded systems |
+
+## Where each one actually hurts
+
+The UUIDv4 cost shows up in the index, not in the id itself. A B-tree-backed primary key (03.04 B-Tree) expects new keys to land near the rightmost edge of the tree if it is going to stay cache-friendly and avoid page splits. A random 128-bit value lands anywhere, uniformly, on every single insert — which is precisely the access pattern a B-tree handles worst, and precisely the one an LSM-backed engine (07.09 LSM Tree Storage Engine) tolerates, because it buffers and sorts in memory before anything touches disk in key order. That single fact is often the real reason a "use UUIDs for everything" default gets revisited once a table's write volume grows: the id was never the problem, the index was.
+
+<Callout type="gotcha">
+A newer variant, UUIDv7, embeds a millisecond timestamp in the high bits specifically to fix this — it sorts by creation time and inserts near the edge of a B-tree the way a Snowflake id does, while staying a standard UUID everywhere else. Support varies by database and driver version, so treat it as "check before you rely on it" rather than assume every UUID library already generates it.
+</Callout>
+
+ObjectId's cost is subtler: a 4-byte, one-second-resolution timestamp means every id minted by the same process within the same second differs only in its 3-byte counter, and the 5-byte "random" component is actually fixed per process, chosen once at startup. That is enough entropy that accidental collision is not a real-world concern, but it means ObjectId's uniqueness guarantee rests on assumptions about process startup and counter behavior that a hand-rolled reimplementation outside MongoDB's own driver can get wrong in ways UUIDv4's raw entropy never lets you get wrong.
+
+Snowflake's cost is the one that gets deferred until it hurts: two things have to be true forever, not just at launch — every worker has a worker id nobody else has, and every worker's clock moves forward. The first is a one-time coordination problem. The second is not one-time at all, and 04.11 Clock Skew And ID Ordering covers what happens the day a worker's clock steps backward.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Choose a time-ordered id (ObjectId or Snowflake) when"
+  againstTitle="Choose a random UUID when"
+  forItems={[
+    "You will page or range-scan by creation order and want that to be nearly free — 04.12 Keyset Pagination seeks directly off a sortable key",
+    "Index locality matters because the table is large and write-heavy, and you'd rather inserts land at the edge of the B-tree than scattered across it",
+    "You're already on MongoDB and ObjectId is the native, zero-extra-cost option for that store specifically",
+    "You control the fleet well enough to guarantee a worker-id assignment step at startup and a sane clock afterward",
+    "A compact 64-bit integer materially matters for storage or index size at your scale",
+  ]}
+  againstItems={[
+    "Ids must be mintable offline or on a device that cannot reach any coordination point — a mobile client, an edge node, a disconnected batch job",
+    "You cannot guarantee unique worker-id assignment across every process that will ever generate ids, now or after a rewrite",
+    "Enumerability is a real concern and even a millisecond-and-worker-id structure reveals more than you want about volume and topology",
+    "The extra width of a UUID is genuinely a non-issue at your scale, and simplicity — no worker registry, no clock dependency — outweighs the index cost",
+    "You need a standard, database-agnostic format that every language's standard library already knows how to generate and parse",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+State the requirement before the name: "Do I need this sortable? Do I need it mintable with zero coordination, including offline?" Those two questions alone eliminate two of the three options in most prompts. If you land on a structured id, say out loud what it costs to keep working — a worker-id registry that must never double-assign, and a clock that must never move backward by more than the generator can tolerate — because naming that cost unprompted is what distinguishes "I know the name Snowflake" from "I know what running one requires."
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "UUIDv4 is 128 bits of pure random entropy: zero coordination, zero structure, and no sort order, mintable anywhere including offline",
+    "ObjectId is 96 bits — a one-second timestamp, a per-process random value, and a counter — giving rough time order without any coordination step",
+    "Snowflake-style ids are 64 bits — timestamp, worker id, sequence — trading a one-time worker-id coordination step for compact, millisecond-sortable, locally-generated ids",
+    "A random primary key scatters inserts across a B-tree and hurts index locality; a time-ordered id keeps inserts near the tree's edge",
+    "UUIDv7 exists specifically to fix UUID's lack of sort order, but library and database support should be checked rather than assumed",
+    "The real cost of a Snowflake-style id isn't generation, it's the two invariants it depends on forever: unique worker ids and a clock that doesn't move backward",
+  ]}
+/>

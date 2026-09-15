@@ -1,32 +1,90 @@
 ---
 title: "Rule Engine Trigger Framework"
 number: "08.08"
-summary: "Rule Engine Trigger Framework — notes in progress."
-status: draft
+summary: "Externalizing condition-and-action logic as data so thresholds change without a deploy, and what that trades away in debuggability."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [rules-engine, triggers, automation, events]
+updated: "2026-09-15"
 ---
 
-## The problem
+## When "if" belongs in a database row, not a deploy
 
-What breaks without this, and the situation that forces the decision.
+"Flag any order over $500 from an account created this week." "Page on-call if latency exceeds two seconds for five straight minutes." Logic like this starts as an `if` statement inside whichever service owns the relevant event, and that's fine right up until the threshold needs to change weekly, a second condition needs adding by someone who doesn't write code, or the same shape of check needs to apply across a dozen event types owned by different teams. At that point every threshold tweak is a pull request, a review, and a deploy — for a change that is really just a number.
 
-## How it works
+A rule engine externalizes the condition and the action as data, evaluated by one generic engine against events as they arrive, so changing a rule is a row update rather than a deploy. What that buys is real: ops, trust-and-safety, and marketing can adjust behavior on their own schedule. What it costs is also real — "what does this system actually do" is no longer answerable by reading the code. It's answerable by reading whatever the current rule set happens to be, which changes underneath the code without the code changing at all.
 
-The mechanism, step by step.
+## The shape of a rule
 
-## Tradeoffs
+A rule is a condition and an action. The condition is a predicate tree over fields of the incoming event and, often, looked-up state about the entity involved — "order.total > 500 AND account.age_days < 7." The action is almost always something enqueued as async work (08.01 Delegation And Async Work) rather than executed inline, so a slow action — sending an email, opening a ticket — never blocks the event path that triggered it. Rules are stored as structured data — a JSON condition tree, or a small purpose-built DSL — rather than as code, specifically so a rule can be created, versioned, and audited without going through a code deploy pipeline at all.
+
+<Steps>
+  <Step title="An event arrives">
+    Typically from a shared event bus (08.03 Event Bus For Product Events) or a direct state-change hook.
+  </Step>
+  <Step title="The engine loads the active rule set">
+    Almost always from an in-memory cache refreshed on an interval, rather than a database query per event — rules change far less often than events arrive (05.01 Caching Layers, 05.04 TTL Expiration And Cache Reapers for the refresh mechanics).
+  </Step>
+  <Step title="Rules are filtered to the matching event type">
+    So a well-built engine isn't evaluating every rule in the system against every event, only the subset registered for that event's type.
+  </Step>
+  <Step title="Each remaining rule's condition is evaluated">
+    Against the event's own fields and any entity state the condition tree references.
+  </Step>
+  <Step title="Matching rules enqueue their actions">
+    As async jobs rather than running synchronously, so a slow or failing action never becomes the event path's problem.
+  </Step>
+  <Step title="The match is logged">
+    Which rule fired, which fields it read, what action it queued — because "why did this happen" has to be answerable after the fact, not just at the moment it happened.
+  </Step>
+</Steps>
+
+<Callout type="gotcha">
+The naive implementation evaluates every active rule against every incoming event, which is fine at dozens or low hundreds of rules and becomes the bottleneck once rule count and event volume both grow — cost scales as rules times events, not as either alone. Some production rule engines address this by indexing rules on the fields they inspect, so an event is only tested against rules that could plausibly match it rather than the entire set — Rete-style discrimination networks are the classical version of this. Not every engine bothers; plenty of systems never hit enough rules or enough volume for the naive loop to matter, and adding the index before you need it is complexity with no payoff.
+</Callout>
+
+## What actually goes wrong
+
+Overlapping rules are the most common surprise: two independently authored rules match the same event and both fire the same downstream action, and the customer gets flagged twice or notified twice. Nothing about the engine prevents this by default — it needs explicit priority ordering or deduplication, not an accident of whichever rule happened to be inserted first.
+
+Debuggability suffers structurally, not incidentally. A rule engine is deliberately implicit control flow — nobody can point to a line of code and say "this is why it fired" — so an audit trail recording which rule matched, which fields it read, and what action it queued isn't a nice-to-have. It's the only mechanism that can ever answer a support ticket asking why an account got flagged.
+
+Caching the rule set trades freshness for throughput, and that trade has a failure mode of its own: a rule edit takes up to the cache's refresh interval to take effect, and if the refresh job fails silently, the visible symptom isn't an error anywhere — it's someone insisting a rule "isn't working" while the engine keeps evaluating a set that's hours or days stale.
+
+And because rules are meant to be editable by people who don't necessarily see event volume, a badly scoped condition can match nearly every event that flows through the system, multiplying downstream action volume by orders of magnitude with no code review positioned to catch it. A dry-run or simulate step against recent real traffic before a rule goes live is the practical defense.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Reach for a rule engine when"
+  againstTitle="Keep it in code when"
+  forItems={[
+    "Conditions and thresholds change on a cadence faster than your deploy cycle — weekly or ad hoc, not quarterly",
+    "Nontechnical stakeholders need to author or adjust conditions themselves without going through engineering",
+    "There are many independent condition/action pairs against the same event stream that would otherwise bloat one service's if/else chain",
+    "An audit trail of which rule fired and why is a real requirement — compliance, trust and safety, billing disputes — not a nice-to-have",
+    "Actions are naturally asynchronous, so rule evaluation never has to sit on any request's critical path",
+  ]}
+  againstItems={[
+    "The logic is simple, stable, and owned by one team that already deploys often",
+    "Conditions require genuine stateful reasoning across a window of events, which a per-event rule engine isn't built for and a stream processor handles better",
+    "Rule and event volume together would need a discrimination index to stay fast, and nobody is going to build or operate one",
+    "There's no real review process for rule changes, so untested rules would ship straight into production behavior with no gate at all",
+    "Typed, tested code is worth more here than editability — the people who'd change the logic are the same engineers who'd otherwise be editing the rules",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Introduce it by the deploy cost you're avoiding: "This threshold changes every week, and I don't want it to be a pull request each time, so I'd externalize the condition as a rule the ops team can edit directly." Expect two follow-ups: what happens when two rules conflict — priority ordering has to be explicit, not left to insertion order — and how you'd debug "why did this fire," where the honest answer is that the audit log has to exist before the first incident, not get added after someone asks for it.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "A rule engine externalizes condition-and-action logic as data so it can change without a deploy, at the cost of the system's behavior no longer being fully readable from the code",
+    "Actions are enqueued as async work rather than run inline, so a slow or failing action never blocks the event path that triggered it",
+    "Naive evaluation costs rules times events; production engines at real scale index rules by the fields they inspect rather than testing every rule against every event",
+    "Overlapping rules that both match the same event will both fire unless priority or deduplication is explicit — nothing in the engine prevents duplicate actions by default",
+    "An audit trail of which rule matched and what action it queued is the only way to answer 'why did this happen', and it has to be built in from the start",
+    "A stale or silently-failed rule cache doesn't error — it looks like a rule that mysteriously stopped working, discovered only when someone complains",
+  ]}
+/>

@@ -1,32 +1,74 @@
 ---
 title: "Document Stores vs Key-Value Stores"
 number: "04.02"
-summary: "Document Stores vs Key-Value Stores — notes in progress."
-status: draft
+summary: "The line between the two is whether the database can see inside the value it's storing — and that line decides what you can query without an app-side join."
+status: published
 free: true
 difficulty: core
 estMinutes: 12
+tags: [document-store, key-value, nosql, indexing]
+updated: "2026-09-15"
 ---
 
-## The problem
+## A value your database cannot read
 
-What breaks without this, and the situation that forces the decision.
+A pure key-value store treats the value as an opaque blob of bytes. It doesn't know or care whether you put JSON, a serialized protobuf, or a photo in there — it stores bytes under a key and returns the same bytes back. That opacity is the whole design: no schema to enforce, no fields to index, nothing to parse, which is exactly why a key-value store's get and put are about as close to the fastest thing a database can do. Redis' `GET` and DynamoDB's `GetItem` by partition key cost the database little more than a hash lookup and a memory or SSD read.
 
-## How it works
+A document store gives up that opacity on purpose. It stores the same kind of nested, semi-structured record — call it JSON or BSON — but it parses the structure, so it can index a field three levels deep, filter and sort on it, and hand back a subset of fields instead of the whole document. That costs something: writes get more expensive, because the engine has to update every index the write touches, and the storage format now has to be interpretable, so it's rarely a truly arbitrary blob the way a key-value store's value can be.
 
-The mechanism, step by step.
+## What the extra parsing buys you
 
-## Tradeoffs
+| | Key-value store | Document store |
+| --- | --- | --- |
+| What the database sees | Opaque bytes under a key | Parsed nested structure (JSON/BSON) |
+| Query surface | Get, put, delete by exact key; some support range scans on ordered keys | Filter, sort, and project on any field; secondary indexes |
+| Partial update | Usually a whole-value overwrite (some support field ops, e.g. Redis hashes and counters) | Update a single nested field without rewriting the document |
+| Schema | None — the application owns serialization | Per-document, so records in one collection can have different shapes |
+| Write cost | One hash-table or LSM insert | Base write plus every secondary index the document participates in |
+| Canonical use | Cache, session store, feature flags — anything keyed by id and read whole | Catalogs, user profiles, CMS content — nested records read mostly whole, filtered occasionally |
+| Example systems | Redis, Memcached, DynamoDB used as KV | MongoDB, Couchbase, DynamoDB used with secondary indexes |
+
+<Callout type="note">
+Some systems straddle the line on purpose. DynamoDB's base table is a key-value store — partition key to an opaque item — but the item itself is structured, and a global secondary index gives it document-store-like query surface on non-key attributes at the cost of maintaining another index. Decide which side of the boundary you're on by which feature you're actually using, not by the product's name.
+</Callout>
+
+## Embedding is the NoSQL answer to a join
+
+Document stores encourage embedding related data inside one document rather than referencing it in a separate collection, because a document read is usually one lookup regardless of how much is nested inside it. That's the NoSQL analog of denormalization: repeat a comment's author name inside the comment rather than joining out to a `users` collection, because there's no cheap join to fall back on. The cost lands on writes — if the author changes their display name, every embedded copy needs an update or a background reconciliation job. That's a real tradeoff, not a free win, and it's the same tension 03.01 Relational Database Design resolves the opposite way, by normalizing the data and paying the join cost at read time instead.
+
+Key-value stores don't face this decision, because there's usually nothing to embed. The value is already the entire unit of storage, opaque end to end, so the only modeling decision left is picking the key.
+
+Every field a document store indexes is a promise to keep that index current on every write that touches it. Adding a secondary index after a collection is already large means a build that scans the existing data and writes an index entry for every document that qualifies — a concern comparable to online index builds in relational engines (03.11 Online Indexing), and one worth asking about before assuming an index is free to add later.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Reach for a document store when"
+  againstTitle="Reach for a plain key-value store when"
+  forItems={[
+    "Records are naturally nested and variable in shape, and you need to filter, sort, or project on fields inside them without loading the whole record into the app first",
+    "You want a secondary index on a non-key field instead of hand-rolling one in application code",
+    "Different records in the same collection legitimately have different shapes, so one rigid schema would mean a lot of unused columns",
+    "Partial updates to a nested field matter — bumping a counter inside a larger record without rewriting all of it",
+  ]}
+  againstItems={[
+    "The access pattern really is get, put, and delete by an exact key, and nothing else, at very high throughput or very low latency",
+    "The value is genuinely opaque to the application too — a blob, a serialized object, a cache entry — so there's nothing to index",
+    "Write latency is the binding constraint and you cannot afford the cost of maintaining secondary indexes on every write",
+    "You're using it as a cache in front of a system of record, where TTL eviction and raw speed matter more than query flexibility",
+    "The dataset is small or hot enough to live in memory anyway, where indexing overhead buys little",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+State the query before the product. Saying "I'll use MongoDB" before you've said what you're querying by doesn't show the reasoning that led there. Say instead: "profiles are read by id most of the time, but I also need to filter by a nested field — city, or subscription tier — so I want a document store's secondary indexes rather than scanning every value in a key-value store by hand." Expect the follow-up about embedding versus referencing, and have an answer ready for what happens when the embedded, denormalized copy drifts out of sync — because it eventually does, and "how do you keep it consistent" is the question that actually tests whether you understand the tradeoff or just its name.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "The real boundary between a key-value store and a document store is whether the database can see inside the value — that visibility is what secondary indexing and field-level queries are built on.",
+    "A key-value store's speed comes from treating the value as opaque bytes; a document store trades some of that speed for the ability to filter, sort, and index on nested fields.",
+    "Document stores let you update one field inside a record without rewriting the whole thing; most key-value stores only overwrite the whole value.",
+    "Embedding related data inside a document avoids a join but creates duplicate copies that can drift out of sync — the same tradeoff normalization avoids by paying for it at read time instead.",
+    "Every secondary index in a document store is a promise to update it on every write that touches its field, which is exactly why index count is a write-latency lever, not a free feature.",
+    "Some systems, like DynamoDB, straddle the line — decide which side you're on by which feature you're actually using, not by the product name.",
+  ]}
+/>

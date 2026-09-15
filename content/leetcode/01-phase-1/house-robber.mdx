@@ -1,0 +1,82 @@
+---
+title: "House Robber"
+number: "01.22"
+summary: "Adjacent houses share an alarm — the recurrence is rob or skip each house, and two rolling variables beat a full DP table."
+status: published
+free: true
+difficulty: core
+estMinutes: 12
+tags: [dynamic-programming, array]
+updated: "2026-09-15"
+---
+
+## Rob two neighbors and the alarm trips
+
+Each house holds a non-negative amount of money. Robbing **adjacent** houses triggers the alarm, so you want the maximum you can take from a linear street without picking neighbors. `[2,7,9,3,1]` → `12` by taking `2 + 9 + 1`.
+
+Greedy fails immediately: the richest house might sit between two other rich houses, and skipping it frees both neighbors. Try `[2,1,9,1,2]` — grabbing `9` alone gives 9, but `2 + 1 + 2` across the ends gives 5; the optimal path is `2 + 9 + 2 = 13` by skipping the ones beside 9. You need a decision at every house: **take it** (and forfeit the previous) or **skip it** (keep whatever you had).
+
+## The rob-or-skip recurrence
+
+Define `dp[i]` as the max loot from houses `0..i`. At house `i`, either you rob it — `nums[i] + dp[i-2]` — or you skip — `dp[i-1]`. Base cases: `dp[0] = nums[0]`, `dp[1] = max(nums[0], nums[1])`.
+
+The invariant: `dp[i]` always reflects the best **legal** loot ending at or before `i`; you never need to remember which houses were chosen, only the numeric optimum.
+
+You only need the last two values. Track `prev2` (best up to i-2) and `prev1` (best up to i-1); at each house, `cur = max(prev1, prev2 + nums[i])`, then shift.
+
+## Solution
+
+```ts
+function rob(nums: number[]): number {
+  if (nums.length === 0) return 0;
+  if (nums.length === 1) return nums[0];
+
+  let prev2 = nums[0];
+  let prev1 = Math.max(nums[0], nums[1]);
+
+  for (let i = 2; i < nums.length; i++) {
+    const cur = Math.max(prev1, prev2 + nums[i]);
+    prev2 = prev1;
+    prev1 = cur;
+  }
+  return prev1;
+}
+```
+
+Time **O(n)**, space **O(1)**. A full `dp` array is **O(n)** space and acceptable in an interview, but rolling variables show you see the dependency structure.
+
+<Tradeoff
+  forTitle="Linear DP when"
+  againstTitle="Reach for richer state when"
+  forItems={[
+    "Houses lie on a line with a no-adjacent constraint — the rob-or-skip recurrence applies directly",
+    "You want O(n) time with O(1) space via two rolling variables",
+    "Values are non-negative, so dp entries never need negative-infinity sentinels for empty prefix",
+    "The problem is a stepping stone to House Robber II (circle) and Delete and Earn",
+    "Follow-up is 'which houses' — backtrack from dp table if needed, still linear time to build"
+  ]}
+  againstItems={[
+    "Houses form a circle — first and last are adjacent; run linear rob twice (exclude first or last)",
+    "Robbing skips at most k houses or has a distance-2 constraint — state must track how many skips remain",
+    "The graph is a tree (House Robber III) — DFS with (rob, skip) pairs per node replaces the array dp",
+    "You must return the actual set of indices, not just the sum, and input is large — still O(n) but keep the table",
+    "Negative payouts appear — the recurrence still works but you must prove you never prefer an empty prefix wrongly"
+  ]}
+/>
+
+## In an interview
+
+State the constraint: max sum, no two adjacent. Give the tiny counterexample where local greed on the max element loses. Write the recurrence in words before code: "best at i is max of skip i or take i plus best at i-2."
+
+Follow-ups arrive fast: **House Robber II** (circular street), **House Robber III** (binary tree), or "return the indices." For II, say you would run this linear solution twice. Mention empty array → 0 and single house → that house's value before diving in.
+
+The common bug: using `dp[i-1] + nums[i]` — that robs neighbors. The correct take branch always jumps back two indices.
+
+<KeyTakeaways items={[
+  "House Robber is linear DP: at each house, max of skipping it or robbing it plus the best loot two houses back.",
+  "Rolling two variables (prev2, prev1) captures the full state — you never need the entire dp array for the sum.",
+  "Greedy on the maximum element fails because rich houses are often separated by a single mediocre neighbor.",
+  "Time O(n), space O(1) with rolling variables; O(n) space if you keep the table for reconstruction.",
+  "House Robber II wraps the street — solve linearly while excluding the first house or excluding the last.",
+  "On a tree, each node returns two values: max loot if you rob this node, max if you skip it."
+]} />

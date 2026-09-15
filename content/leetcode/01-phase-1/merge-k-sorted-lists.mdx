@@ -1,0 +1,116 @@
+---
+title: "Merge K Sorted Lists"
+number: "01.43"
+summary: "A min-heap of k list heads picks the global minimum each step; pairwise merge is simpler but slower at large k."
+status: published
+free: true
+difficulty: deep
+estMinutes: 16
+tags: [linked-list, heap, merge]
+updated: "2026-09-15"
+---
+
+## k sorted streams, not two
+
+Given an array of `k` ascending linked lists, merge them into one ascending list. With `k = 3` and lists `[1,4,5]`, `[1,3,4]`, `[2,6]`, the result is `[1,1,2,3,4,4,5,6]`.
+
+01.42 Merge Two Sorted Lists solves the `k = 2` case in linear time. Repeating that merge — fold lists left to right — works but can degrade: merging a growing list with a fresh one repeatedly touches the same nodes many times. When `k` is large and lists are balanced, the total work can approach **O(n k)** instead of the **O(n log k)** you get if each of the `n` total nodes participates in only **log k** heap operations.
+
+## Min-heap: always pick the smallest current head
+
+Push the head of every non-empty list onto a min-heap ordered by node value ( tie-break by list index if you need stability). Pop the smallest, append it to the result, push its `next` if any. Stop when the heap is empty.
+
+<Steps>
+<Step title="Seed the heap">
+  For each list, if `head !== null`, push `{ node: head, idx: i }`. Empty lists contribute nothing.
+</Step>
+<Step title="Pop, link, push next">
+  Pop minimum node `u`, attach to tail, push `u.next` if non-null. The heap always holds at most `k` elements.
+</Step>
+<Step title="Return dummy.next">
+  Same dummy-tail pattern as two-list merge; only the source of the next minimum changes.
+</Step>
+</Steps>
+
+Without a built-in heap in TypeScript, simulate with an array and `sort` on each push — acceptable for interview clarity on small `k`, but say out loud that a binary heap gives the proper **O(log k)** per operation.
+
+## Solution
+
+```ts
+class ListNode {
+  val: number;
+  next: ListNode | null;
+  constructor(val?: number, next?: ListNode | null) {
+    this.val = val ?? 0;
+    this.next = next ?? null;
+  }
+}
+
+function mergeKLists(lists: Array<ListNode | null>): ListNode | null {
+  const heap: ListNode[] = lists.filter((h): h is ListNode => h !== null);
+
+  const popMin = (): ListNode | undefined => {
+    if (heap.length === 0) return undefined;
+    heap.sort((a, b) => a.val - b.val);
+    return heap.shift();
+  };
+
+  const push = (node: ListNode | null): void => {
+    if (node !== null) heap.push(node);
+  };
+
+  const dummy = new ListNode();
+  let tail: ListNode = dummy;
+
+  lists.forEach((h) => push(h));
+
+  while (heap.length > 0) {
+    const node = popMin()!;
+    tail.next = node;
+    tail = node;
+    push(node.next);
+  }
+
+  return dummy.next;
+}
+```
+
+Time **O(n k log k)** with array-sort heap simulation; **O(n log k)** with a real min-heap. Space **O(k)** for the heap plus **O(1)** for list rewiring.
+
+<Callout type="tip">
+Divide-and-conquer merge — pair lists, merge pairs, repeat — runs in **O(n log k)** time with **O(1)** extra space if you merge in place, and avoids heap boilerplate. Mention it even if you code the heap version.
+</Callout>
+
+<Tradeoff
+  forTitle="Min-heap of heads when"
+  againstTitle="Divide-and-conquer pairwise merge when"
+  forItems={[
+    "k is moderately large and lists are long — O(n log k) matters",
+    "New sorted streams arrive incrementally and you want a running merge",
+    "You already use a priority queue elsewhere in the design (multi-way merge of log files, shard iterators)",
+    "Values are not evenly distributed and one list dominates — heap still picks the global min each step",
+  ]}
+  againstItems={[
+    "k is small (2–4) and repeated two-list merge is fast enough",
+    "You cannot use extra heap storage and want O(1) auxiliary space",
+    "Interview environment lacks a heap library and pairwise merge is easier to write bug-free",
+    "Lists are stored as arrays — a single sort of all elements may be simpler for one-off batch jobs",
+  ]}
+/>
+
+## In an interview
+
+Clarify: `k` lists, each sorted ascending, return one merged list. Edge cases: `k = 0`, all empty lists (return null), one nonempty list. Compare 01.42 two-list merge as the base operation.
+
+Before coding, pick heap vs divide-and-conquer and state complexity. Self-flag: forgetting null heads when seeding; pop without pushing `next`; returning the dummy node.
+
+Follow-ups: merge sorted arrays instead of lists; external merge of files larger than RAM; k-way merge is the read path of an LSM compaction — same shape, different scale.
+
+<KeyTakeaways items={[
+  "The global next element among k sorted lists is always the minimum of the k current heads.",
+  "A min-heap of size k yields O(n log k) time when each pop/push is O(log k).",
+  "Repeated pairwise merge of k lists can degrade toward O(n k) if you always merge the growing result with the next list.",
+  "Divide-and-conquer merge pairs lists in log k rounds for O(n log k) time without a heap.",
+  "Reuse the dummy-tail pattern from 01.42; only the selection of the next node changes.",
+  "Filter null heads before merging; an all-empty input returns null.",
+]} />

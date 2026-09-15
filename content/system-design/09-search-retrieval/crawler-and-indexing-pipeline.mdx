@@ -1,32 +1,98 @@
 ---
 title: "Crawler And Indexing Pipeline"
 number: "09.12"
-summary: "Crawler And Indexing Pipeline — notes in progress."
-status: draft
+summary: "From URL frontier to searchable document: fetch, parse, dedupe, and index without melting origins or poisoning the corpus."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: deep
+estMinutes: 18
+tags: [search, crawler, indexing, pipeline]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The web does not push; you have to pull carefully
 
-What breaks without this, and the situation that forces the decision.
+An internal product catalog can emit change events into the index (09.10 Search Index Synchronization). The open web does not. Pages appear, move, and vanish without notifying anyone. A crawler discovers URLs, fetches content under politeness constraints, turns HTML into indexable documents, and only then feeds the same indexing machinery a private corpus would use. The hard part is not "download pages" — it is doing that continuously without DDoSing origins, without indexing near-duplicates as distinct documents, and without letting a poisoned or expired page sit in results for weeks.
 
-## How it works
+This pipeline is asynchronous by nature (08.01 Delegation And Async Work). Discovery and fetch run on their own clocks; indexing freshness for the public web is measured in minutes to days depending on site importance, not in the seconds a CDC consumer targets for a shopping cart.
 
-The mechanism, step by step.
+## The stages from frontier to postings
 
-## Tradeoffs
+<Steps>
+  <Step title="Seed and discover">
+    Start from seed URLs and sitemaps; extract outbound links from fetched pages to grow the frontier. Discovery policy decides breadth versus depth — news homepages versus deep archival URLs — and is the first place crawl budget gets spent or wasted.
+  </Step>
+  <Step title="Prioritize the frontier">
+    Not every URL is equal. Score by estimated change rate, historical traffic, site importance, and recency of last fetch. A priority queue (or sharded queues) holds millions to billions of URLs; the scheduler pops what is worth fetching next under a global crawl budget.
+  </Step>
+  <Step title="Fetch under politeness rules">
+    Per-host rate limits, robots.txt and crawl-delay, concurrency caps, and backoff on errors. One slow or angry origin must not stall the whole crawler — isolate by host and fail soft. Retries need jitter and a budget (02.09 Retries Timeouts And Idempotency).
+  </Step>
+  <Step title="Parse and extract">
+    Convert bytes into a canonical document: title, body text, language, canonical URL, outbound links, and structured fields when present. Boilerplate stripping matters; navigation chrome indexed as content destroys precision later.
+  </Step>
+  <Step title="Dedupe and canonicalize">
+    Near-duplicate detection (simhash, shingles) and URL canonicalization collapse mirrors, tracking-param variants, and printer-friendly twins into one document id. Without this step the index balloons and ranking signal dilutes across clones.
+  </Step>
+  <Step title="Index and schedule revisit">
+    Emit the document into the indexing pipeline that builds inverted (and optionally vector) structures. Record a revisit schedule — volatile hubs more often than static docs — so the frontier is not only discovery but refresh.
+  </Step>
+</Steps>
+
+| Concern | What goes wrong if ignored | Typical control |
+| --- | --- | --- |
+| Politeness | Origin blocks you or legal/trust damage | Per-host QPS caps, robots.txt |
+| Crawl budget | Waste fetches on junk; miss important updates | Priority scores, site quotas |
+| Duplicates | Index bloat, split ranking signals | Canonical URL + near-dup hashing |
+| Content quality | Spam and thin pages pollute top-k | Spam scores, link/graph signals at index time |
+| Freshness | Stale results for news and prices | Change-rate predictors, sitemap lastmod |
+
+## Crawl budget is a product decision wearing ops clothes
+
+Every day the crawler can fetch a finite number of pages — hardware, bandwidth, and politeness all cap it. That budget must be allocated: refresh the head of the web that users actually query, explore enough of the long tail to stay useful, and leave margin for spikes when a major site publishes. Treating the frontier as FIFO is how you spend a week recrawling low-value archives while a homepage users hit hourly goes stale.
+
+For **site search** over your own properties the same pipeline shrinks: sitemaps and CMS publish hooks replace open discovery, politeness is mostly self-inflicted rate limiting, and dedupe is narrower. Do not paste a web-scale crawler design into an interview about indexing a company's help center — say what you drop and why.
+
+<Callout type="gotcha">
+Canonicalization bugs are silent poison. If `https://example.com/page` and `https://example.com/page?utm_source=x` both become distinct documents, clicks and links split, BM25-style length and frequency stats skew, and users see near-identical results stacked. Normalize aggressively at extract time; do not hope ranking will "prefer the right one."
+</Callout>
+
+## Indexing is a second pipeline, not a function call
+
+Fetched documents land in object storage or a blob store, then workers tokenize, analyze, and push into shard-local indexes (09.11 Search Index Sharding). Separating crawl from index lets each scale on different bottlenecks: crawl is network- and politeness-bound; indexing is CPU- and disk-bound. A backlog between them is normal — measure document age from fetch to searchable the same way you measure primary-to-index lag in 09.10 Search Index Synchronization.
+
+Deletes and soft-404s need an explicit path: a fetch that finds gone content must remove or tombstone the document, or the corpus accumulates ghosts exactly like a missed delete in CDC sync.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Invest in a real crawl-and-index pipeline when"
+  againstTitle="Keep discovery simple when"
+  forItems={[
+    "You must cover a large, changing URL space you do not control, with politeness and revisit policies that actually matter",
+    "Duplicate and spam pressure would drown a naive fetcher-to-index path within weeks of operation",
+    "Freshness differs by site class — news versus archives — and one FIFO queue cannot express that",
+    "Crawl and index bottlenecks diverge enough that separate worker pools and backpressure (02.11 Backpressure) pay for themselves",
+    "You need auditability: which version of a URL was indexed when, for debugging poisoned results",
+  ]}
+  againstItems={[
+    "The corpus is a private catalog or CMS with publish events — use sync (09.10), not a web crawler",
+    "URL count is small enough that a nightly sitemap fetch and full reindex meets freshness without a frontier scheduler",
+    "You lack the ops capacity to own per-host throttles, robots compliance, and unblock requests from angry origins",
+    "Legal or contractual limits forbid broad crawling, so the problem is access, not architecture",
+    "A third-party search API already covers the open-web use case and the team's job is product ranking on top, not fetch",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Frame it as a budgeted pipeline: "Discovery fills a prioritized frontier; fetch respects per-host limits; parse, dedupe, then index — crawl and index scale separately." Ask whether the corpus is open web or first-party; that single clarification collapses half the design. Expect questions on politeness, duplicates, and how a deleted page leaves the index. Name crawl budget allocation before listing tools — interviewers are listening for whether you understand scarcity, not whether you remember a MapReduce paper title.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Open-web search must pull documents under politeness and budget constraints; private corpora should prefer push sync over crawling",
+    "A frontier with priority and revisit scheduling beats FIFO fetching for freshness under a finite crawl budget",
+    "Parse, canonicalize, and near-dedupe before indexing or clones inflate the corpus and split ranking signals",
+    "Crawl is network-bound and indexing is CPU/disk-bound — separate them and measure fetch-to-searchable lag",
+    "Soft-404s and gone pages need explicit delete/tombstone paths or ghosts remain searchable",
+    "Site search over your own CMS should drop most web-scale crawler complexity and lean on sitemaps or publish hooks",
+  ]}
+/>

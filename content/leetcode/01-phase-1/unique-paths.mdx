@@ -1,0 +1,82 @@
+---
+title: "Unique Paths"
+number: "01.25"
+summary: "Only right and down moves reach the corner — each cell inherits path counts from above and left, or you close the form with combinatorics."
+status: published
+free: true
+difficulty: intro
+estMinutes: 11
+tags: [dynamic-programming, combinatorics, grid]
+updated: "2026-09-15"
+---
+
+## m×n grid, only right and down — how many routes?
+
+A robot sits at the top-left of an `m × n` grid and wants the bottom-right. It may move only **right** or **down**. How many distinct paths?
+
+For `3 × 7`, brute force tries every binary sequence of 6 rights and 2 downs among 8 moves — that is **C(8,2) = 28`**, but enumerating sequences for `23 × 12` is absurd. The grid structure means paths share prefixes: every path to cell `(i,j)` passes through either `(i-1,j)` or `(i,j-1)`.
+
+## Grid DP: add incoming paths
+
+`dp[i][j]` = number of paths to `(i,j)`. First row and column are all `1` (only one way to walk a straight line). Interior: `dp[i][j] = dp[i-1][j] + dp[i][j-1]`.
+
+The invariant: every path to `(i,j)` arrives from exactly one of those two neighbors — no diagonals, no revisits.
+
+You can roll the table to one row: iterate rows, update a 1D array left-to-right. Same recurrence, **O(n)** space instead of **O(mn)**.
+
+### Combinatorics shortcut
+
+Any valid path uses exactly `(m-1)` downs and `(n-1)` rights — `(m+n-2)` total steps. Choose which steps are downs: **C(m+n-2, m-1)**. For `3 × 7`, that is C(8,2) = 28. Same answer, **O(min(m,n))** time if you compute the binomial carefully with division to avoid overflow (interviewers often accept DP for safety).
+
+## Solution
+
+```ts
+function uniquePaths(m: number, n: number): number {
+  const dp = new Array<number>(n).fill(1);
+
+  for (let i = 1; i < m; i++) {
+    for (let j = 1; j < n; j++) {
+      dp[j] += dp[j - 1];
+    }
+  }
+  return dp[n - 1];
+}
+```
+
+Time **O(m × n)**, space **O(n)**. A full matrix uses **O(mn)** space — fine for `m,n ≤ 100`.
+
+<Tradeoff
+  forTitle="Grid DP when"
+  againstTitle="Combinatorics or richer grid when"
+  forItems={[
+    "Obstacles may appear later (Unique Paths II) — dp already handles blocked cells with a small edit",
+    "You want a template that generalizes to minimum-cost paths and longest paths in a DAG grid",
+    "m and n are modest (≤ 100) and overflow is unlikely with 64-bit integers",
+    "The interviewer wants you to derive the recurrence, not jump to a formula",
+    "Follow-up adds obstacles or costs per cell — same traversal order, different transition"
+  ]}
+  againstItems={[
+    "The grid is empty and only the count is needed — C(m+n-2, m-1) is O(min(m,n)) with careful arithmetic",
+    "Moves include up or left — no topological order; DFS or cycle detection replaces this dp",
+    "The grid is huge but sparse — graph search, not a dense table",
+    "You need the actual paths listed — backtrack from dp table or DFS, counting alone is not enough",
+    "Modulo arithmetic is required (10^9+7) — combinatorics with mod is standard; dp with mod works too"
+  ]}
+/>
+
+## In an interview
+
+Draw a 3×3 grid, trace two paths, then say: "Every cell sums paths from top and left; edges are 1." Optionally mention the binomial identity as a sanity check.
+
+Follow-ups: **Unique Paths II** with obstacles (`0` cells → skip, `dp[i][j]=0`), minimum path sum, or "what if you can move in four directions?" (four-direction invalidates this dp). Edge: `1×1` grid → 1 path.
+
+Mention overflow on combinatorics for large grids if you use the formula — dp with bigint or mod is safer when they specify it.
+
+<KeyTakeaways items={[
+  "Unique Paths on a grid with only right/down moves: dp[i][j] = dp[i-1][j] + dp[i][j-1], first row and column are 1.",
+  "One-row rolling dp is enough — each row update only needs the current row's left neighbor.",
+  "Closed form: C(m+n-2, m-1) — (m-1) downs among (m+n-2) total steps.",
+  "Time O(mn) with DP, O(min(m,n)) with binomial; space O(n) rolled or O(mn) full table.",
+  "Unique Paths II adds obstacles by setting dp to 0 on blocked cells before summing neighbors.",
+  "Allowing up/left moves breaks the acyclic grid model — this recurrence no longer applies."
+]} />

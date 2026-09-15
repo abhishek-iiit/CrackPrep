@@ -1,0 +1,124 @@
+---
+title: "Network Delay Time"
+number: "03.09"
+summary: "Broadcast from one node is single-source shortest path — Dijkstra with a min-heap finds when the last node hears the signal."
+status: published
+free: true
+difficulty: core
+estMinutes: 15
+tags: [graph, heap, shortest-path]
+updated: "2026-09-15"
+---
+
+## Signal spreads along edges — the answer is the slowest shortest path
+
+You have `n` nodes and directed weighted edges `times[i] = (u, v, w)` meaning a signal from `u` reaches `v` in `w` time. Start at node `k`. Return the time until **all** nodes receive the signal, or `-1` if some node is unreachable.
+
+This is not BFS on an unweighted graph — edge weights differ. It is **single-source shortest path** from `k`. The answer is the **maximum** distance among all reachable nodes (the last one to hear), not the distance to a fixed target.
+
+Floyd-Warshall on n ≤ 100 is O(n³) and overkill. Dijkstra with a min-heap is O((V + E) log V) and is the intended tool when weights are non-negative — which they are here.
+
+## Dijkstra from k
+
+Build adjacency list `graph[u] → [{v, w}, ...]`. Initialize `dist[]` to Infinity, `dist[k] = 0`. Min-heap of `[time, node]`, starting `[0, k]`.
+
+Pop smallest time. If stale (time > dist[node]), skip. Relax each neighbor: if `time + w < dist[v]`, update and push `[dist[v], v]`. After the heap empties, answer is `max(dist)` over all nodes, or `-1` if any remains Infinity.
+
+<Steps>
+<Step title="Build adjacency list">
+  n up to 100, E up to 6000 — list representation is fine.
+</Step>
+<Step title="Run Dijkstra">
+  Track best-known arrival time per node. Lazy heap: push updates without deleting old entries; skip on pop when outdated.
+</Step>
+<Step title="Max distance or -1">
+  If any node has dist Infinity, return -1. Else return max of dist array.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function networkDelayTime(
+  times: number[][],
+  n: number,
+  k: number
+): number {
+  const graph: { to: number; w: number }[][] = Array.from({ length: n + 1 }, () => []);
+  for (const [u, v, w] of times) {
+    graph[u].push({ to: v, w });
+  }
+
+  const dist = new Array(n + 1).fill(Infinity);
+  dist[k] = 0;
+
+  // Min-heap via sort-on-push (n ≤ 100 — fine for interviews)
+  const heap: [number, number][] = [[0, k]];
+  heap.sort((a, b) => a[0] - b[0]);
+
+  function push(item: [number, number]): void {
+    heap.push(item);
+    heap.sort((a, b) => a[0] - b[0]);
+  }
+
+  while (heap.length > 0) {
+    const [time, node] = heap.shift()!;
+    if (time > dist[node]) continue;
+
+    for (const { to, w } of graph[node]) {
+      const next = time + w;
+      if (next < dist[to]) {
+        dist[to] = next;
+        push([next, to]);
+      }
+    }
+  }
+
+  let ans = 0;
+  for (let i = 1; i <= n; i++) {
+    if (dist[i] === Infinity) return -1;
+    ans = Math.max(ans, dist[i]);
+  }
+  return ans;
+}
+```
+
+Time **O(E log V)** with a proper binary heap; the sorted-array heap above is acceptable at this scale. Space **O(V + E)** for graph and distances.
+
+<Tradeoff
+  forTitle="Dijkstra when"
+  againstTitle="Bellman-Ford or BFS when"
+  forItems={[
+    "Edge weights are non-negative — relaxation order is valid",
+    "Single source to all nodes — Dijkstra is the direct template",
+    "Sparse graph with n ≤ 10⁴ and E modest — heap Dijkstra wins",
+    "Answer is max shortest path, not path reconstruction",
+    "Follow-up may add non-negative edge updates only — Dijkstra still applies",
+  ]}
+  againstItems={[
+    "Negative edge weights appear — Bellman-Ford or SPFA required",
+    "All edges weight 1 — BFS from k is simpler and O(V + E)",
+    "You need k shortest paths or path counts — different algorithms",
+    "Dense n ≤ 100 Floyd-Warshall is codeable in five minutes if E is huge",
+    "03.10 Cheapest Flights adds a hop limit — plain Dijkstra is wrong without modification",
+  ]}
+/>
+
+## In an interview
+
+Restate: directed weighted graph, signal from k, time until all nodes reached. Example small graph on the whiteboard.
+
+Say: "Single-source shortest paths — Dijkstra — then max of distances." Clarify unreachable → -1 before coding.
+
+Follow-ups: **03.10 Cheapest Flights Within K Stops** (edge count cap), path reconstruction, or parallel edges. Bug: returning sum of distances instead of max, or using BFS on weighted edges.
+
+<KeyTakeaways
+  items={[
+    "Network Delay Time is Dijkstra from k; the answer is the maximum shortest-path distance among all nodes.",
+    "Return -1 if any node stays unreachable after relaxation completes.",
+    "Non-negative weights are required for standard Dijkstra — negative edges need Bellman-Ford.",
+    "Lazy heap skips stale entries when a shorter path was already found.",
+    "Do not confuse this with minimum spanning tree — you need shortest paths from one source, not minimum total edge weight.",
+    "Unweighted variant drops the heap for BFS; hop-limited variant is 03.10 Cheapest Flights.",
+  ]}
+/>

@@ -1,0 +1,128 @@
+---
+title: "Prototype"
+number: "01.05"
+summary: "Clone a prefilled template instead of rebuilding from scratch when construction is expensive or defaults repeat across many instances."
+status: published
+free: true
+difficulty: core
+estMinutes: 13
+tags: [prototype, cloning, creational]
+updated: "2026-09-15"
+---
+
+## Paying full initialization cost for a one-field change
+
+A game spawns hundreds of enemies from a handful of archetypes — goblin, archer, boss. Each goblin shares the same mesh, animation set, loot table, and AI graph. Naive code calls a loader for every spawn: read assets from disk, parse JSON behavior trees, wire physics colliders. Spawn rate tanks because **construction repeats work that differs only in position and health**.
+
+Prototype says: build or load the archetype once, then **clone** it and apply the small delta. The clone operation copies the expensive shared state; the caller sets hit points, coordinates, or a name suffix. You trade a copy for repeated initialization — worthwhile when initialization dominates and instances are similar.
+
+The pattern is not "use `Object.assign` everywhere." It is an explicit **clone contract** — usually `clone()` on a Prototype interface — so deep vs shallow copying, reference sharing, and cycle handling are decided once, not rediscovered at every call site.
+
+## Clone the template, mutate the delta
+
+The roles:
+
+- **Prototype** — declares `clone(): Prototype` (or returns a concrete type)
+- **Concrete Prototype** — implements clone, deciding which fields are copied by value vs shared by reference
+- **Client** — holds a registry of prototype instances keyed by kind; `spawn("goblin")` clones the template and configures instance-specific state
+
+<Steps>
+  <Step title="Build the expensive template once">
+    Load assets, parse configs, compile shaders — whatever makes first construction slow. Store the result as a prototype instance, not a class definition alone.
+  </Step>
+  <Step title="Define clone semantics">
+    Document what is deep-copied vs shared. Shared immutable data (read-only mesh handles) can be referenced; mutable state (inventory, buff list) must be copied or reinitialized on clone.
+  </Step>
+  <Step title="Implement clone on the Prototype">
+    Return a new object with the same configured state. Language builtins (`structuredClone`, copy constructors) help when semantics match; custom logic when they do not.
+  </Step>
+  <Step title="Register prototypes by key">
+    A Prototype Registry maps `"goblin"` → goblinTemplate. Spawning is lookup plus clone plus per-instance tweaks — not re-load from disk.
+  </Step>
+  <Step title="Apply instance-specific state after clone">
+    Position, id, random seed — set these on the clone, never mutate the registry template in place.
+  </Step>
+</Steps>
+
+```typescript
+interface EnemyPrototype {
+  clone(): EnemyPrototype;
+  configure(spawn: { x: number; y: number; hp: number }): void;
+}
+
+class Goblin implements EnemyPrototype {
+  private constructor(
+    private readonly mesh: MeshHandle,
+    private readonly ai: BehaviorTree,
+    private hp: number,
+    private x: number,
+    private y: number,
+  ) {}
+
+  static async loadTemplate(): Promise<Goblin> {
+    const mesh = await MeshHandle.load("goblin.glb");
+    const ai = BehaviorTree.parse(await readFile("goblin.ai.json"));
+    return new Goblin(mesh, ai, 30, 0, 0);
+  }
+
+  clone(): Goblin {
+    return new Goblin(this.mesh, this.ai, this.hp, this.x, this.y);
+  }
+
+  configure({ x, y, hp }: { x: number; y: number; hp: number }) {
+    this.x = x;
+    this.y = y;
+    this.hp = hp;
+  }
+}
+```
+
+`mesh` and `ai` are shared across clones — immutable handles to loaded data. Each clone gets its own position and health. Get that wrong — shallow-copy a mutable list shared between clones — and fixing one goblin's buff fixes all of them.
+
+## When cloning beats building
+
+01.04 Builder assembles from scratch with explicit steps and validation. Prototype assumes **a good instance already exists** and duplication is cheaper than re-running the assembly pipeline. 01.02 Factory Method and 01.03 Abstract Factory choose **which type** to construct; Prototype chooses **copy an existing exemplar** — often the same concrete class every time.
+
+Cloning fails when instances are mostly unique — deep-copying a large graph to change one field wastes memory and CPU. It also fails when copy semantics are hard to reason about: objects with open file handles, database connections, or singleton references should not be blindly cloned. In those cases, build fresh or inject shared immutable dependencies the way the Goblin example shares `MeshHandle`.
+
+<Callout type="warn">
+Mutating the registry template instead of the clone is the classic production bug — every future spawn inherits the mutation. Treat prototypes in the registry as read-only after initialization, or clone defensively before any instance-specific write.
+</Callout>
+
+<Tradeoff
+  forTitle="Reach for it when"
+  againstTitle="Avoid it when"
+  forItems={[
+    "Object creation is expensive — I/O, parsing, remote config fetch — and new instances differ only slightly from a template",
+    "You spawn many instances from a small set of archetypes — game entities, document templates, form defaults",
+    "A Prototype Registry gives callers a stable key → template map without naming concrete classes at every spawn site",
+    "Shared immutable state across instances is safe to reference; per-instance state is small and applied after clone",
+    "Copy semantics can be defined clearly once — deep where needed, shallow for immutable handles",
+  ]}
+  againstItems={[
+    "Each instance is substantially different — cloning copies large graphs you immediately discard or overwrite",
+    "Objects hold non-copyable resources — sockets, locks, live transactions — where fresh construction or pooling is safer",
+    "Shallow vs deep copy bugs would corrupt shared mutable state between instances",
+    "Construction is already cheap — a constructor or 01.04 Builder with defaults costs less than clone machinery",
+    "Type variation is the main axis — Factory Method or Abstract Factory address polymorphic creation better than cloning one template",
+  ]}
+/>
+
+## In an interview
+
+Introduce it by **cost avoided**: "We load the goblin AI graph once and clone for each spawn — disk parse per enemy was dominating frame time." That anchors Prototype in performance and duplication, not UML.
+
+Expect **deep vs shallow copy** follow-ups, **registry pattern** (how clients get templates), and contrast with **01.04 Builder** (assemble from empty) and **01.02 Factory Method** (which class). In JavaScript-heavy interviews, `structuredClone` vs custom clone may come up — tie the answer to **which fields must not be shared**.
+
+Name the trap: cloning objects with shared mutable state so instances interfere, or cloning the template in the registry and poisoning every future spawn.
+
+<KeyTakeaways
+  items={[
+    "Prototype creates objects by cloning a prefilled template rather than repeating expensive initialization for each instance",
+    "Define clone semantics explicitly — which fields are shared immutable handles vs deep-copied mutable state",
+    "A Prototype Registry maps keys to template instances so clients spawn by archetype without re-running the load pipeline",
+    "Apply instance-specific configuration after cloning; never mutate the registry template in place",
+    "Use Prototype when instances are near-duplicates of a costly template — not when each object is mostly unique or holds non-copyable resources",
+    "Contrast with 01.04 Builder for stepwise assembly from scratch and with 01.02 Factory Method when the variation is which type to instantiate",
+  ]}
+/>

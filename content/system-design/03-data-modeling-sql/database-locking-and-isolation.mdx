@@ -1,32 +1,89 @@
 ---
 title: "Database Locking And Isolation"
 number: "03.06"
-summary: "Database Locking And Isolation — notes in progress."
-status: draft
+summary: "Concurrent transactions can interleave in ways that break what each one assumed was true; isolation levels name which interleavings are allowed."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 14
+tags: [sql, transactions, locking, isolation]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Two transactions, one row, and no agreement about who goes first
 
-What breaks without this, and the situation that forces the decision.
+A transaction is written as if it runs alone. Read the balance, check it's sufficient, write the new balance — three lines that are obviously correct in isolation. Run two of them concurrently against the same row and the obviousness disappears: both read the same starting balance, both compute independently, and whichever writes last wins, silently discarding the other transaction's update. Nothing failed. No error was raised. The database did exactly what each transaction asked, in an order neither of them specified, and the result is wrong anyway.
 
-## How it works
+Isolation is the guarantee about which of these interleavings a database will and won't allow you to observe. Locking is one of the two general mechanisms used to enforce it — the other, MVCC (03.07), takes a different approach worth reading as the direct counterpart to this lesson.
 
-The mechanism, step by step.
+## Name the anomaly before you name the isolation level
 
-## Tradeoffs
+Four specific things can go wrong when transactions overlap, and each has a name because each is a distinct, separately-preventable failure:
+
+- **Dirty read** — reading a row that another transaction has written but not yet committed. If that transaction rolls back, you've based a decision on data that never actually existed.
+- **Non-repeatable read** — reading the same row twice within one transaction and getting two different values, because another transaction committed a change to it in between.
+- **Phantom read** — re-running the same range query within one transaction and getting a different *set* of rows the second time, because another transaction inserted or deleted a row that matches the range's condition.
+- **Lost update** — the balance example above: two transactions each read, modify, and write the same row, and one write silently overwrites the other with no error and no record that anything was lost.
+
+The SQL standard defines four isolation levels by which of the first three anomalies they permit:
+
+| Isolation level | Dirty read | Non-repeatable read | Phantom read |
+| --- | --- | --- | --- |
+| Read Uncommitted | Allowed | Allowed | Allowed |
+| Read Committed | Prevented | Allowed | Allowed |
+| Repeatable Read | Prevented | Prevented | Allowed (by the standard) |
+| Serializable | Prevented | Prevented | Prevented |
+
+That table is the standard's promise, not necessarily any given engine's implementation. In practice, Postgres's Repeatable Read is snapshot isolation, and it prevents phantom reads too — stricter than the standard requires it to be — while still permitting a specific anomaly called write skew that plain locking-based Repeatable Read wouldn't (03.07 MVCC covers what that means concretely). MySQL's InnoDB defaults to Repeatable Read; Postgres and most others default to Read Committed. The label on the isolation level is a floor from the standard, not a guarantee that every engine stops there or gets there the same way — always check what a specific engine's default actually does before assuming the standard's table applies unmodified.
+
+Lost update isn't in the standard's table at all, because it isn't about visibility — it's a race on read-modify-write, and preventing it takes an explicit mechanism: `SELECT ... FOR UPDATE` to lock the row for the duration of the transaction, or an application-level compare-and-swap (03.02 SQL-Backed Key-Value Store's version column is exactly this pattern).
+
+## Locking is the classical mechanism, and it has a shape
+
+A **shared lock** allows any number of concurrent readers but blocks a writer. An **exclusive lock** allows exactly one holder and blocks everyone else, readers included. **Two-phase locking (2PL)** is the classical protocol for turning those two primitives into full serializability: a transaction acquires every lock it will ever need during a growing phase and releases none of them until it starts releasing all of them, typically all at once at commit — the shrinking phase. Once a transaction releases even one lock, it may never acquire another; that boundary is what prevents another transaction from sneaking in a conflicting operation between two locks the first transaction thought were both still held.
+
+Lock **granularity** trades concurrency against bookkeeping. A row-level lock lets unrelated rows proceed fully in parallel, at the cost of tracking a lock per contended row. A table-level lock is nearly free to track — one flag — but serializes every transaction touching the table regardless of whether they'd actually have conflicted. Most general-purpose engines default to row-level locking for exactly this reason, and escalate to broader locks only for operations that inherently touch everything, like an unqualified schema change.
+
+**Deadlock** is the failure mode locking introduces that MVCC's approach mostly avoids: transaction A holds a lock B wants, and B holds a lock A wants, and neither can proceed. The engine detects this with a wait-for graph and breaks the cycle by aborting one transaction — the "victim," usually the one that would be cheapest to roll back — and returning it a deadlock error the application is expected to catch and retry. This is a normal, expected outcome under contention, not a bug; a system that never sees a deadlock error under concurrent writes to shared rows is either not very concurrent or not locking anything that matters.
+
+<Callout type="warn">
+Acquiring locks on rows in different orders across different code paths is the single most common cause of application-level deadlocks. If one transaction locks account A then account B, and another locks B then A, they can deadlock any time both run concurrently — regardless of how correct each transaction looks read on its own. Locking rows in a consistent order (by primary key, say) across every code path that touches more than one of them removes the cycle before it can form.
+</Callout>
+
+## Why MVCC changes the shape of this problem
+
+Most engines in wide use today — Postgres, MySQL's InnoDB, Oracle — don't rely purely on locking for read/write concurrency. They use MVCC (03.07) instead, keeping multiple versions of a row so a reader can see a consistent snapshot without ever taking a lock that would block a writer, and a writer never blocks on a reader either. Locking doesn't disappear in these engines; it narrows to what MVCC alone can't resolve — two writers targeting the same row, and cases like lost update where you need explicit intent, not just visibility rules. Understanding which problem you're solving — visibility (what a transaction is allowed to see) versus mutual exclusion (who gets to write first) — is what keeps "isolation level" and "locking" from blurring into one vague idea.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Choose stronger isolation or explicit locking when"
+  againstTitle="Default to weaker isolation when"
+  forItems={[
+    "Correctness depends on preventing lost updates or write skew — inventory counts, balance transfers, seat or reservation holds",
+    "The cost of a rare anomaly (a double-booked seat, a negative balance) is far higher than the throughput cost of added contention",
+    "The stronger guarantee can be scoped narrowly — SELECT ... FOR UPDATE on the one row that matters — instead of raising the whole transaction's isolation level",
+    "A read-then-write sequence must be atomic and no compare-and-swap primitive already covers it",
+    "You've built a retry loop for serialization failures and deadlocks, since stronger isolation trades some throughput for aborting more often under contention",
+  ]}
+  againstItems={[
+    "Most transactions touch one row or are genuinely independent, so cross-transaction anomalies can't arise regardless of isolation level",
+    "The workload is read-heavy analytics or dashboards that tolerate a slightly stale but internally consistent snapshot",
+    "Throughput and connection concurrency matter more than guarding against an anomaly (phantom reads, in particular) the application never actually triggers",
+    "The engine's default already prevents dirty reads, which is the anomaly that shows up most often in practice by a wide margin",
+    "Serializable's overhead isn't worth paying on a hot path where measured contention is already low",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Name the anomaly you're worried about before naming an isolation level: "I'm worried about a lost update on the inventory count, so I want `SELECT ... FOR UPDATE` on that row, or a compare-and-swap on a version column — not just a stricter isolation level applied to the whole transaction." That ordering shows you understand isolation levels as a means to prevent specific anomalies, not as a dial you turn up when something feels risky. Expect a follow-up about deadlocks specifically — knowing that they're detected and resolved by aborting a victim, and that consistent lock ordering is the actual fix for the application-level cause, covers the follow-up cleanly.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Dirty reads, non-repeatable reads, phantom reads, and lost updates are four distinct anomalies, and isolation levels are defined by which ones they prevent",
+    "The SQL standard's isolation-level table is a floor, not a guarantee — Postgres's Repeatable Read is snapshot isolation and prevents phantoms the standard doesn't require it to",
+    "Two-phase locking acquires every lock before releasing any, which is what makes it sufficient for serializability",
+    "Lock granularity trades concurrency for bookkeeping: row-level locks maximize parallelism, table-level locks are cheap to track but serialize everyone",
+    "Deadlocks are a normal, expected outcome of locking under contention, detected via a wait-for graph and resolved by aborting one transaction as a retry-able error",
+    "Most modern engines use MVCC (03.07) for reader/writer concurrency and reserve explicit locking for writer-versus-writer conflicts and read-then-write atomicity",
+  ]}
+/>

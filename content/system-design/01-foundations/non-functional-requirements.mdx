@@ -1,32 +1,75 @@
 ---
 title: "Non-Functional Requirements"
 number: "01.03"
-summary: "Non-Functional Requirements — notes in progress."
-status: draft
+summary: "The taxonomy of latency, availability, durability, consistency, and cost — and why each has to become a testable number."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 14
+tags: [requirements, latency, availability, cost]
+updated: "2026-09-15"
 ---
 
-## The problem
+## "It should be fast and reliable" is not a requirement yet
 
-What breaks without this, and the situation that forces the decision.
+01.01 Requirements Clarification draws the line between what a system does and how well it must do it. This lesson is what belongs on the second list, and why leaving it blank is not neutral. "A user places an order" is a functional requirement — concrete, testable, you can name the API call. "It should be fast and reliable" sounds like it belongs next to it, but it has no unit, no threshold, and no way to fail a test. It is a slogan wearing the shape of a requirement.
 
-## How it works
+An unstated non-functional requirement does not stay unstated. It gets a value anyway, chosen by whatever default happens to be lying around. Nobody sets a request timeout, so the timeout is however long the OS lets a socket sit idle before the client gives up — minutes, not seconds. Nobody says how many copies a write needs before it's safe, so the answer is whatever replication factor the datastore ships with out of the box. Non-functional requirements that are never asked for are not requirements that don't exist; they are requirements resolved by someone else's default, discovered later, usually in production.
 
-The mechanism, step by step.
+## The categories worth naming out loud
 
-## Tradeoffs
+Each of these should end as a sentence with a number in it, not an adjective. The filter from 01.01 still applies: if you can't write a test that passes or fails, the threshold is still missing.
+
+| Category | The question to ask | A testable target |
+| --- | --- | --- |
+| Latency | How long can one request take before a user notices? | "reads at p99 under 200 ms" |
+| Throughput | How many operations per second at peak, not on average? | "12k writes/s at peak" — see 01.06 Back-Of-The-Envelope Capacity Planning for how that number gets derived |
+| Availability | What fraction of requests must get an answer at all? | "99.9% of requests succeed, measured monthly" — see 14.02 SLOs And Error Budgets for turning that into something a team gets paged against |
+| Durability | Once a write is acknowledged, can it ever be lost? | "at most one write in a billion lost per year" |
+| Consistency | Can two concurrent reads of the same data disagree, and for how long? | "reads may lag writes by up to 5 seconds" |
+| Scalability | Does this have to grow without a rewrite, and by how much? | "10x current traffic within two years, same architecture" |
+| Fault tolerance | What can fail without the system going down? | "any single node failure is invisible to users" |
+| Security & compliance | What data needs encryption, isolation, or a retention rule? | "PII encrypted at rest; deleted within 30 days of a request" |
+| Cost | What is the ceiling this design must fit under? | "under $0.001 of infra cost per request served" |
+
+## They price against each other, not in isolation
+
+None of these are free knobs you turn up independently. Stronger consistency usually costs latency, because answering "the latest value, guaranteed" requires either routing through a single source of truth or coordinating between replicas before responding — 01.05 Availability Durability Consistency And Cost and 06.04 CAP And PACELC both work through the shape of that specific trade. Higher durability costs write latency and money, because an acknowledgment has to wait for more independent copies of the data to exist somewhere durable before it can be sent. And every one of these costs against the last row in the table: five nines of availability layered onto a five-second consistency window in the same system is not five times more expensive than either alone — it's often an order of magnitude more, because the machinery built to guarantee one interacts with the machinery built to guarantee the other.
+
+The value of pinning a number down is that it decides architecture, not detail. Take a payment endpoint with the functional requirement "charge the customer's card." The moment a client is allowed to retry that request — because the network timed out, not because it failed — an implicit non-functional requirement appears: must a retried request charge the card twice? If the answer is no, the real requirement is "at most one charge per logical attempt, even under retries," and that pushes the design toward an idempotency key (02.09 Retries Timeouts And Idempotency) before it pushes toward any particular database. The functional requirement never changed. The number attached to it decided the architecture.
+
+<Callout type="gotcha">
+A default is still a decision, just one nobody inspected. Most ORMs ship with a default transaction isolation level, most HTTP clients ship with a default timeout, most message brokers ship with "at least once" delivery unless told otherwise. None of these defaults are wrong by themselves — they're wrong when nobody checked whether they match the actual requirement, and the gap surfaces as a duplicate charge, or a request that hangs for ninety seconds instead of failing fast at one.
+</Callout>
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Pin the number down precisely when"
+  againstTitle="Leave it approximate when"
+  forItems={[
+    "The requirement is user-facing and the difference between two plausible values changes the architecture, not just a config setting — 200 ms versus 2 seconds is the precompute-versus-query-time decision",
+    "Money or safety is directly at stake — payments, health data, anything with a contractual SLA attached",
+    "It interacts with another axis you've already fixed, and leaving this one unstated would silently undercut that one — a strict consistency target paired with no stated availability target, for instance",
+    "Being wrong by 10x would only be discovered in production, by a customer, rather than in a design review",
+  ]}
+  againstItems={[
+    "The component is internal, low-traffic, and no plausible number on this axis changes which technology or topology you'd pick",
+    "You're still exploring the functional shape, and pinning every axis down now would spend time you need elsewhere first",
+    "The number is cheap to revise later without a rewrite — a timeout, a retry count — not a partition key or a consistency model",
+    "Stakeholders have already deprioritized this requirement against ones that are pinned, and treating it as firm would misrepresent that",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+State the non-functional targets as soon as the functional scope is agreed, before drawing anything — ask for latency, availability, consistency, and cost by name, the same way you'd ask for the four numbers in 01.01. When an architecture clearly favors one axis over another, say which one you're sacrificing before you're asked: "I'm choosing to serve this from a cache that can be a few seconds stale, which means I'm giving up strict consistency for latency and cost" reads as a decision. Waiting for the interviewer to ask "what about consistency" and only then admitting it reads as an omission you were hoping nobody would notice.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "A non-functional requirement without a unit and a threshold is a slogan, not a requirement — 'fast' and 'reliable' cannot pass or fail a test",
+    "An unstated non-functional requirement is not absent; it is resolved by whatever default the framework, database, or last engineer chose",
+    "Latency, throughput, availability, durability, consistency, scalability, fault tolerance, security, and cost are separate axes, each needing its own explicit number",
+    "These axes price against each other, not independently — pushing consistency up typically costs latency, and pushing durability up typically costs write latency and money",
+    "A single non-functional number can decide an architecture on its own, the way a retry-safety requirement on a payment endpoint decides you need an idempotency key before you decide anything about storage",
+    "Say which axis you're trading away as soon as your design implies it, rather than waiting to be asked",
+  ]}
+/>

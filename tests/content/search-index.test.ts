@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { beforeAll, describe, expect, it } from "vitest";
-import { getSearchIndex, courseSlug } from "@/lib/content";
+import { getAllSearchIndex } from "@/lib/content";
 
 const OUT = "public/search-index.json";
 
@@ -15,9 +15,9 @@ describe("build-search-index script", () => {
     expect(existsSync(OUT)).toBe(true);
   });
 
-  it("matches what the content layer reports", () => {
+  it("matches the merged published-lesson index", () => {
     const written = JSON.parse(readFileSync(OUT, "utf8"));
-    expect(written).toEqual(getSearchIndex(courseSlug));
+    expect(written).toEqual(getAllSearchIndex());
   });
 
   it("carries only the five search fields", () => {

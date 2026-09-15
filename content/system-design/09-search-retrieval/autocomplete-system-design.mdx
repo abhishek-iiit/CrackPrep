@@ -1,32 +1,91 @@
 ---
 title: "Autocomplete System Design"
 number: "09.14"
-summary: "Autocomplete System Design — notes in progress."
-status: draft
+summary: "Prefix suggestions under a few dozen milliseconds: tries and sorted logs at the edge, popularity ranking, and how personalization stays off the critical path."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 14
+tags: [search, autocomplete, trie, latency]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Every keystroke is a query with a crueler budget
 
-What breaks without this, and the situation that forces the decision.
+Full search can spend a few hundred milliseconds retrieving and ranking (09.01 Information Retrieval System Design). Autocomplete fires on every character — often debounced to ~30–50 ms of idle typing, then expected to paint suggestions in well under 100 ms end-to-end, including network. Users treat lag here as a broken box, not a slow result page. That budget forces a different system: precomputed prefix indexes, tiny payloads, and almost no dependency on the live inverted index path.
 
-## How it works
+The product question is also narrower. Autocomplete is not "find the best documents"; it is "finish or steer the query the user is forming" using phrases that historically led to successful searches. Ranking suggestions by document BM25 is usually the wrong model; ranking by query-log popularity, conditioned on the prefix, is the right one.
 
-The mechanism, step by step.
+## What you store, and how you look it up
 
-## Tradeoffs
+At minimum the service needs a map from prefix → top-k completion strings, with scores. Building that map offline from query logs (success-weighted: searches that got clicks beat searches that bounced) keeps the online path dumb and fast.
+
+| Structure | Online cost | Update story | Fit |
+| --- | --- | --- | --- |
+| Trie / prefix tree with top-k at nodes | Walk prefix, read cached top-k | Rebuild or patch nodes from a batch job | Classic in-memory design |
+| Sorted completion list + binary search | Find prefix range, scan until k good scores | Append-friendly if rebuilt as immutable files | Simple, cache-friendly |
+| Finite-state transducer (FST) | Compact automata lookup | Rebuild artifacts per release | Lucene/Elasticsearch-style suggest |
+| Redis ZSET per prefix (or hashed prefixes) | `ZREVRANGE` on a key | Incremental score updates | Operationally familiar, memory-heavy at scale |
+
+Most high-QPS products materialize **only popular prefixes** — head query traffic is Zipfian, as in 09.07 Query Understanding Pipeline — and fall back to a slower path or fewer suggestions for rare tails. Storing every possible prefix of every query ever seen is how memory melts.
+
+<Steps>
+  <Step title="Aggregate query logs offline">
+    Count completions (or full queries) that followed each prefix, weight by success signals from 09.08 Search Feedback And Relevance Signals when available, and discard spam and injection attempts.
+  </Step>
+  <Step title="Build a prefix artifact">
+    Emit a trie, FST, or sharded sorted files listing top-k per prefix. Cap k small — 5 to 10 suggestions — because the UI will not show 50 and the network will not thank you.
+  </Step>
+  <Step title="Serve from memory at the edge">
+    Load the artifact into suggest nodes or an edge cache. The request path should be: normalize the prefix lightly, lookup, return strings. No fan-out to document shards.
+  </Step>
+  <Step title="Refresh on a cadence">
+    Hourly or daily rebuilds absorb trend shifts; true real-time popularity is optional and expensive. Personalization, if any, re-ranks a fetched candidate list rather than rebuilding the global structure per user.
+  </Step>
+</Steps>
+
+<Callout type="tip">
+Debounce on the client and cancel in-flight suggestion requests when the next keystroke arrives. Otherwise a slow response for `"runn"` can overwrite a fast response for `"running"` and the UI flickers backward — a race that presents as "autocomplete is haunted," not as a timeout in your metrics.
+</Callout>
+
+## Personalization, typos, and abuse
+
+Personalization (recent searches from 09.17 Recent Searches System Design, locale, vertical) should **re-rank** a small global candidate set, not own the prefix index. Keeping per-user tries doubles operational cost for marginal gain on the head.
+
+Typo-tolerant suggest is adjacent to 09.15 Did You Mean And Spell Correction but tighter on latency: often a fuzzy edit on the last token only, or a precomputed set of common misspelling prefixes. Running full spell correction before every suggest call usually blows the budget.
+
+Abuse is real: competitors and bots will type prefixes that inject competitor brands or garbage into your logs. Rate-limit suggest endpoints, filter completions against an allow/deny list for sensitive categories, and never take raw log strings to production without a quality gate.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Build a dedicated suggest service when"
+  againstTitle="Reuse full search or skip suggest when"
+  forItems={[
+    "Keystroke QPS would overwhelm the document search cluster if each prefix were a full text query",
+    "You can define success from query logs and ship an offline top-k-per-prefix artifact",
+    "Latency must stay in the tens of milliseconds at p99, which needs in-memory prefix structures",
+    "The product wants query steering — popular reformulations — not document titles as fake completions",
+    "Edge caching of popular prefixes can absorb a large fraction of volume cheaply",
+  ]}
+  againstItems={[
+    "Query volume is tiny and a simple SQL `LIKE 'prefix%'` on a small query table already meets latency",
+    "The only requirement is product-title typeahead against a catalog already in search — then use completion fields on the document index carefully, knowing you couple suggest to cluster load",
+    "There are no query logs yet, so popularity-ranked completions would be fiction",
+    "Legal or privacy constraints forbid retaining query strings long enough to build a log-derived model",
+    "Mobile clients are bandwidth-starved and the product chooses explicit search-only UX over live suggestions",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Start from the budget: "Autocomplete is a prefix → top-k query system fed by logs, not a document search, because it has to answer in tens of milliseconds per keystroke." Describe offline aggregation, an in-memory trie or FST, and client debounce. Follow-ups usually hit personalization (re-rank, don't rebuild), typo tolerance (limited fuzzy), and how you refresh popularity without blocking serves. Mention that fan-out to the main search index is the design you are avoiding.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Autocomplete is a latency-critical prefix lookup ranked by query popularity, not a full retrieve-and-rank over documents",
+    "Offline aggregation from query logs into a trie, FST, or sorted prefix artifact keeps the online path in memory and simple",
+    "Materialize head prefixes; the long tail does not deserve full precomputation under Zipfian traffic",
+    "Personalization should re-rank a small global candidate list rather than maintain per-user prefix indexes",
+    "Client debounce and request cancellation prevent out-of-order responses from making the UI jump backward",
+    "Filter and rate-limit suggest inputs — raw logs will otherwise teach your trie whatever bots typed yesterday",
+  ]}
+/>

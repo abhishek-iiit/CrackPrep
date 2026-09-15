@@ -1,32 +1,127 @@
 ---
 title: "S3-Style Object Storage Architecture"
 number: "07.14"
-summary: "S3-Style Object Storage Architecture — notes in progress."
-status: draft
+summary: "An S3-style store splits the hard problem — durable bytes — from the harder one — finding them: API frontends, a metadata plane, and append-only storage nodes behind a partition map."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: deep
+estMinutes: 20
+tags: [object-storage, s3, architecture, metadata]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Object storage is not a big filesystem with a REST API
 
-What breaks without this, and the situation that forces the decision.
+A naive design for "store files in the cloud" looks like a fleet of servers with large disks and an HTTP front door that maps `PUT /bucket/key` to `write(path)`. That design works until the day a disk dies with the only copy, a single machine becomes the bottleneck for a hot key, or renaming a bucket means walking a directory tree of a billion files. Production object stores — the family that S3 made the industry default — do not grow a filesystem. They separate three concerns that a filesystem keeps tangled: the API clients speak, the metadata that says what exists and where it lives, and the durable byte store that never has to understand buckets or ACLs.
 
-## How it works
+07.13 Object Storage Vs Database drew the boundary between databases and object stores. This lesson is the internal shape of the object-store side: how a request becomes durable bytes on more than one disk, and how a later `GET` finds them without asking every node in the cluster.
 
-The mechanism, step by step.
+## The three planes
 
-## Tradeoffs
+- **API / frontend tier** — stateless (or nearly) HTTP endpoints that authenticate, authorize, rate-limit, validate checksums, and translate REST verbs into internal RPCs. They hold no authoritative object data. Horizontal scale here is "add more gateways."
+- **Metadata plane** — the system of record for *what* exists: bucket, key, version id, size, content type, ACL pointers, encryption params, and — critically — the locator that says which storage partition holds the bytes. This plane is small relative to the data but is on the critical path of every request. 07.17 Metadata DB For Object Storage goes deep on why it is often the true scaling limit.
+- **Data plane (storage nodes)** — machines that append opaque chunks to local disks or to an append-only stream layer, replicate or erasure-code them, and serve byte ranges. They do not need a global directory of every object; they own partitions. 07.18 Append-Only Object Storage Stream Layer and 07.19 Object Storage Durability And Replication cover how those nodes actually keep bytes alive.
+
+Between the metadata plane and the data plane sits a **partition map**: a compact table that maps a partition id (or a hash of the object key) to the set of storage nodes currently responsible for it. 07.16 Partition Manager And Map Table is that component in isolation; here it is enough to know that frontends consult the map so a `PUT` and a later `GET` land on the same nodes without flooding the metadata DB with "which disk?" on every byte.
+
+```text
+Client
+  |
+  v
+[ API frontends ]  --auth, quotas, checksums--
+  |
+  +--> [ Metadata DB ]     object record + partition id
+  |
+  +--> [ Partition map ]   partition id -> node set
+  |
+  v
+[ Storage nodes ]  --append, replicate, scrub--
+```
+
+The diagram is deliberately boring. The interesting part is which arrows are on the acknowledge path and which are background.
+
+## The PUT path
+
+<Steps>
+  <Step title="Authenticate and authorize at the frontend">
+    The frontend checks credentials, bucket policy, and quotas before any durable work starts. Rejecting here is cheap; discovering "disk full on the only writable replica" after streaming 5 GB is not.
+  </Step>
+  <Step title="Allocate or look up the object identity">
+    For a new key the metadata plane reserves a version id (or generation) and a partition assignment — often by hashing the key into a partition id via the scheme in 07.15 Range Partitioning vs Consistent Hashing for Storage. For an overwrite, a new version id is allocated so the previous bytes can remain readable until the new write commits, or until lifecycle rules reclaim them.
+  </Step>
+  <Step title="Stream bytes to the responsible storage nodes">
+    The frontend (or a redirect to a storage node) writes the body to the partition's primary and its replicas, or to enough erasure-coded fragments. The write is append-oriented: storage nodes do not update an existing file in place for a new object version. End-to-end checksums (07.20) travel with the stream so corruption in flight is caught before acknowledgment.
+  </Step>
+  <Step title="Durably confirm the data plane">
+    The storage nodes fsync (or equivalent) and acknowledge once the durability policy is met — N replicas written, or K of M fragments. Until this step succeeds, the object must not be visible as the current version.
+  </Step>
+  <Step title="Commit the metadata record">
+    Only after the data plane is durable does the metadata plane publish the object: key, version, size, checksum, partition locator, timestamps. That commit is what makes the object listable and GET-able. Reverse the order and you advertise bytes that do not exist yet — the classic "I got 200 then GET 404" failure under crash.
+  </Step>
+  <Step title="Acknowledge the client">
+    The frontend returns success (and often an ETag derived from the checksum). Background work — cross-region copy, search indexing, lifecycle — starts from the committed metadata, not from the HTTP response alone.
+  </Step>
+</Steps>
+
+Commit order is load-bearing: **data first, metadata second**. A crash between them leaves unreclaimed bytes (an orphan the sweeper can delete) rather than a published object with no body (a dangling reference the client will hit). That asymmetry is intentional.
+
+## The GET path
+
+<Steps>
+  <Step title="Resolve the object in metadata">
+    Lookup by bucket and key (and optional version). A miss ends here with 404 — the data plane is never consulted for keys that do not exist, which is why metadata latency dominates empty-key traffic.
+  </Step>
+  <Step title="Read the partition map">
+    The object's partition id maps to the current node set. Maps are cached aggressively at the frontend; a stale map entry fails the request to a node that no longer owns the partition, then refreshes — rare compared to hits.
+  </Step>
+  <Step title="Fetch bytes from a storage node">
+    A replica (or reconstructed erasure-coded object) streams the body or the requested byte range. Checksums are verified on read as well as on write; silent bit rot is a scrubbing problem, not only an ingest problem.
+  </Step>
+  <Step title="Return to the client">
+    Frontends may add CDN-friendly headers; the object store itself stays a dumb byte server once metadata has pointed at the right place.
+  </Step>
+</Steps>
+
+## Why this shape beats a distributed filesystem
+
+A filesystem couples namespace, permissions, and block allocation into one tree that every mutation must keep consistent. Object stores deliberately weaken the namespace: flat keys with a delimiter convention for "folders," no inode renames across directories as a primary operation, and listing as a metadata query rather than a directory walk. In exchange they get independent scale for the three planes — you can add storage nodes without rewriting the metadata schema, and you can shard metadata without moving petabytes of payload.
+
+The costs are the ones operators actually feel. Metadata hotspots (one bucket with billions of keys, or a key prefix that hashes into one metadata shard). Small-object storms where PUT rate overwhelms metadata commits even though disk bandwidth is idle. And the operational coupling of map updates during rebalance — move too fast and GETs fan out to the wrong nodes; move too slow and a draining node stays in the hot path forever.
+
+<Callout type="note">
+Multipart upload is the same architecture with an extra metadata state machine: each part is a durable object-like write to the data plane; the final complete-multipart call commits a manifest in metadata that makes the parts appear as one key. The parts are invisible as the user-facing object until that commit — again, data before namespace.
+</Callout>
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Build (or buy) an S3-style split when"
+  againstTitle="Keep a simpler blob store when"
+  forItems={[
+    "Data volume or durability requirements outgrow what a single filesystem or database BLOB column can operate",
+    "You need independent scaling of API, metadata, and disk capacity",
+    "Immutability per version is acceptable — workloads are PUT/GET/DELETE, not in-place byte edits",
+    "You can invest in partition maps, scrubbing, and metadata lifecycle as first-class systems",
+    "Clients already speak the object API (SDKs, signed URLs, CDN origins)",
+  ]}
+  againstItems={[
+    "The dataset fits comfortably on one or a few machines with ordinary backups and the team will not operate a metadata plane",
+    "You need rich hierarchical renames, locks, and POSIX semantics more than horizontal scale",
+    "Object count is tiny and a database plus local or block storage already meets durability",
+    "Strong listing consistency and complex namespace operations matter more than per-object scale",
+    "You lack the operational budget for rebalancing, orphan cleanup, and cross-plane failure modes",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Draw the three planes and say which commit happens first: "bytes land on replicated storage nodes, then metadata publishes the key — never the reverse." Name the partition map as the cacheable join between metadata and disks. When asked how S3 stays durable, point at the data plane's replication or erasure coding (07.19) rather than at RAID on a single box. The follow-up you should pre-empt: what happens if the process crashes after data ack but before metadata commit — orphans, not user-visible corruption.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "S3-style architecture separates API frontends, a metadata plane, and a durable data plane joined by a partition map",
+    "Storage nodes own partitions of opaque bytes; they do not own the global namespace of buckets and keys",
+    "PUT commits data first and metadata second so a crash leaves orphans rather than published keys with missing bodies",
+    "GET resolves the object in metadata, consults the partition map, then streams from a storage node — missing keys never touch the data plane",
+    "The metadata plane is small in bytes but often the throughput and hotspot bottleneck for small-object workloads",
+    "Multipart upload reuses the same rule: parts are durable first; the manifest commit is what makes them one object",
+  ]}
+/>

@@ -1,0 +1,111 @@
+---
+title: "Longest Common Subsequence"
+number: "01.19"
+summary: "Two strings, one table: match diagonally extends LCS by one; mismatch takes max of left or top — classic 2D DP."
+status: published
+free: true
+difficulty: core
+estMinutes: 15
+tags: [dp, string]
+updated: "2026-09-15"
+---
+
+## Two sequences, shared order, arbitrary gaps
+
+Given two strings `text1` and `text2`, return the length of their longest **common subsequence** — characters that appear in both in the same order, not necessarily contiguous.
+
+`text1 = "abcde"`, `text2 = "ace"` → **3** (`"ace"`). Unlike longest common **substring**, gaps are allowed: `"ae"` in `"abcde"` and `"ace"` counts even though `'b'` is skipped.
+
+Try all pairs of indices: **O(2^(m+n))**. Memoized recursion on `(i, j)` — how much LCS remains in suffixes `text1[i:]` and `text2[j:]` — is **O(m × n)**. Fill a 2D table bottom-up for the same complexity without stack depth.
+
+## dp[i][j] = LCS length of prefixes
+
+Define `dp[i][j]` as LCS length of `text1[0..i-1]` and `text2[0..j-1]`. Empty prefix → 0.
+
+- If `text1[i-1] === text2[j-1]`: both must use this character → `dp[i][j] = dp[i-1][j-1] + 1`.
+- Else: drop one character from either side → `dp[i][j] = max(dp[i-1][j], dp[i][j-1])`.
+
+**Invariant:** when filling row by row, `dp[i-1][j-1]`, `dp[i-1][j]`, and `dp[i][j-1]` are already known.
+
+|   | ε | a | c | e |
+|---|---|---|---|---|
+| ε | 0 | 0 | 0 | 0 |
+| a | 0 | 1 | 1 | 1 |
+| b | 0 | 1 | 1 | 1 |
+| c | 0 | 1 | 2 | 2 |
+| d | 0 | 1 | 2 | 2 |
+| e | 0 | 1 | 2 | **3** |
+
+Answer: `dp[m][n]`.
+
+<Steps>
+<Step title="Build (m+1) × (n+1) table">Initialize row 0 and column 0 to 0.</Step>
+<Step title="Loop i from 1 to m, j from 1 to n">Compare last chars of each prefix.</Step>
+<Step title="Match → diagonal + 1">Both indices consume one character.</Step>
+<Step title="Mismatch → max(up, left)">Best LCS without aligning these two chars.</Step>
+<Step title="Return dp[m][n]">Full-string LCS length.</Step>
+</Steps>
+
+Space optimization: only the previous row is needed — **O(n)** space by rolling two 1D arrays.
+
+## Solution
+
+```ts
+function longestCommonSubsequence(text1: string, text2: string): number {
+  const m = text1.length;
+  const n = text2.length;
+  const dp: number[][] = Array.from({ length: m + 1 }, () =>
+    new Array(n + 1).fill(0)
+  );
+
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      if (text1[i - 1] === text2[j - 1]) {
+        dp[i][j] = dp[i - 1][j - 1] + 1;
+      } else {
+        dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
+      }
+    }
+  }
+
+  return dp[m][n];
+}
+```
+
+Time **O(m × n)**. Space **O(m × n)** — **O(min(m,n))** with row rolling.
+
+## Full table versus space-optimized row
+
+<Tradeoff
+  forTitle="2D table when"
+  againstTitle="Rolling 1D row when"
+  forItems={[
+    "You need to reconstruct the actual subsequence — walk back from dp[m][n] using the table",
+    "m and n are each ≤ 1000 — the full table is ~1M cells, acceptable",
+    "The interview is teaching the match/mismatch recurrence — the grid picture helps",
+    "Follow-up is edit distance (03.27) — same table shape, different transitions",
+  ]}
+  againstItems={[
+    "Only length is required and memory is tight — one row + prev row suffices",
+    "Strings are very long — O(mn) time may still bite; mention Hunt–Szymanski or hash tricks only if asked",
+    "You confuse i/j with 0-based string indices — extra row/column of zeros reduces off-by-one bugs",
+    "You try to greedy-match left-to-right — fails when early match blocks a longer later alignment",
+  ]}
+/>
+
+## In an interview
+
+Restate with `"abcde"` and `"ace"`. Draw the small table. State recurrence before indexing: match → +1 diagonal; else max of skip char in text1 or text2. Use `(m+1)×(n+1)` with empty-string base row/column.
+
+Follow-ups: print LCS string (backtrack), space-optimized O(n), longest common substring (contiguous — reset to 0 on mismatch), edit distance.
+
+Bug to name: 0-based string index vs 1-based dp index — use `text1[i-1]` when `dp[i][...]`.
+
+<KeyTakeaways items={[
+  "LCS on prefixes: match → dp[i-1][j-1]+1; mismatch → max(dp[i-1][j], dp[i][j-1]).",
+  "Extra row and column of zeros represent empty prefixes — kills most off-by-one errors.",
+  "Time O(mn); space O(mn) or O(min(m,n)) with rolling rows if only length matters.",
+  "Greedy left-to-right matching is wrong — DP explores skip-vs-match globally.",
+  "03.27 Edit Distance is the same grid with insert/delete/replace costs instead of max.",
+  "Reconstruction: from dp[m][n], move diagonal on match, else toward larger neighbor.",
+]} />

@@ -1,0 +1,106 @@
+---
+title: "Insert Interval"
+number: "01.35"
+summary: "Existing intervals are sorted — append before, merge the overlap, append after; three phases, one pass."
+status: published
+free: true
+difficulty: core
+estMinutes: 13
+tags: [intervals, array, merge]
+updated: "2026-09-15"
+---
+
+## One new interval into a sorted list
+
+You have non-overlapping intervals sorted by start, e.g. `[[1,3],[6,9]]`, and must insert `[2,5]`. The result is `[[1,5],[6,9]]` — the newcomer overlaps the first interval and merges into it. Inserting `[4,7]` would bridge `[1,3]` and `[6,9]` into `[1,9]`. Inserting `[10,12]` appends cleanly with no merge.
+
+Re-sorting the whole list after insert works but wastes the sorted invariant — O(n log n) instead of O(n). The linear approach treats the list as three zones: intervals ending before the new one starts, intervals that overlap the new one (possibly many), intervals starting after the merged block ends.
+
+## Three-phase single pass
+
+Overlap test for `[a,b]` and `[c,d]`: they intersect iff `a <= d && c <= b`. Walk the list:
+
+1. **Before:** while `intervals[i][1] < newInterval[0]`, push `intervals[i]`.
+2. **Overlap:** while intervals overlap `newInterval`, expand `newInterval` to `[min(starts), max(ends)]`.
+3. **After:** push the merged interval once, then copy the rest.
+
+<Steps>
+<Step title="Copy strictly before">
+Intervals whose end is strictly less than `newInterval[0]` cannot overlap — append unchanged.
+</Step>
+<Step title="Merge overlapping block">
+While `intervals[i][0] <= newInterval[1]`, widen `newInterval` to cover both ends.
+</Step>
+<Step title="Append merged + tail">
+Push the widened `newInterval`, then append remaining intervals.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function insert(
+  intervals: number[][],
+  newInterval: number[]
+): number[][] {
+  const result: number[][] = [];
+  let i = 0;
+  const n = intervals.length;
+
+  while (i < n && intervals[i][1] < newInterval[0]) {
+    result.push(intervals[i++]);
+  }
+
+  while (i < n && intervals[i][0] <= newInterval[1]) {
+    newInterval = [
+      Math.min(newInterval[0], intervals[i][0]),
+      Math.max(newInterval[1], intervals[i][1]),
+    ];
+    i++;
+  }
+  result.push(newInterval);
+
+  while (i < n) result.push(intervals[i++]);
+  return result;
+}
+```
+
+Time **O(n)**, space **O(n)** for the output (excluding input).
+
+<Callout type="tip">
+If the input were not sorted, sort by start first — then this same merge loop applies. 01.36 Merge Intervals is the batch version of the overlap-merge step.
+</Callout>
+
+<Tradeoff
+  forTitle="Three-phase linear merge when"
+  againstTitle="Sort-then-merge when"
+  forItems={[
+    "Intervals are already sorted and pairwise non-overlapping — the invariant is given",
+    "Only one interval is inserted per call — O(n) beats O(n log n) resort",
+    "Calendar APIs insert one booking at a time into a maintained sorted list",
+    "You want the same overlap predicate reused in 01.36 and 01.37",
+    "Output must stay sorted without an extra sort pass"
+  ]}
+  againstItems={[
+    "Input arrives unsorted or with existing overlaps — sort first, then merge all",
+    "Many inserts in arbitrary order — batch sort once or use a tree map",
+    "You are merging k interval lists — k-way merge or heap, not single insert",
+    "Problem asks for in-place mutation and memory is tight — still O(n) output either way",
+    "Intervals are on a huge sparse timeline — coordinate compression plus sort can win"
+  ]}
+/>
+
+## In an interview
+
+Confirm: sorted, non-overlapping input; inclusive bounds `[start, end]`; insert one interval; return merged sorted list. Walk `[1,3],[6,9]` + `[2,5]`. Describe three phases before coding. Overlap condition: `interval[i][0] <= newEnd` while merging.
+
+Follow-ups: delete an interval, insert many, binary search to find insertion point (still linear merge in worst case). Bug to flag: using `<` instead of `<=` on the overlap check and splitting intervals that should merge at a touching endpoint — clarify whether `[1,2]` and `[2,3]` merge (usually yes for this problem family).
+
+<KeyTakeaways items={[
+  "Sorted non-overlapping input splits into before / overlap / after relative to the new interval.",
+  "Overlap merge widens to [min start, max end] across all intersecting intervals in one forward scan.",
+  "The overlap test `a <= d && c <= b` is shared across the entire interval problem family.",
+  "Do not resort the full array — that ignores the precondition and adds an unnecessary log factor.",
+  "01.36 Merge Intervals runs the same merge loop after an initial sort; 01.38 Meeting Rooms checks overlap without merging.",
+  "Time O(n), space O(n) for the result array."
+]} />

@@ -1,0 +1,113 @@
+---
+title: "Singleton"
+number: "01.01"
+summary: "When exactly one shared instance must exist app-wide, and why global access often costs more testability than it saves in wiring."
+status: published
+free: true
+difficulty: core
+estMinutes: 13
+tags: [singleton, global-state, creational]
+updated: "2026-09-15"
+---
+
+## Three loggers, three formats, one on-call page
+
+Your service starts with a logger. Each team adds one where they need it — a file logger in the API layer, a JSON logger in the worker, a console logger in a migration script. None of them share configuration. Rotation policy differs, correlation IDs appear in one stream but not another, and a production incident means grep across three files that do not line up on timestamps.
+
+That is the mess Singleton is meant to prevent: **multiple independent instances of something that must behave as one**. Connection pool sizing, feature-flag client initialization, an in-process metrics registry — these are not "create when needed" objects. They carry process-wide state. Construct them twice and you get duplicated sockets, split counters, or two clients both believing they own the cache warming job.
+
+The pattern's job is narrow: guarantee one instance and expose a single access point. It is not a license to sprinkle global variables through the codebase. The decision is whether **one shared object** is a real invariant or just convenient wiring you have not bothered to inject yet.
+
+## One instance, one gate
+
+Classic Singleton has three moving parts:
+
+- a **private constructor** so outside code cannot call `new`
+- a **static holder** for the sole instance
+- a **static accessor** — traditionally `getInstance()` — that creates the instance on first use or returns the existing one
+
+Lazy initialization defers construction until the first call. That matters when startup is expensive — opening a database pool, reading a config file from disk — and you want to pay only if the feature path runs. Eager initialization creates the instance at class load time: simpler in single-threaded runtimes, but you pay the cost even when nothing ever asks for it.
+
+```typescript
+class AppLogger {
+  private static instance: AppLogger | undefined;
+
+  private constructor(private readonly sink: LogSink) {}
+
+  static getInstance(): AppLogger {
+    if (!AppLogger.instance) {
+      AppLogger.instance = new AppLogger(createSinkFromEnv());
+    }
+    return AppLogger.instance;
+  }
+
+  info(message: string, fields?: Record<string, unknown>) {
+    this.sink.write("info", message, fields);
+  }
+}
+```
+
+In TypeScript and many other languages, **module scope** often achieves the same outcome with less ceremony: export one object from a module and every importer shares it. Node's module cache, Python's import system, and Rust's `once_cell`/`lazy_static` patterns all give you "construct once per process" without a class-shaped Singleton. Treat the GoF pattern as the idea — single shared instance — not as a mandate to implement `getInstance()` everywhere.
+
+<Steps>
+  <Step title="Hide construction">
+    Make the constructor private (or otherwise unreachable) so callers cannot bypass the gate and create a second instance by accident.
+  </Step>
+  <Step title="Hold the sole instance">
+    Store it in a static field, a module-level variable, or a language-runtime singleton primitive — whichever matches your environment.
+  </Step>
+  <Step title="Expose one accessor">
+    Route all access through a single function or exported binding. First call initializes; later calls return the same object.
+  </Step>
+  <Step title="Decide thread safety explicitly">
+    In concurrent code, lazy initialization without synchronization can construct twice under race. Use a lock, an atomic once-flag, or eager init — do not assume "it probably runs once."
+  </Step>
+</Steps>
+
+## Hidden coupling and the test trap
+
+Singleton's convenience is also its failure mode. Every caller that reaches for `AppLogger.getInstance()` is **hard-wired to one concrete implementation**. Unit tests that need a silent logger or a fake metrics sink must either mutate global state (and remember to reset it) or reach for reflection and test-only hooks. Neither scales cleanly across a large suite.
+
+In distributed systems the constraint is sharper still: **one instance per process is not one instance globally**. Two API replicas each have their own Singleton cache warming flag — both run the job. A Singleton connection counter in memory does not coordinate across pods. The pattern solves local duplication, not cluster-wide uniqueness. For that you need an external store, a distributed lock, or leader election — none of which live inside a creational pattern.
+
+<Callout type="warn">
+A Singleton that reads environment variables or opens network connections inside `getInstance()` makes initialization order implicit. Import order and test setup order become load-bearing, and failures show up as "works in dev, flakes in CI" rather than as a clear constructor error at the call site.
+</Callout>
+
+<Tradeoff
+  forTitle="Reach for it when"
+  againstTitle="Avoid it when"
+  forItems={[
+    "Exactly one instance per process is a stated invariant — one metrics registry, one connection pool manager, one in-process event bus",
+    "Construction is expensive and you want lazy, once-only initialization with a single access point",
+    "The object is genuinely stateless apart from its identity as the shared coordinator — callers only need the same handle, not different configurations",
+    "Module-scope export in your language already gives you one instance and that is sufficient without a class wrapper",
+    "Replacing the instance at runtime is not a requirement — configuration is fixed for the process lifetime",
+  ]}
+  againstItems={[
+    "Callers need different configurations — multiple log levels, different backends, per-tenant clients — which points at injection, not a global",
+    "Tests must swap implementations without mutating shared global state between cases",
+    "You need cluster-wide uniqueness; one object per JVM or Node process does not solve coordination across replicas",
+    "The 'single instance' rule is really 'we did not design ownership' — a plain object passed from main() or a DI container is simpler",
+    "Hidden dependencies make the dependency graph unreadable; every file silently imports global state instead of declaring what it needs",
+  ]}
+/>
+
+## In an interview
+
+Introduce Singleton by the **cost of duplicate instances**, not by reciting `getInstance()`. "Our metrics client must register exactly once with the runtime — if every handler constructs its own, counters double-count and dashboards lie." That frames the invariant interviewers care about.
+
+Expect follow-ups on **thread safety** (double-checked locking pitfalls), **testing** (how do you mock it?), and **alternatives** (dependency injection, module exports, service locator — and why service locator is often Singleton's less honest cousin). If creational patterns come up in sequence, be ready to contrast with 01.02 Factory Method — Singleton controls *how many*; Factory Method controls *which type*.
+
+Name the misuse before they ask: using Singleton as a junk drawer for anything convenient to reach globally. The pattern is for shared resource identity, not for avoiding constructor arguments.
+
+<KeyTakeaways
+  items={[
+    "Singleton exists to prevent multiple independent instances of something that must behave as one shared object within a process",
+    "The mechanism is hidden construction plus a single accessor; in many languages a module export achieves the same goal with less ceremony",
+    "Lazy initialization must be made thread-safe explicitly — unsynchronized first-use creation can still produce two instances under race",
+    "One instance per process does not imply one instance cluster-wide; replicas each hold their own Singleton",
+    "Global access trades away testability and explicit dependencies — prefer injection when callers need different configurations or easy mocks",
+    "Reach for Singleton when duplicate instances would corrupt shared state or waste expensive setup; avoid it when the real problem is wiring, not cardinality",
+  ]}
+/>

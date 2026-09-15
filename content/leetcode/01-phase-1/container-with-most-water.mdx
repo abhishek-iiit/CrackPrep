@@ -1,0 +1,93 @@
+---
+title: "Container With Most Water"
+number: "01.10"
+summary: "Two pointers from both ends — always drop the shorter line; the longer one cannot limit a wider container."
+status: published
+free: true
+difficulty: core
+estMinutes: 12
+tags: [two-pointers, array, greedy]
+updated: "2026-09-15"
+---
+
+## Area between two vertical lines
+
+Given `height[i]` as the height of a vertical line at x = i, pick two lines forming a container with the x-axis. Water area equals `min(height[i], height[j]) × (j − i)`. Return maximum area. n ≥ 2.
+
+Brute force tries every pair (i, j) — O(n²). With n = 10⁵ that is about 5×10⁹ evaluations. Two pointers from both ends cut that to O(n) with one greedy move rule.
+
+The bottleneck is always the **shorter** line. Widening the window by moving the taller pointer inward cannot increase area — width shrinks and height is still capped by the shorter side you kept.
+
+## Inward from both ends
+
+Initialize `left = 0`, `right = n - 1`, `maxArea = 0`.
+
+While `left < right`: compute area with current pair, update max. Move the pointer at the **shorter** height inward by one. If equal height, either move works — pick one consistently.
+
+The invariant: no optimal pair is missed by always discarding the shorter side, because any container that kept the shorter line and moved the taller line only loses width without gaining height.
+
+Example `[1, 8, 6, 2, 5, 4, 8, 3, 7]`: best area 49 from heights 8 and 7 with width 7.
+
+## Solution
+
+```ts
+function maxArea(height: number[]): number {
+  let left = 0;
+  let right = height.length - 1;
+  let maxArea = 0;
+
+  while (left < right) {
+    const h = Math.min(height[left], height[right]);
+    const w = right - left;
+    maxArea = Math.max(maxArea, h * w);
+
+    if (height[left] < height[right]) {
+      left++;
+    } else {
+      right--;
+    }
+  }
+
+  return maxArea;
+}
+```
+
+Time **O(n)**, space **O(1)**.
+
+<Tradeoff
+  forTitle="Two pointers when"
+  againstTitle="Brute force pairs when"
+  forItems={[
+    "n up to 10⁵ requires O(n), not O(n²)",
+    "Heights are arbitrary — no monotonic stack prerequisite",
+    "Greedy shrink of shorter side is provably safe — not a heuristic",
+    "Only maximum area needed, not the pair indices (though easy to track)",
+    "Same two-pointer vocabulary as 01.09 3Sum on a different invariant",
+  ]}
+  againstItems={[
+    "Need all pairs achieving max area — brute force or scan with tie tracking",
+    "Follow-up is Trapping Rain Water (03.34) — different geometry, often two pointers from ends with max-left/max-right",
+    "n ≤ 100 and interviewer wants nested loops first",
+    "Height array is sorted — max area may be first and last in O(1)",
+    "Three-dimensional container variant — different algorithm entirely",
+  ]}
+/>
+
+## In an interview
+
+Restate area formula with min height × width. Example `[1,8,6,2,5,4,8,3,7]` → 49.
+
+Explain why moving the taller line cannot help before coding. Mention equal heights — move either side.
+
+Follow-ups: return indices, 03.34 Trapping Rain Water, prove correctness. Bug: always moving left regardless of height — misses the greedy proof and gets wrong answers on asymmetric arrays.
+
+<KeyTakeaways
+  items={[
+    "Container With Most Water maximizes min(h[i], h[j]) × (j − i) using two pointers from both ends",
+    "Always advance the shorter line — the taller line is never the limiting factor for a wider window",
+    "O(n) time, O(1) space — greedy two-pointer, not DP",
+    "Equal heights at both pointers: move either side; area cannot improve by keeping both fixed and shrinking symmetrically wrong",
+    "01.09 3Sum uses two pointers on sorted values; this uses them on geometry with a different move rule",
+    "03.34 Trapping Rain Water is the adjacent hard problem — water trapped, not container between two walls",
+  ]}
+/>

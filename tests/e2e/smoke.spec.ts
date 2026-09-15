@@ -10,6 +10,15 @@ const PAGES = [
     path: "/system-design/foundations/requirements-clarification",
     heading: /Requirements Clarification/i,
   },
+  { path: "/leetcode", heading: /LeetCode roadmap/i },
+  { path: "/leetcode/phase-1", heading: /Phase 1/i },
+  { path: "/leetcode/phase-1/two-sum", heading: /Two Sum/i },
+  { path: "/design-patterns", heading: /Design patterns/i },
+  { path: "/design-patterns/creational", heading: /Creational/i },
+  { path: "/design-patterns/creational/singleton", heading: /Singleton/i },
+  { path: "/case-studies", heading: /Design X case studies/i },
+  { path: "/case-studies/classics", heading: /Classics/i },
+  { path: "/case-studies/classics/url-shortener", heading: /URL Shortener/i },
 ];
 
 for (const page_ of PAGES) {

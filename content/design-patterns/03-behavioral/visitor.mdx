@@ -1,0 +1,103 @@
+---
+title: "Visitor"
+number: "03.10"
+summary: "Double dispatch lets you add new operations across a stable class hierarchy without editing every node class each time."
+status: published
+free: true
+difficulty: deep
+estMinutes: 19
+tags: [behavioral, ast, double-dispatch]
+updated: "2026-09-15"
+---
+
+## New operations on a frozen type hierarchy
+
+A compiler AST has `NumberLiteral`, `BinaryOp`, `VariableRef`, `FunctionCall` — twenty node types stabilised last year. Today you need pretty-print, type-check, constant-fold, and emit bytecode. The naive approach adds `prettyPrint()`, `typeCheck()`, `emit()` methods to every node class. Each new pass touches twenty files; node authors review unrelated teams' diffs; linking time grows with every analysis.
+
+Visitor separates **node types** (stable) from **operations** (keep adding). Each node implements `accept(visitor)` which calls back into the visitor with the concrete type — `visitor.visitBinaryOp(this)` — so the visitor knows the real type without `instanceof` chains. Add constant-folding by writing `ConstantFoldVisitor`; node classes stay untouched.
+
+The cost is inverted: adding a **new node type** means updating every visitor. Visitor wins when the hierarchy is stable and operations churn; it loses when node types churn and operations are few.
+
+## Element, visitor, and double dispatch
+
+- **Element** — node interface with `accept(v: Visitor)`.
+- **Concrete elements** — each implements `accept` as `visitor.visitConcrete(this)`.
+- **Visitor** — interface with one `visit` method per concrete element type.
+- **Concrete visitor** — implements one operation across all types (`TypeCheckVisitor`, `EmitVisitor`).
+
+<Steps>
+<Step title="Client walks the structure">
+Traverse the tree (03.03 Iterator or a recursive walk); at each node call `node.accept(visitor)`.
+</Step>
+<Step title="Element dispatches to visitor">
+`BinaryOp.accept(v) { v.visitBinaryOp(this); }` — second dispatch leg resolves overload by concrete type.
+</Step>
+<Step title="Visitor implements operation for that type">
+`visitBinaryOp(node) { checkTypes(node.left, node.right); ... }` — operation logic lives here, grouped by pass not by node file.
+</Step>
+</Steps>
+
+```typescript
+interface ExprVisitor<R> {
+  visitNumber(n: NumberLit): R;
+  visitBinary(b: BinaryOp): R;
+}
+
+class NumberLit {
+  constructor(readonly value: number) {}
+  accept<R>(v: ExprVisitor<R>) { return v.visitNumber(this); }
+}
+
+class PrettyPrint implements ExprVisitor<string> {
+  visitNumber(n: NumberLit) { return String(n.value); }
+  visitBinary(b: BinaryOp) {
+    return `(${b.left.accept(this)} ${b.op} ${b.right.accept(this)})`;
+  }
+}
+```
+
+Without language support for multimethods, `accept` + typed `visit` methods **is** double dispatch — not ceremony for its own sake.
+
+<Callout type="warn">
+Adding `StringLit` to the AST requires new `visitString` on Visitor and every concrete visitor implementation — compiler error if you miss one, which is good, but the sweep is real. Budget that work on every new node type.
+</Callout>
+
+## Visitor vs Iterator
+
+03.03 Iterator yields elements uniformly — same loop body for all items. Visitor runs **different code per type** — type-specific logic is the goal. Walk a folder tree with Iterator; compute total size differently for files vs folders with Visitor (or polymorphic methods on the nodes if operations are few and owned by the domain).
+
+## When a simple method on each node suffices
+
+If the only operations are `render` and `serialize` and they belong to the domain forever, put them on the nodes. Visitor pays off at three-plus independent passes maintained by different teams, or when node classes must stay minimal for dependency reasons.
+
+<Tradeoff
+  forTitle="Reach for Visitor when"
+  againstTitle="Avoid Visitor when"
+  forItems={[
+    "A stable class hierarchy needs many new operations added over time without editing node classes each pass",
+    "Operations are cross-cutting analyses — type check, lint, optimise, codegen — naturally grouped in visitor classes",
+    "Node classes should stay thin data shapes; behaviour of passes lives in dedicated modules",
+    "Compile-time enforcement that every node type handles a new pass — missing visit method is a build break",
+    "You already traverse with accept/visit — pretty-print and eval are separate visitor implementations"
+  ]}
+  againstItems={[
+    "Node types change frequently — every new type updates every visitor; hierarchy churn dominates",
+    "Only one or two operations exist and belong with the domain model — methods on nodes are clearer",
+    "The structure is not a closed hierarchy — sealed types or union types with pattern matching may be simpler (Rust, Swift, ML)",
+    "Visitors accumulate shared mutable state during traversal — debugging order-dependent bugs is painful",
+    "Performance-critical paths cannot afford double dispatch per node — consider tagged unions and switch tables"
+  ]}
+/>
+
+## In an interview
+
+Frame the trade: "AST node types are stable; compiler passes keep appearing — I would add each pass as a visitor so `FunctionCall` does not grow a new method per team." Sketch `accept` calling `visitConcrete`. Expect Visitor vs adding methods to nodes, and what happens when a new node type ships. Mention sealed hierarchies and pattern matching as modern alternatives. Name the failure: visitor with shared mutable accumulator corrupted by traversal order, or choosing Visitor when the hierarchy changes every sprint.
+
+<KeyTakeaways items={[
+  "Visitor lets you define new operations on a stable object structure without changing element classes — add a visitor instead.",
+  "Double dispatch — accept on the element, typed visit on the visitor — resolves the concrete type without instanceof chains.",
+  "Operations cluster in visitor classes; node classes stay data-oriented — good for compilers and document ASTs.",
+  "Adding a new node type requires updating every visitor — the trade flips if node types churn more than operations.",
+  "03.03 Iterator walks homogeneously; Visitor exists precisely when per-type behaviour must differ.",
+  "Sealed types plus pattern matching in modern languages often replace Visitor with less boilerplate — same design force, different syntax."
+]} />

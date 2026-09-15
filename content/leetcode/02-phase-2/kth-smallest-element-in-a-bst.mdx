@@ -1,0 +1,115 @@
+---
+title: "Kth Smallest Element in a BST"
+number: "02.19"
+summary: "Inorder walk on a BST visits values sorted — stop at the kth node without collecting all n."
+status: published
+free: true
+difficulty: core
+estMinutes: 13
+tags: [binary-tree, bst, inorder]
+updated: "2026-09-15"
+---
+
+## The kth statistic in sorted order
+
+Given the root of a BST and integer k, return the kth smallest value (1-indexed). A BST's inorder traversal visits nodes in ascending order — the kth stop is the answer.
+
+Brute force: inorder into an array, return `arr[k-1]`. O(n) time, O(n) space. Better: **stop early** once you have counted k nodes — still O(n) worst case (k = n) but O(h + k) in practice and O(h) extra space if iterative.
+
+With up to 10⁴ nodes and many queries, augmenting each node with subtree size gives O(log n) per query — overkill for a single k on one tree unless follow-up explicitly asks for repeated queries.
+
+Edge cases: k = 1 (minimum), k = n (maximum), skewed tree (inorder degenerates to a linked list — still O(n) visits).
+
+## Iterative inorder with a counter
+
+Use a stack. Go left as far as possible, push nodes. Pop, increment count, if count === k return value. Else go to right child and repeat left-spine push.
+
+The invariant: stack holds the path of nodes whose left subtrees are fully processed — standard iterative inorder.
+
+<Steps>
+<Step title="Initialize stack, current = root">
+  Classic inorder loop structure.
+</Step>
+<Step title="Push all left ancestors">
+  While current exists, push and go left.
+</Step>
+<Step title="Pop, count, maybe return">
+  On pop, increment; if count === k, return node.val. Else current = node.right.
+</Step>
+</Steps>
+
+Recursive inorder with a shared counter works too — return as soon as count hits k.
+
+## Solution
+
+```ts
+class TreeNode {
+  val: number;
+  left: TreeNode | null;
+  right: TreeNode | null;
+  constructor(val?: number, left?: TreeNode | null, right?: TreeNode | null) {
+    this.val = val ?? 0;
+    this.left = left ?? null;
+    this.right = right ?? null;
+  }
+}
+
+function kthSmallest(root: TreeNode | null, k: number): number {
+  const stack: TreeNode[] = [];
+  let current = root;
+  let count = 0;
+
+  while (current !== null || stack.length > 0) {
+    while (current !== null) {
+      stack.push(current);
+      current = current.left;
+    }
+
+    const node = stack.pop()!;
+    count++;
+    if (count === k) return node.val;
+
+    current = node.right;
+  }
+
+  return -1; // k valid per problem constraints
+}
+```
+
+Time **O(h + k)** — descend to smallest, then k steps; worst **O(n)** when k = n. Space **O(h)** stack.
+
+<Tradeoff
+  forTitle="Iterative inorder early stop when"
+  againstTitle="Augment nodes with subtree size when"
+  forItems={[
+    "Single query on one BST — simple and O(n) worst is fine for n ≤ 10⁴",
+    "You want O(h) space without mutating the tree",
+    "k is often small — stop after k pops, not full traversal",
+    "Same inorder code validates BST order in 02.18 variants",
+    "Interview time favors stack inorder over building rank arrays",
+  ]}
+  againstItems={[
+    "Follow-up: m queries on same tree — O(m log n) with augmented size beats O(m n)",
+    "Tree is rebalanced often — augmentation maintenance cost matters",
+    "Morris O(1) space required — threading replaces stack",
+    "You need deletion + kth smallest online — design problem with rank fields",
+    "kth largest instead — reverse inorder or k' = n - k + 1",
+  ]}
+/>
+
+## In an interview
+
+Confirm 1-indexed k and that the tree is a valid BST (02.18). Example: left spine tree, k = 3 walks down then back.
+
+Explain inorder = sorted order for BST. Say you will iterate with a stack and return on the kth pop — no full array.
+
+Bug: off-by-one on k (0-index vs 1-index); forgetting to traverse right subtree after a pop. Follow-ups: kth largest; multiple queries (augment size); kth in a stream of insertions.
+
+<KeyTakeaways items={[
+  "BST inorder traversal visits nodes in ascending order — kth stop is the kth smallest.",
+  "Early exit after k counted nodes avoids O(n) extra array storage.",
+  "Iterative inorder uses O(h) stack; Morris traversal achieves O(1) space if required.",
+  "Worst case O(n) when k = n or tree is a left/right spine.",
+  "Repeated queries on the same tree favor subtree-size augmentation for O(log n) each.",
+  "kth largest is reverse inorder or transform k to n - k + 1.",
+]} />

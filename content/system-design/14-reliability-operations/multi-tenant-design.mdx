@@ -1,32 +1,97 @@
 ---
 title: "Multi-Tenant Design"
 number: "14.15"
-summary: "Multi-Tenant Design — notes in progress."
-status: draft
+summary: "How to isolate customers who share infrastructure — tenancy models, noisy-neighbor controls, and the data boundaries that keep one tenant's breach or load from becoming everyone's."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 14
+tags: [multi-tenant, isolation, saas, quotas]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Sharing machines is easy; sharing fate is the part you design
 
-What breaks without this, and the situation that forces the decision.
+Multi-tenant systems serve many customers (tenants) from shared software and usually shared infrastructure. The business win is density and operational leverage. The engineering problem is **isolation**: one tenant's traffic spike, buggy integration, or compromised account should not exhaust the database, read another tenant's rows, or wipe another tenant's data. Tenancy is a reliability and security design (14.12), not only a `tenant_id` column.
 
-## How it works
+## Isolation spectrum
 
-The mechanism, step by step.
+| Model | How tenants separate | Density | Isolation |
+| --- | --- | --- | --- |
+| Shared schema (row-level) | `tenant_id` on rows; shared DB | Highest | Weakest if queries miss the predicate |
+| Shared DB, separate schemas | Schema per tenant | High | Better DDL isolation; operational overhead |
+| Database per tenant | Separate DB instances | Medium | Strong data isolation; costly at thousands of tenants |
+| Stack per tenant (silo) | Separate deploys/accounts | Lowest | Strongest; essentially managed single-tenant |
 
-## Tradeoffs
+Most SaaS starts row-level with strict discipline, then silos enterprise customers who pay for stronger isolation or have residency needs. Hybrid is normal: pool for the many, dedicated for the few.
+
+## The `tenant_id` invariant
+
+Every query, cache key, queue message, blob prefix, and log line that can carry data must be tenant-scoped. A single missing `WHERE tenant_id = ?` is a data leak. Defenses:
+
+- **Forced predicates** — ORM filters, middleware that injects tenant from the authenticated principal (never from a client-supplied header alone).
+- **Separate encryption keys per tenant** when crypto-isolation matters.
+- **Prefix object keys** with tenant id; IAM policies that cannot read across prefixes.
+- **Tests** that attempt cross-tenant reads in CI.
+
+Token and session design must bind tenant context: a user in tenant A is not authenticated for tenant B's admin API just because the user id string collides.
+
+## Noisy neighbors
+
+Shared CPU, connection pools, and disk IO mean one analytics-heavy tenant can starve others. Controls stack with rate limits (14.13):
+
+- Per-tenant request and concurrency quotas.
+- Separate pools or admission control for heavy report queries.
+- Storage and API quotas with soft then hard ceilings.
+- Noisy-neighbor detection (tenant-level USE metrics) and automatic throttle.
+
+<Callout type="warn">
+A global connection pool with no per-tenant cap lets one tenant hold every Postgres connection — the outage presents as "database down" for everyone while the graph shows one tenant's connection count equal to `max_connections`. Cap per tenant and shed (02.13) the offender.
+</Callout>
+
+## Tenancy in async and analytics paths
+
+Workers must read `tenant_id` from the message and apply the same authz when processing. Fan-out jobs should not run one tenant's export with another's credentials. Analytics pipelines need tenant-aware partitioning or separate warehouses for high-tier customers — otherwise retention and erasure (14.10, 14.11) cannot run per tenant, and one customer's PII infects shared aggregates.
+
+Migrations (14.05) on shared schemas affect all tenants at once — expand/contract discipline and canaries by tenant cohort (ramp a percentage of tenants) reduce blast radius.
+
+| Concern | Shared-schema approach | Silo approach |
+| --- | --- | --- |
+| Noisy neighbor | Quotas, pools, QoS | Natural isolation |
+| Compliance residency | Row + region pinning hard; often need silo | Deploy silo in-region |
+| Per-tenant custom schema | Painful | Natural |
+| Ops cost at 10k tenants | Favored | Usually impossible without automation |
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Share schema / pool tenants when"
+  againstTitle="Silo dedicated resources when"
+  forItems={[
+    "You need high density and can enforce tenant predicates and quotas reliably",
+    "Tenants are numerous and individually small",
+    "Operational maturity favors one migration pipeline and one on-call",
+    "Product margins do not support per-tenant clusters",
+    "Cross-tenant features (marketplace, global search of public data) need shared infrastructure carefully scoped",
+  ]}
+  againstItems={[
+    "Contract or regulation requires dedicated encryption, network, or database isolation",
+    "A tenant's load or customization routinely breaks noisy-neighbor budgets",
+    "Data residency cannot be met inside a shared regional pool",
+    "Enterprise customer pays for the isolation and you can automate silo provisioning",
+    "You cannot yet prove row-level isolation with tests and review — do not fake it at scale",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Define tenancy as shared infrastructure with isolation goals, pick a model (usually shared schema + quotas, silo for enterprise), and hammer the invariant: "tenant context comes from the credential, every data access is predicated, every cache key and blob is prefixed, workers carry tenant id." Mention noisy-neighbor connection caps and per-tenant rate limits. If asked about GDPR erasure, say per-tenant deletion must reach shared analytics too.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Multi-tenancy trades density for shared fate — isolation of data, performance, and failure is the core design problem",
+    "Row-level tenancy demands unbreakable tenant predicates; missing filters are cross-tenant leaks",
+    "Tenant identity must come from authenticated context, not from client-supplied ids alone",
+    "Noisy-neighbor controls — per-tenant quotas, connection caps, heavy-query isolation — are mandatory on shared pools",
+    "Async workers, caches, blobs, and analytics need the same tenant scoping as the OLTP path",
+    "Hybrid models are normal: pooled tenancy for most customers, siloed stacks for those who require stronger isolation",
+  ]}
+/>

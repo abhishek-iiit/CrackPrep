@@ -1,32 +1,92 @@
 ---
 title: "Observability For Distributed Systems"
 number: "14.01"
-summary: "Observability For Distributed Systems — notes in progress."
-status: draft
+summary: "Why logs alone cannot explain a distributed failure — metrics, traces, and structured events as complementary signals you design for, not bolt on."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 14
+tags: [observability, metrics, tracing, logging]
+updated: "2026-09-15"
 ---
 
-## The problem
+## You cannot SSH into a thousand replicas and eyeball stdout
 
-What breaks without this, and the situation that forces the decision.
+A single process fails with a stack trace. A distributed request fails as a slow user, a `503`, or a correct response that skipped a side effect three services away. The machine that "owns" the bug may be healthy; the one that dropped the message may have already rotated its logs. Observability is the property that lets you ask new questions about production behavior from the data the system already emits — not a synonym for "we installed a dashboard."
 
-## How it works
+Without it, every incident becomes archaeology: reproduce locally if you are lucky, ship guesswork if you are not. With the wrong shape of it — unbounded verbose logs, metrics with 50-dimensional labels, traces sampled to invisibility — you pay the cost of telemetry and still cannot answer "why was checkout slow for this customer at 14:02?"
 
-The mechanism, step by step.
+## Three signals that answer different questions
 
-## Tradeoffs
+| Signal | Answers | Weak at |
+| --- | --- | --- |
+| **Metrics** | How bad, how many, is it still happening? RED/USE aggregates, SLOs (14.02) | Explaining a single request; high-cardinality "why" |
+| **Logs / events** | What did this service think it did? Errors, state transitions | Correlating across services without shared IDs; volume cost |
+| **Traces** | Where did this request spend time across process boundaries? | Cheap fleet-wide aggregates; storage if you keep 100% forever |
+
+Metrics are cheap aggregates: counters, gauges, histograms. Track request rate, error rate, and latency histograms (RED) per service, and utilization / saturation / errors (USE) per resource. Histograms matter for latency — averages hide the p99 that users feel (02.12 Tail Latency).
+
+Logs earn their keep when they are **structured** (key-value fields, not free-text novels) and when every line that might join a cross-service story carries a **trace id** and **request id**. Debug-level logging in hot paths is how you DDOS your own logging pipeline during an outage — the moment you need logs most.
+
+Traces stitch spans across services via context propagation (traceparent / baggage). Sampling is mandatory at scale: head-based sampling is simple and biased toward discarding rare failures; tail-based sampling keeps slow and error traces at higher rates and is usually what you want for incident work once volume hurts.
+
+<Callout type="gotcha">
+A metric label for `user_id` or full `url` turns a time series into a unique series per user or path — cardinality explosion that melts the metrics backend and quietly drops the data you thought you were storing. Keep labels bounded (service, route template, status class, region); put high-cardinality identity in logs and traces instead.
+</Callout>
+
+## Design telemetry into the request path
+
+<Steps>
+  <Step title="Propagate context at every hop">
+    Gateways, workers, and async consumers must forward trace and request identifiers. A queue that drops headers creates a forest of orphan spans — useful metrics, useless traces.
+  </Step>
+  <Step title="Emit RED metrics at the edge of each service">
+    One histogram for latency, counters for requests and errors, with low-cardinality labels. This feeds both dashboards and SLO burn alerts (14.02 SLOs And Error Budgets).
+  </Step>
+  <Step title="Log at decision boundaries">
+    Authz deny, shed decision, retry, fallback to cache, "wrote to topic X" — the points where behavior branches. Not every function entry.
+  </Step>
+  <Step title="Trace the critical user journeys end to end">
+    Checkout, login, publish-video — few journeys, high value. Confirm sampling keeps errors and high latency.
+  </Step>
+</Steps>
+
+Async workflows need the same discipline with different topology: a producer span links to consumer spans via the message's trace context, or you accept that "the queue ate it" is invisible. 08.04 Queue Lag is a metric; without correlation ids on the job payload, lag does not tell you which user's work is stuck.
+
+## What "good" looks like during an incident
+
+Can you go from an SLO alert to a service, from the service to a spike in dependency latency, from a slow trace example to the span that dominates, from that span to logs for the same trace id — in minutes, without redeploying with more logging? If any hop requires a code change, observability was incomplete. 14.03 Incident Response assumes this ladder exists; without it, response degrades to rolling restarts and folklore.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Invest in traces + structured correlation when"
+  againstTitle="Lean on metrics and sparse logs when"
+  forItems={[
+    "Request paths regularly cross three or more services or include async hops",
+    "Incidents repeatedly stall on 'we see errors but not where time went'",
+    "You run SLOs on user journeys and need exemplars that explain burn",
+    "Multiple teams own slices of one request and need a shared artifact in the war room",
+    "Tail latency and dependency failures are the dominant failure modes",
+  ]}
+  againstItems={[
+    "A single deployable with a clear error surface — metrics and error logs already localize faults",
+    "Trace storage cost would exceed the value at your current scale and sampling discipline is not staffed",
+    "The system is batch-only and job-level success metrics answer the operational questions",
+    "You are still missing basic RED metrics — fix that before a tracing project",
+    "Privacy constraints forbid retaining request-correlated payloads and you have not designed scrubbing yet",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Define observability as the ability to explain novel failures from telemetry, then name the three pillars with different jobs: "Metrics tell me something is wrong; traces tell me where in the path; logs tell me what that service decided." Mention cardinality and context propagation unprompted — they are the usual follow-ups. For a design prompt, say which journey you would trace and which SLO metrics you would emit, rather than listing vendor product names.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Distributed failures rarely localize to one process's stdout; observability is designed correlation across metrics, logs, and traces",
+    "Metrics answer how bad and how widespread; logs answer what a service decided; traces answer where time and errors sit on a path",
+    "Propagate trace and request IDs across HTTP, RPC, and queue boundaries or cross-service stories fall apart",
+    "High-cardinality metric labels (user id, raw URL) can destroy a metrics backend — keep identity in logs and traces",
+    "Sample traces intelligently; prefer keeping errors and slow requests over uniform head sampling alone",
+    "If explaining a production failure requires a redeploy to add logs, the telemetry model was incomplete",
+  ]}
+/>

@@ -1,0 +1,119 @@
+---
+title: "Critical Connections in a Network"
+number: "03.12"
+summary: "Bridges are tree edges in DFS — Tarjan's low-link values find every edge whose removal splits the graph."
+status: published
+free: true
+difficulty: deep
+estMinutes: 18
+tags: [graph, dfs, tarjan]
+updated: "2026-09-15"
+---
+
+## One edge away from disconnecting
+
+An undirected network has `n` servers and bidirectional connections. A **critical connection** (bridge) is an edge that, if removed, increases the number of connected components. Return every such edge.
+
+For `n = 4` and edges `[[0,1], [1,2], [2,0], [1,3]]`, the triangle `0-1-2-0` survives losing any one side, but edge `[1,3]` is the only leaf attachment — remove it and server 3 is isolated. The answer is `[[1,3]]`.
+
+Brute force — delete each edge and BFS/DFS for connectivity — is **O(E × (V + E))**, which dies on `2 × 10⁵` edges. You need one DFS pass that knows which edges are indispensable.
+
+## Tarjan bridge detection via low links
+
+Run DFS from each unvisited node. Track `disc[u]` = discovery time and `low[u]` = lowest discovery time reachable from `u` using **zero or one** tree edge (standard bridge definition).
+
+For tree edge `u → v`: after exploring `v`, if `low[v] > disc[u]`, no back edge from `v`'s subtree reaches `u` or above — edge `(u, v)` is a bridge. Back edges to ancestors update `low[u]` via `min(low[u], disc[neighbor])`; skip the parent pointer on undirected adjacency.
+
+<Steps>
+<Step title="Build adjacency lists">
+Each edge `[a,b]` adds `b` to `adj[a]` and `a` to `adj[b]`.
+</Step>
+<Step title="DFS with disc and low">
+Increment a global timer. On visiting `u`, set `disc[u] = low[u] = time`. For neighbor `v`: if unvisited, set `parent[v] = u`, DFS `v`, then `low[u] = min(low[u], low[v])` and check bridge condition; if visited and `v !== parent[u]`, `low[u] = min(low[u], disc[v])`.
+</Step>
+<Step title="Collect bridges">
+When `low[v] > disc[u]`, push `[u, v]` (or `[min, max]` for consistent output).
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function criticalConnections(
+  n: number,
+  connections: number[][]
+): number[][] {
+  const adj: number[][] = Array.from({ length: n }, () => []);
+  for (const [a, b] of connections) {
+    adj[a].push(b);
+    adj[b].push(a);
+  }
+
+  const disc = new Array(n).fill(-1);
+  const low = new Array(n).fill(0);
+  const bridges: number[][] = [];
+  let time = 0;
+
+  function dfs(u: number, parent: number): void {
+    disc[u] = low[u] = time++;
+
+    for (const v of adj[u]) {
+      if (v === parent) continue;
+      if (disc[v] === -1) {
+        dfs(v, u);
+        low[u] = Math.min(low[u], low[v]);
+        if (low[v] > disc[u]) bridges.push([u, v]);
+      } else {
+        low[u] = Math.min(low[u], disc[v]);
+      }
+    }
+  }
+
+  for (let i = 0; i < n; i++) {
+    if (disc[i] === -1) dfs(i, -1);
+  }
+  return bridges;
+}
+```
+
+Time **O(V + E)** — each node and edge visited once. Space **O(V + E)** for adjacency and recursion stack (depth up to V in a line graph).
+
+<Callout type="gotcha">
+Parallel edges between the same pair are rare on LeetCode but would invalidate the simple bridge test — a multigraph needs different handling. Self-loops do not create bridges. The parent skip is mandatory on undirected DFS or you treat the back edge as a tree edge.
+</Callout>
+
+<Tradeoff
+  forTitle="Tarjan low-link DFS when"
+  againstTitle="Brute delete-and-test when"
+  forItems={[
+    "V and E are up to 2 × 10⁵ — one linear pass is required",
+    "You need every bridge, not just count whether the graph has one",
+    "The graph is undirected and fits adjacency-list DFS",
+    "Follow-ups ask articulation points (same disc/low machinery, different inequality)",
+    "You are already doing DFS for connected components — this extends the same traversal"
+  ]}
+  againstItems={[
+    "V and E are tiny (under 20) and clarity beats optimality in a timed sketch",
+    "The graph is dynamic with online edge insertions — offline Tarjan does not apply",
+    "You only need to know if *any* bridge exists — a simpler two-DFS biconnectivity check may suffice",
+    "Edges are directed — bridge definition changes; you need a different algorithm",
+    "Multigraph with duplicate edges — Tarjan needs edge-index tracking, not vertex pairs"
+  ]}
+/>
+
+## In an interview
+
+Restate: undirected graph, find all edges whose removal disconnects something. Draw the triangle-plus-tail example. State `n` and edge count constraints.
+
+Before coding, say Tarjan: discovery time and low link, bridge when a child's low stays strictly above your disc. Write DFS with an explicit parent parameter — do not rely on a visited set alone.
+
+Expect: articulation points (`low[v] >= disc[u]` with root special case), "what if we add one edge to minimize bridges?" (design question), comparison to 03.11 MST (MST cares about weight; bridges care about topology). Bug to name first: comparing `low[v]` to `disc[u]` with `>=` instead of `>` — that mislabels some non-bridge tree edges when parallel back edges exist.
+
+<KeyTakeaways items={[
+  "A bridge is a tree edge whose subtree has no back edge to an ancestor — Tarjan detects this with disc and low arrays in one DFS.",
+  "For tree edge u–v, bridge condition is low[v] > disc[u]; back edges update low via min(low[u], disc[v]).",
+  "Always skip the DFS parent on undirected graphs; otherwise every edge looks like a back edge.",
+  "Time O(V + E), space O(V + E) — same order as connected-components DFS.",
+  "Articulation points use the same low-link values with a slightly different comparison at the root.",
+  "03.14 Number of Provinces counts components; this problem finds the edges that define component vulnerability."
+]} />

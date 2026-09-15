@@ -1,32 +1,93 @@
 ---
 title: "Stop Words And Champion Lists"
 number: "09.06"
-summary: "Stop Words And Champion Lists — notes in progress."
-status: draft
+summary: "How ultra-common terms blow up posting-list merges — and the index-time tricks that keep retrieval fast without silently deleting meaning."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [search, stop-words, champion-lists, performance]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The most expensive words in the language
 
-What breaks without this, and the situation that forces the decision.
+In English corpora, a handful of tokens — `the`, `a`, `of`, `and`, `to`, `in` — appear in a huge fraction of documents. Their posting lists approach the size of the entire corpus. Intersecting or scoring those lists on every query (09.03 Boolean Tiered Search) means your "search" spend is dominated by words that barely discriminate relevance (IDF near zero in 09.04 TF-IDF Relevance Scoring).
 
-## How it works
+Two classical defenses exist, and they solve related but different problems. **Stop words** remove or specially handle ultra-common terms so they do not tax every query. **Champion lists** keep, for frequent terms, a short precomputed list of the *best* documents for that term so first-pass retrieval can avoid the full posting list. Both are index/query optimizations with recall consequences you must name, not free speedups.
 
-The mechanism, step by step.
+## Stop words: refuse to pay for noise
 
-## Tradeoffs
+A stop list is a set of terms excluded from indexing, from queries, or both.
+
+**Index-time stopping.** Those tokens never enter the inverted index. Postings shrink; phrase queries that depended on stopped words break (`"to be or not to be"` becomes meaningless if all those words are gone). Modern engines often **index** stop words but may still treat them specially at query time — positions preserved for phrases, full postings available when needed.
+
+**Query-time stopping.** Strip stop words from the query before retrieval. Safer for phrases if the index still has them: you can keep a phrase mode that does not strip. Default bag-of-words search drops them so AND/OR plans do not start from a 40-million-long list.
+
+Stopping is language- and domain-specific. `The` is a stop word in English prose; in a catalog of TV shows it might be part of a title you cannot afford to drop. `IT` as a pronoun vs `IT` as Information Technology — aggressive lowercasing plus stopping is how enterprise search "cannot find the IT department." Build stop lists from **df statistics on your corpus**, not from a generic blog list copied blindly.
+
+<Callout type="gotcha">
+Removing stop words improves average latency and often average precision for keyword search — and quietly destroys recall for queries where the "stop" word carries the intent (`the who`, `to`, band names, legal particles, code identifiers). Prefer query-time handling with an escape hatch (quote phrases, `+the`) over permanently deleting terms from the index unless you have measured the query mix.
+</Callout>
+
+## Champion lists: precompute the head of a long list
+
+Even after stopping, many terms remain common enough that full postings are huge — think `shoes` in a retail index, `error` in a log-search index. A **champion list** (also called a top docs list or tier-1 postings) stores only the top `r` documents for that term under a static quality metric: highest TF, highest BM25 contribution for a single-term query, PageRank-like authority, or a business popularity score.
+
+Query execution becomes tiered:
+
+1. For each query term, fetch champion lists (small).
+2. Run boolean combination + scoring on the union/intersection of champions.
+3. If the candidate set is too small or quality looks insufficient, fall back to full postings (expensive path).
+
+This is exactly the "pay at index time" move from 09.01 Information Retrieval System Design: sorting and truncating once per term beats scanning a multi-million posting list on every query that contains it.
+
+| Structure | Built when | Used when | Risk |
+| --- | --- | --- | --- |
+| Stop list | Config / corpus stats | Almost every query | Dropped intent-bearing tokens |
+| Full posting list | Index | Rare terms; fallback | Cost scales with df |
+| Champion list | Index (top-r per term) | First-pass retrieval for high-df terms | Recall loss if true answers sit outside top-r |
+
+Choosing `r` is a recall/latency tradeoff. Too small (r = 50) and good documents never enter candidates. Too large (r = 100_000) and you rebuilt a fat list. Values in the low thousands per term are a common starting discussion point — order-of-magnitude, tune against 09.09 Search Evaluation Metrics offline, do not cargo-cult a number.
+
+## How they work together with BM25
+
+Stop words remove terms whose IDF is useless and whose lists are toxic to merge cost. Champion lists accelerate terms you still index but cannot afford to scan fully on the hot path. BM25 (09.05) still scores whatever candidates retrieval returns — if champions exclude the right document, BM25 never sees it. Optimize retrieval with metrics that catch recall@k regressions, not only p99 latency.
+
+Static quality for champions must be query-independent (or single-term). Popularity bias is real: champions built only on clicks will under-represent new cold documents (09.08 Search Feedback And Relevance Signals). Mixing a text-local signal (high TF in title) with a mild popularity prior is safer than pure virality.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Use stop words / champions aggressively when"
+  againstTitle="Keep full postings in the hot path when"
+  forItems={[
+    "Query logs show most multi-term queries drag in ultra-high-df tokens that add merge cost without ranking value",
+    "p99 latency is dominated by a few common terms' full posting scans",
+    "You can preserve phrases and explicit plus-terms so intent-bearing 'stop' words still work",
+    "Offline eval shows champion r keeps recall@k flat while cutting list bytes touched by a large factor",
+    "The corpus has a stable head of popular documents that deserve to win first-pass retrieval",
+  ]}
+  againstItems={[
+    "Queries are short and every token is meaningful — stopping deletes the query",
+    "Legal/medical/code search where particles and common tokens disambiguate meaning",
+    "New documents must surface immediately and champions are rebuilt too slowly to include them",
+    "df distribution is flat enough that no term's list is a special problem",
+    "You lack eval harnessing to notice silent recall loss from an over-tight champion cutoff",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Frame them as cost control on the inverted index: "Common terms have postings nearly as long as the corpus; I stop true noise words at query time and keep champion lists for frequent but meaningful terms so first-pass retrieval merges kilobytes instead of megabytes." Then state the failure mode: both can hurt recall — empty results for `The Who`, or a perfect document missing because it was outside the champion cutoff.
 
-<KeyTakeaways items={["", "", ""]} />
+Tie back to tiered search (09.03): champions are a retrieval tier, not a ranking replacement. Ranking still needs BM25 (or more) on the candidates you kept.
+
+<KeyTakeaways
+  items={[
+    "Ultra-high-df terms make posting-list merges and scoring disproportionately expensive while contributing little IDF signal",
+    "Stop words exclude those terms from default query processing — preferably at query time, with phrase escapes, rather than erasing them from the index forever",
+    "Champion lists store the top-r documents per frequent term for a fast first retrieval tier, with fallback to full postings when needed",
+    "Both techniques trade recall for latency; validate with offline metrics, not only with p99 graphs",
+    "Stop lists must be corpus- and domain-specific — generic English lists break titles, brands, and technical tokens",
+    "Champions are index-time precomputation in the same spirit as the rest of IR design: pay once so the hot query path stays bounded",
+  ]}
+/>

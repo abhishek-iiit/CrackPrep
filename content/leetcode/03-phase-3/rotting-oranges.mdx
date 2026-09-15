@@ -1,0 +1,118 @@
+---
+title: "Rotting Oranges"
+number: "03.20"
+summary: "Rot spreads one minute per layer — multi-source BFS from all rotten oranges; return minutes or -1 if fresh remain."
+status: published
+free: true
+difficulty: core
+estMinutes: 13
+tags: [bfs, matrix, multi-source]
+updated: "2026-09-15"
+---
+
+## Simultaneous rot — minute-by-minute BFS, not simulation by brute force
+
+A grid has `0` (empty), `1` (fresh), `2` (rotten). Each minute, any fresh orange **4-adjacent** to a rotten one becomes rotten. Return minimum minutes until no fresh orange remains, or **-1** if impossible.
+
+```
+2 1 1       2 2 1       2 2 2
+1 1 0  →    2 1 0  →    2 2 0   →  answer 4 minutes
+0 1 1       0 1 1       0 2 1
+```
+
+Simulating minute-by-minute with nested loops works but is easy to get wrong on ordering. Multi-source BFS treats all initial `2` cells as distance 0 and expands one **layer** per minute — the BFS depth when the last fresh orange rots is the answer.
+
+## Multi-source BFS with a time layer
+
+Count `fresh` oranges. Enqueue all `2` positions. Process queue level-by-level: track `size = queue.length`, pop that many nodes as one minute, infect adjacent `1`s (decrement `fresh`, enqueue at `time + 1`). When queue empties, return `fresh === 0 ? minutes : -1`.
+
+The invariant: all oranges at the same BFS depth rot in the same minute — parallel spread matches the problem statement.
+
+<Steps>
+<Step title="Initialize">
+Count fresh; enqueue all rotten cells; `minutes = 0`.
+</Step>
+<Step title="Process one minute per layer">
+While queue non-empty and fresh > 0: `size = q.length`; repeat `size` times: pop, try 4 neighbors; if fresh neighbor, mark rotten, `fresh--`, push.
+</Step>
+<Step title="Check completion">
+After BFS, if `fresh > 0`, return -1; else return `minutes`.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function orangesRotting(grid: number[][]): number {
+  const m = grid.length, n = grid[0].length;
+  const dirs = [0, 1, 0, -1, 0];
+  const q: [number, number][] = [];
+  let fresh = 0;
+
+  for (let r = 0; r < m; r++) {
+    for (let c = 0; c < n; c++) {
+      if (grid[r][c] === 1) fresh++;
+      else if (grid[r][c] === 2) q.push([r, c]);
+    }
+  }
+
+  let minutes = 0;
+  while (q.length && fresh > 0) {
+    const size = q.length;
+    for (let i = 0; i < size; i++) {
+      const [r, c] = q.shift()!;
+      for (let d = 0; d < 4; d++) {
+        const nr = r + dirs[d], nc = c + dirs[d + 1];
+        if (nr < 0 || nr >= m || nc < 0 || nc >= n || grid[nr][nc] !== 1) continue;
+        grid[nr][nc] = 2;
+        fresh--;
+        q.push([nr, nc]);
+      }
+    }
+    minutes++;
+  }
+  return fresh === 0 ? minutes : -1;
+}
+```
+
+Time **O(m × n)**. Space **O(m × n)** for the queue.
+
+<Callout type="gotcha">
+Increment `minutes` once per **layer**, not per cell popped. Popping one rotten orange and immediately incrementing time double-counts when multiple sources spread in parallel.
+</Callout>
+
+<Tradeoff
+  forTitle="Multi-source BFS layers when"
+  againstTitle="Explicit minute simulation when"
+  forItems={[
+    "Parallel spread from many sources — BFS depth equals elapsed minutes",
+    "Grid is unweighted — each step costs one minute",
+    "You paired with 03.19 Walls and Gates — same queue seeding pattern",
+    "Need -1 detection — track remaining fresh count, stop early if queue dies with fresh left",
+    "Interview clarity — layer loop maps directly to 'each minute'"
+  ]}
+  againstItems={[
+    "Spread rate varies by cell — weighted BFS or Dijkstra replaces uniform layers",
+    "Grid is tiny — nested minute loops are acceptable if you explain parallel rot correctly",
+    "You need which orange rotted when for output listing — store timestamp per cell",
+    "3D grid or hex neighbors — same BFS, different dirs array",
+    "01.30 Number of Islands is component count — no time dimension"
+  ]}
+/>
+
+## In an interview
+
+Restate: 4-directional rot, all rotten start together, return minutes or -1. Walk a 3×3 example showing corner fresh orange reached last.
+
+Say multi-source BFS with level processing — enqueue all 2s, process queue in size-batches for each minute. Mention fresh counter for early -1.
+
+Expect: empty grid (0 fresh → 0 minutes), all rotten already (0), isolated fresh behind walls (-1), DFS alternative (less natural). Bug to name first: counting minutes per pop instead of per layer, or forgetting to return -1 when BFS ends with fresh > 0.
+
+<KeyTakeaways items={[
+  "Rotting Oranges is multi-source BFS — all initial rotten cells enqueue at minute 0 and spread one layer per minute.",
+  "Process the queue in fixed-size batches each iteration; batch count equals elapsed minutes.",
+  "Track fresh count; decrement when infecting; if queue empties with fresh > 0, return -1.",
+  "Mark grid[r][c] = 2 when infecting to avoid re-enqueueing the same orange.",
+  "Same multi-source template as 03.19 Walls and Gates, with a time counter on layers.",
+  "Time O(mn), space O(mn) for the BFS queue."
+]} />

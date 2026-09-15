@@ -1,32 +1,101 @@
 ---
 title: "Caching Layers"
 number: "05.01"
-summary: "Caching Layers — notes in progress."
-status: draft
+summary: "A single logical cache is really a stack of layers between the request and the source of truth, and each one trades distance from the origin for speed."
+status: published
 free: true
 difficulty: core
 estMinutes: 12
+tags: [caching, architecture, latency, cdn]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The cheapest request is the one that never reaches the database
 
-What breaks without this, and the situation that forces the decision.
+Every system that reads more than it writes eventually hits the same wall: the database can compute the right answer, but computing it again for the thousandth identical request is pure waste. The data has not changed. The query has not changed. Only the cost has been paid again, in full, for no new information. A product page, a user's profile, a follower count, a search results page for a common query — all of these are read far more often than they change, sometimes by four or five orders of magnitude, and every one of those reads is an opportunity to answer from something faster than the system of record.
 
-## How it works
+Caching is the general answer: keep a copy of the answer somewhere cheaper to reach than the place that computed it, and serve from that copy until it can no longer be trusted. But "somewhere cheaper" is not one place. A request from a phone in Mumbai to a database in Virginia crosses a browser, possibly a CDN edge node, an application process, possibly a shared in-memory store, and finally the database's own buffer pool before it touches disk. Each of those is a place a cache can sit, and each one you add absorbs traffic before it reaches the next — at the cost of one more place that can hold a stale answer.
 
-The mechanism, step by step.
+The design question is rarely "should I cache this." It is which layer, how close to the request, and what you are willing to have wrong for how long.
 
-## Tradeoffs
+## The stack, nearest to farthest
+
+- **Browser cache.** Lives on the requester's device. Governed by HTTP headers (`Cache-Control`, `ETag`, `Last-Modified`) that the origin sets and the browser obeys without a network call at all on a hit. Zero network cost, but the origin has almost no ability to invalidate it early — a bad `max-age` keeps serving a wrong answer to that one user until it expires or they hard-refresh.
+- **CDN / edge cache.** A network of points of presence geographically close to requesters, caching responses (static assets, and increasingly whole API responses) so that most requests never reach the origin data center at all. Shared across every user hitting that edge node, which makes its hit rate far better than a browser cache's, but purging it is a fleet-wide operation, not a per-user one.
+- **Application-layer cache.** An in-process data structure — a hash map with a size bound, a library like Caffeine, or a hand-rolled LRU wrapper — living inside the application server itself. No network hop, sub-microsecond, but scoped to one process: with fifty instances behind a load balancer there are fifty independent copies, cold on every deploy, and none of them know when another one's copy goes stale.
+- **Distributed cache.** A shared remote store — Redis or Memcached, typically — that every application instance talks to over the network. One copy of the truth (or one replicated copy) instead of fifty, so invalidation is a single operation, at the cost of a network round trip that a local cache does not pay. 05.02 Distributed Cache Design covers how this tier is built and organized.
+- **Database buffer pool / page cache.** The innermost layer, and the one you rarely control directly: the database keeps its most recently used disk pages in memory so that a repeated query does not necessarily mean a repeated disk read. It sits behind every layer above it and is the last line before the query actually costs an I/O.
+
+| Layer | Typical latency | Shared across | Who invalidates it | Staleness risk |
+| --- | --- | --- | --- | --- |
+| Browser | ~0 (no network call) | One user, one device | The origin, via headers, ahead of time | High — origin cannot reach in and revoke early |
+| CDN / edge | 1–20 ms, regional | Every user at that edge node | An explicit purge call, fleet-wide | Medium — purge is coarse and can lag |
+| Application-local | Sub-millisecond | One process | That process only | Low duration, but inconsistent across instances |
+| Distributed (Redis/Memcached) | ~1 ms, one network hop | Every application instance | One write, seen everywhere at once | Low — single copy of the cached truth |
+| DB buffer pool | Sub-millisecond once resident | One database instance | The database's own eviction policy | Not really a correctness concern — it's a page cache, not a derived answer |
+
+The pattern across every row is the same trade: the farther a layer sits from the origin, the cheaper and faster it is to hit, and the harder and coarser it is to correct once it is wrong. A browser cache is nearly free to hit and nearly impossible to revoke early. A database buffer pool is trivially correct — it holds real pages, not derived answers — but you have paid almost the full cost of the request to reach it.
+
+## A read's path through the stack
+
+<Steps>
+  <Step title="Browser cache">
+    Check locally first, no network call. A hit ends the request here for the cost of a disk or memory read on the client.
+  </Step>
+  <Step title="CDN edge">
+    A miss (or a resource marked non-cacheable client-side) goes out to the nearest edge node. If that edge has served this exact response recently and it is still within its TTL, it answers directly — the origin data center never sees the request.
+  </Step>
+  <Step title="Load balancer to an application instance">
+    A miss at the edge is forwarded to the origin, where a load balancer picks one of many application instances.
+  </Step>
+  <Step title="Application-local cache">
+    That instance checks its own in-process cache. A hit is sub-microsecond, but only that one instance benefits — the other forty-nine behind the load balancer are still cold for this key.
+  </Step>
+  <Step title="Distributed cache">
+    A miss locally checks the shared remote cache. If another instance populated this key recently, this is a hit at the cost of one network round trip — cheap next to a database query, expensive next to everything above it.
+  </Step>
+  <Step title="Database">
+    Only a miss at every layer above reaches here, and even then the database's own buffer pool may still have the page in memory. This is the only layer that can compute a genuinely new answer; every layer above it can only repeat an old one.
+  </Step>
+</Steps>
+
+Notice what this buys you even before any single layer is well-tuned: a request that misses at the edge but hits the distributed cache still never touches the database, and a request that misses everywhere still benefits from the database's own page cache. The layers do not have to be perfect individually — they only have to peel off enough traffic each that what reaches the next one is a fraction of what arrived at this one.
+
+<Callout type="note">
+"Cache" without a qualifier is ambiguous in a design discussion, and the ambiguity costs real time. Naming the layer — "I'd put an edge cache in front of the product image, and a distributed cache in front of the personalized recommendation" — is doing real design work; saying "I'd add a cache" is not, because the four layers above answer to completely different invalidation stories and failure modes.
+</Callout>
+
+## Choosing where in the stack to put an answer
+
+Not every answer belongs at every layer. A personalized feed cannot sit in a CDN, because a CDN caches by URL and this answer differs per user; a static image can sit there for a year. A number that must be exactly current — an account balance — has no business in any cache layer at all, or belongs only in the layer closest to the source, held for milliseconds, not because caching it is impossible but because the cost of being wrong outweighs anything saved.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Push a layer closer to the user"
+  againstTitle="Keep it close to the source instead"
+  forItems={[
+    "The response is identical for many requesters — a public page, an image, a bundle of JS — so a shared edge or CDN cache serves everyone from one cached copy",
+    "Some staleness is acceptable and bounded — a product price that is a minute old is a minor annoyance, not a broken transaction",
+    "The origin would otherwise pay the same computation over and over for traffic that has no new information in it",
+    "Bandwidth or origin capacity, not correctness, is the binding constraint",
+  ]}
+  againstItems={[
+    "The answer is unique per requester or per request and a shared cache would either miss constantly or leak one user's data to another",
+    "Correctness has to be immediate — a balance, an inventory count at checkout, anything where 'probably right' is a bug",
+    "Invalidation has to be instant and precise, and a farther layer can only be purged coarsely or after a delay",
+    "The data changes more often than it is read, so caching it adds invalidation cost without saving any real computation",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Name the layer, not just "cache." When you say "I'd cache this," the next sentence should say where — edge, distributed, or application-local — and why that layer's invalidation story fits the data. Expect the follow-up "what happens when it's wrong": for a CDN answer that means naming how a purge propagates and how long a stale response can survive it; for a distributed cache it means naming the eviction and TTL story, which 05.03 Cache Eviction Policies and 05.04 TTL Expiration And Cache Reapers cover in depth. The strongest signal in this part of an interview is treating "which layer" as a real decision with a reason, not a reflexive "add Redis" to every read path.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "A cache is not one thing — a request can pass through a browser cache, a CDN, an application-local cache, a distributed cache, and a database buffer pool before it computes anything new",
+    "Distance from the origin trades in one direction: farther layers are cheaper and faster to hit, and coarser and slower to correct when they hold a wrong answer",
+    "Each layer only has to absorb a fraction of the traffic that reaches it — the layers compound, so an imperfect cache at every level still removes most of the load from the database",
+    "A personalized or per-user answer cannot live in a shared layer like a CDN; a response that is identical for every requester should live as close to them as possible",
+    "Naming the specific layer and its invalidation story is what separates a real caching decision from reflexively adding Redis to a read path",
+  ]}
+/>

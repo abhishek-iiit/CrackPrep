@@ -1,32 +1,75 @@
 ---
 title: "Service-To-Service Communication"
 number: "02.02"
-summary: "Service-To-Service Communication — notes in progress."
-status: draft
+summary: "Every call to another service is synchronous or it isn't, and that one choice decides whether a downstream outage becomes your outage too."
+status: published
 free: true
 difficulty: core
 estMinutes: 12
+tags: [microservices, rpc, messaging, coupling]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The network turned every function call into a bet
 
-What breaks without this, and the situation that forces the decision.
+Inside one process, calling another module costs a stack frame. Split that module into its own service and the same call now crosses a process boundary, a network, and someone else's deploy schedule — and it can fail in ways a function call structurally cannot. It can time out with the callee mid-way through the work. It can succeed on the server while the response is lost in transit. It can hit a version of the service that shipped ten minutes ago and behaves differently than the one you tested against. The question "how does service A talk to service B" is really the question "which of those failure modes are we willing to accept, and who has to handle them."
 
-## How it works
+There are two shapes of answer, and almost every specific technology choice — REST, gRPC, a message queue, an event bus — is downstream of picking one of them first.
 
-The mechanism, step by step.
+## Synchronous: the caller waits
 
-## Tradeoffs
+A synchronous call — REST or gRPC, 02.03 HTTP REST And gRPC covers the choice between the two — blocks the caller until the callee responds. This couples the two services in time: both must be up, reachable, and responsive at the same instant, or the request fails right there. That coupling buys something real. The caller gets an answer, or an explicit failure, before it does anything else, which is exactly what you want when the next step in the caller's own logic depends on the result — check inventory before confirming an order, authorize before returning a resource.
+
+The cost is that availability multiplies. If service A calls B calls C synchronously, and each is 99.9% available on its own, the request touching all three is available for roughly the product of the three, not the average — call it 99.7%, and the gap widens with every additional hop. Latency compounds the same way: a chain of four services each adding 20 ms puts 80 ms on the critical path before the client sees anything, and a slow callee makes every caller upstream of it slow too, unless something intervenes. 06.10 Circuit Breakers And Timeouts and 02.12 Tail Latency both exist because synchronous chains propagate both failure and slowness by default.
+
+## Asynchronous: the caller doesn't wait
+
+An asynchronous call — dropping a message on a queue or publishing an event — decouples the two services in time. The caller writes the message and moves on; the callee reads it whenever it next polls, which might be milliseconds later or, if the callee is down for maintenance, hours later. Nothing about the caller's request depends on the callee being up right now, which is exactly the property you want for work that doesn't need an answer to keep going: send a confirmation email, update a search index, record an analytics event, charge a fee that can be retried.
+
+That decoupling has its own price. The caller no longer knows, at the moment it enqueues, whether the work will succeed — success and failure are discovered later, somewhere else, and have to be handled there, typically a retry policy and a dead-letter queue for whatever a retry can't fix. Ordering is no longer free either: two messages from the same caller can be processed out of order unless the transport specifically guarantees per-key ordering. And debugging gets harder — a request that used to be one traceable call stack is now a message sitting in a queue that some other process picks up on its own schedule, so tracing a single user action across the system means correlating across a broker instead of reading one stack trace.
+
+| Dimension | Synchronous (RPC) | Asynchronous (queue/event) |
+| --- | --- | --- |
+| Time coupling | Caller and callee both up at once | Callee can be down; catches up later |
+| Failure visibility | Immediate — caller gets an error now | Deferred — surfaces downstream or in a dead-letter queue |
+| Ordering | Implicit, one call at a time | Requires an explicit per-key ordering guarantee |
+| Latency on the caller | Sum of every hop in the chain | Nearly zero — enqueue and return |
+| Best fit | The caller needs the result to proceed | The work can happen later, or fans out to many consumers |
+
+<Callout type="note">
+These aren't mutually exclusive within one system. A checkout flow might call a payment service synchronously — you need to know now whether the charge succeeded — while emitting an asynchronous event for "order placed" that fans out to email, analytics, and recommendations. The decision is per call, not per system.
+</Callout>
+
+Somewhere between the two sits async request-reply: the caller enqueues a request and polls or subscribes for a correlated response later, getting the decoupled reliability of a queue without giving up on getting an answer eventually. It costs more to build — a correlation id and somewhere to park the response — and it's usually reached for only when a synchronous call would time out on work that genuinely takes a while, a video transcode or a large report, not as a default choice.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Call synchronously when"
+  againstTitle="Communicate asynchronously when"
+  forItems={[
+    "The caller's own response depends on the result — there is nothing useful to return until the callee answers",
+    "The operation is fast and the callee's availability is already comparable to or better than the caller's",
+    "You need to enforce a strict, immediate authorization or validation check before proceeding",
+    "The call graph is shallow enough that compounding latency and availability loss stay within budget",
+  ]}
+  againstItems={[
+    "The work can complete after the caller has already responded to its own client — a notification, an index update, a log",
+    "You need to buffer a burst of load rather than propagate it — a queue absorbs a spike a live callee cannot",
+    "One event needs to fan out to several independent consumers, and the producer shouldn't need to know who they are",
+    "The callee's availability is worse than the caller can tolerate synchronously, and retryable delivery is an acceptable tradeoff for that",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+State the choice out loud per call, not once for the whole system: "the order confirmation is synchronous because the user is waiting on it; everything after that — email, analytics, recommendation refresh — goes on an event bus because none of it has to finish before the response goes back." Expect a follow-up about what happens when the queue backs up or a downstream consumer falls behind — that's 02.11 Backpressure and 08.04 Queue Lag — and naming the actual monitoring signal, consumer lag rather than just queue depth, before being asked is what separates having drawn the arrow from having run the system behind it.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "A synchronous call couples two services in time — both must be up simultaneously, or the request fails right there",
+    "Chained synchronous calls compound both latency and unavailability multiplicatively, not additively, as the chain gets longer",
+    "An asynchronous call decouples time but defers failure discovery to later, somewhere else — a dead-letter queue or a retry policy has to catch it",
+    "Ordering across messages is not automatic in an asynchronous system; it has to be an explicit per-key guarantee if you need it",
+    "The choice is made per call, not per system — a single user action can legitimately mix a synchronous path with several asynchronous fan-outs",
+    "Async request-reply exists for slow work that still needs an eventual answer, but it costs a correlation id and a place to park the response, so it isn't the default",
+  ]}
+/>

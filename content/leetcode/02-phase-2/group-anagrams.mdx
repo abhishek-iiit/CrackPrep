@@ -1,0 +1,100 @@
+---
+title: "Group Anagrams"
+number: "02.04"
+summary: "Anagrams share one canonical key — sorted letters or a count signature — and a hash map buckets them in one pass."
+status: published
+free: true
+difficulty: core
+estMinutes: 13
+tags: [hash-map, string, sorting]
+updated: "2026-09-15"
+---
+
+## One bucket per multiset of letters
+
+Given an array of strings, group the anagrams together. `["eat","tea","tan","ate","nat","bat"]` becomes `[["eat","tea","ate"], ["tan","nat"], ["bat"]]`. Order within and across groups does not matter.
+
+The naive approach compares every pair with 02.03 Valid Anagram logic — O(n² · k) for n strings of average length k. At n = 10⁴ and k = 100 that is hundreds of millions of character comparisons. The constraint asks for something closer to O(n · k).
+
+The insight: anagrams are not similar strings — they are **identical keys** under a canonical representation. Hash on that key; all words with the same key land in the same bucket.
+
+## Pick a key: sorted word or count signature
+
+**Sorted key:** copy the word, sort its characters, join — `"eat" → "aet"`. Two anagrams produce the same sorted string. Sorting one word costs O(k log k); n words is O(n · k log k).
+
+**Count signature:** 26 integers for letter frequencies, encoded as a string like `"#1#0#1#0...#1"` or a tuple key. Building it is O(k) per word — O(n · k) total, no log factor. Slightly more code, better asymptotics when k is large.
+
+Both work on the judge. Sorted keys are faster to write in an interview; count keys are the right answer when the interviewer asks you to optimize further.
+
+<Steps>
+<Step title="Create an empty map from key → list of words">
+  Each key represents one anagram equivalence class.
+</Step>
+<Step title="For each word, compute its canonical key">
+  Sort the characters, or build the 26-slot frequency signature.
+</Step>
+<Step title="Append the word to map.get(key)">
+  First word with a key creates the bucket; later anagrams join it.
+</Step>
+<Step title="Return Object.values(map)">
+  Each bucket is one group; order is unspecified.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function groupAnagrams(strs: string[]): string[][] {
+  const groups = new Map<string, string[]>();
+
+  for (const word of strs) {
+    const key = [...word].sort().join("");
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key)!.push(word);
+  }
+
+  return [...groups.values()];
+}
+```
+
+Time **O(n · k log k)** — n words, sort each of length k. Space **O(n · k)** for storing every word in a bucket.
+
+With a count signature key instead of sort, time drops to **O(n · k)** and space stays **O(n · k)**.
+
+<Tradeoff
+  forTitle="Sorted string as key when"
+  againstTitle="Count signature as key when"
+  forItems={[
+    "Average word length k is modest (under ~20) and k log k is negligible",
+    "You want the shortest correct code in a timed interview",
+    "Lowercase letters only — sort is over a 26-letter alphabet",
+    "You already solved 02.03 Valid Anagram and the sort key is the obvious extension",
+    "Readability matters more than shaving the log factor",
+  ]}
+  againstItems={[
+    "Words are long (k in the hundreds) and n is large — O(n · k) beats O(n · k log k)",
+    "Unicode or mixed scripts where sort order is locale-dependent — counts in a Map are safer",
+    "Follow-up asks for prime-encoded keys or rolling hashes for streaming input",
+    "Memory is tight and you want to avoid allocating a sorted char array per word",
+    "Interviewer explicitly asks to remove the log factor",
+  ]}
+/>
+
+## In an interview
+
+Restate with the `eat/tea/ate` example. Confirm lowercase, no empty-string edge case required, output grouping only.
+
+Say: "Anagrams share a canonical key; I'll hash on that." Write sorted-key first unless they push on complexity — then switch to count signature without rewriting the whole approach.
+
+Follow-ups: group by k-anagram (same counts within k edits), return groups sorted lexicographically, or stream words one at a time. Bug to mention: using raw word length as key — `"ab"` and `"ba"` have the same length but are not anagrams.
+
+<KeyTakeaways
+  items={[
+    "Group Anagrams buckets words by a canonical key — sorted letters or a frequency signature",
+    "Hash map from key to list gives one pass over n words after key computation",
+    "Sorted-key solution is O(n · k log k); count-signature key is O(n · k)",
+    "02.03 Valid Anagram checks one pair; this groups many strings by the same multiset identity",
+    "Do not compare all pairs — quadratic pairwise anagram checks do not scale to n = 10⁴",
+    "Empty input returns []; a single word forms one group of size one",
+  ]}
+/>

@@ -1,0 +1,166 @@
+---
+title: "Instagram"
+number: "02.06"
+summary: "Photo upload, media delivery, and the push-pull feed hybrid that keeps celebrity posts from owning your write path."
+status: published
+free: true
+difficulty: deep
+estMinutes: 20
+tags: [social, feed, media, cdn]
+updated: "2026-09-15"
+---
+
+## A photo app that is really a feed problem
+
+"Design Instagram" is not one system. It is three systems that share a user graph: upload and store photos, deliver them fast on a phone screen, and assemble a home timeline that feels fresh every time someone opens the app. Interviewers use it to test whether you can separate metadata from blobs, whether you know when fan-out-on-write collapses, and whether you will put a CDN in front of the read path without pretending the write path is the same shape.
+
+The trap is treating it like a file-upload exercise. Upload matters — a 3 MB photo on a bad LTE connection is a UX problem — but the design hinge is almost always the feed: one author publishes, hundreds or millions of followers need to see it, and the home screen has a latency budget measured in hundreds of milliseconds, not seconds.
+
+## Clarify: photos, feed, and what you will not build
+
+Batch the questions. You want actors, core verbs, scale, and an explicit out-of-scope list before you draw.
+
+**Functional — what must work:**
+
+- Users follow other users and see a chronological (or ranked) home feed of their posts.
+- Users publish a photo with caption; followers can view, like, and comment.
+- Profile page shows a grid of a user's posts.
+
+**Non-functional — ask for numbers or own them:**
+
+- Feed load latency at p99 — "under 500 ms on mobile" is a common interview default; push harder if they say "fast."
+- Photo view latency — thumbnails and full-size should feel instant after first load; CDN is in play.
+- Availability — social apps tolerate brief staleness on likes; feed and publish should not hard-fail silently.
+
+**Questions worth asking out loud:**
+
+"Is the feed strictly chronological, or ranked by engagement? I'll assume ranked-ish but mostly recency-biased unless you want a full recommendation engine."
+
+"Do we need Stories, Reels, DMs? I'll keep scope to feed + photo posts and put ephemeral video and messaging out of scope."
+
+"Can a celebrity with 50M followers post, and do followers need to see it within seconds? That decides push versus pull for high-degree authors."
+
+A spoken boundary helps: *"I'll design photo post, home feed, profile, likes and comments. Out of scope: Stories, DMs, ads, moderation pipelines, and multi-region active-active. Tell me if you want to swap one of those in."*
+
+## Capacity: assumptions you can multiply on a whiteboard
+
+State these as assumptions — round numbers, order-of-magnitude.
+
+| Assumption | Value | Load-bearing for |
+| --- | --- | --- |
+| DAU | 500M | Everything multiplies from here |
+| Posts per DAU per day | 0.2 (1 post per 5 days) | Write rate |
+| Feed opens per DAU per day | 5 | Read rate |
+| Posts per feed page | 20 | Hydration batch size |
+| Average follows per user | 300 | Fan-out cost if you push |
+| Photo size (stored, compressed) | 500 KB | Object storage bandwidth |
+| Thumbnail size | 30 KB | CDN egress on scroll |
+| Retention | Indefinite for posts | Storage growth |
+
+**Writes:** 500M × 0.2 = 100M posts/day → ~1,200 posts/s average. Peak ~3× → ~3,600 posts/s.
+
+**Feed reads:** 500M × 5 = 2.5B feed loads/day → ~29k/s average, ~90k/s at peak (3× diurnal).
+
+**Read/write ratio on the feed path:** roughly 25:1 — this is a read-path system with a bursty write amplification problem hiding inside publish.
+
+**Storage growth:** 100M posts/day × 500 KB ≈ 50 TB/day of new photo objects before replication — object storage and lifecycle tiers are not optional at this scale.
+
+**Fan-out arithmetic (why hybrid exists):** mean push cost per post = 300 timeline inserts → 3,600 × 300 ≈ 1.1M inbox writes/s at peak before celebrities. One author with 10M followers is 10M inserts in one publish — at 100k inserts/s that is ~100 seconds of fan-out for a single post. The mean lies; the tail owns your queue.
+
+## High-level design: upload, store, fan-out, read
+
+| Component | Role |
+| --- | --- |
+| API gateway | Auth, rate limits, routes to services |
+| Post service | Create post metadata, enqueue media processing and fan-out |
+| Media service | Accept upload, transcode/resize, write to object storage |
+| Object storage (S3-class) | Durable originals + derived sizes (thumb, feed, full) |
+| CDN | Edge cache for photos; cache key by object id + variant |
+| Posts DB (sharded SQL or wide-column) | Post id, author, caption, media refs, timestamps |
+| Social graph store | Follow edges; follower lists for fan-out workers |
+| Timeline store (Redis/Cassandra-class) | Per-user ordered list of post ids for push inboxes |
+| Feed service | Assemble home timeline: read inbox + merge celebrity pulls |
+| Like/comment service | Counters and rows; eventual consistency acceptable for counts |
+
+<Steps>
+  <Step title="Publish: metadata first, media async">
+    Client requests upload URL (presigned PUT to object storage) or streams to media service. Post service writes a post row in `pending` state with media job id, returns post id quickly. Media worker produces thumb/feed/full variants, flips post to `live`, then triggers fan-out. Never block publish on transcoding — enqueue on 01.08 Distributed Message Queue and return.
+  </Step>
+  <Step title="Fan-out: hybrid push/pull by follower count">
+    If author has fewer than ~100k followers (threshold you pick and defend), enqueue a job that appends post id to each follower's timeline inbox. If above threshold, skip mass push — followers merge this author's recent posts at read time. Same split as 02.03 News Feed.
+  </Step>
+  <Step title="Feed read: one inbox range + small celebrity merge">
+    Load `timeline:{userId}` for the newest page of post ids. Fetch recent posts from the handful of high-degree accounts the viewer follows (cached author-recent lists). Merge-sort by time or rank score, hydrate post bodies and media URLs in one batch, return page.
+  </Step>
+  <Step title="Photo view: CDN URL, not origin on every scroll">
+    Client requests `https://cdn.example/photos/{id}_feed.jpg`. CDN hits origin on miss; thereafter serves from edge. Upload path writes once; read path scales with egress, not app servers.
+  </Step>
+</Steps>
+
+## Deep dive: the hybrid feed and the media path
+
+### Hybrid fan-out — the mechanism interviewers push on
+
+Pure push makes home-timeline reads cheap: one keyed list read plus batch hydrate. Pure pull makes publish cheap but turns every feed open into "fetch recent from 300 authors and merge" — hostile to a 500 ms p99 once ranking and media hydration are included.
+
+The hybrid keeps push for the long tail of normal authors (where fan-out is hundreds, not millions) and pull for celebrities (where one post would dwarf everyone else's write load). At read time the merge set stays small: 295 posts already in the inbox from normal follows, plus 5 celebrity author-recent fetches.
+
+Operational details that separate a strong answer:
+
+- **Fan-out is async.** Publish returns when the post is durable and the job is queued — not when 10M inboxes are updated.
+- **Truncate inboxes.** Keep the last few thousand post ids per user; older posts fall off the hot path (cold storage or pull-from-author if needed).
+- **Author sees own post immediately.** Route the author's feed read to include their latest post even if fan-out is still running — a common product requirement that is easy to forget.
+- **Deletes and edits.** Timeline stores references; post body lives in one place. A delete updates the post row and optionally strips the id from inboxes via a compensating job.
+
+### Media upload — presigned URLs and derived variants
+
+A phone photo is multi-megabyte; your feed card wants a 1080px JPEG and a 150px thumbnail. The upload path:
+
+1. Client asks post service for upload credentials.
+2. Client PUTs directly to object storage (or through a media ingress that streams to storage).
+3. Worker reads original, writes `{id}_thumb`, `{id}_feed`, `{id}_full` back to object storage.
+4. Post metadata stores variant URLs; CDN sits in front.
+
+Do not serve originals on scroll — egress cost and latency both explode. Do not run image processing on the publish request thread — a spike of uploads becomes a spike of CPU-bound API latency.
+
+<Callout type="gotcha">
+Counting likes on the hot post row is how you turn a read-heavy app into a write hotspot. Store likes in a separate table or counter shard keyed by `post_id`; aggregate for display with cache or periodic rollups. A celebrity post with 2M likes in ten minutes will melt a single-row counter.
+</Callout>
+
+<Tradeoff
+  forTitle="Push fan-out for normal authors when"
+  againstTitle="Pull at read time for everyone when"
+  forItems={[
+    "Home feed p99 must stay under a few hundred ms and follow counts per user are in the hundreds, not thousands",
+    "Publish rate × mean follower count fits your timeline write capacity at peak with headroom",
+    "You can operate async fan-out workers, inbox truncation, and celebrity bypass without blocking publish",
+    "Feed ranking can work on precomputed inbox entries plus a small celebrity merge set",
+    "Stale feed by a few seconds for normal authors is acceptable while fan-out catches up",
+  ]}
+  againstItems={[
+    "Mean follower count is low and total DAU is small enough that merge-at-read is still inside the latency budget",
+    "Write amplification from push would exceed timeline store throughput even for non-celebrity authors",
+    "Product requires complex per-viewer ranking that invalidates shared inboxes on every scroll",
+    "Inactive users dominate the graph and push wastes writes into timelines never opened",
+    "Team cannot run the fan-out queue and inbox store reliably — pull keeps the moving parts fewer",
+  ]}
+/>
+
+## In an interview
+
+Open with the split: *"Instagram is photo delivery plus a social feed. I'll put uploads on object storage behind a CDN, and I'll use a hybrid feed — push into follower inboxes for normal authors, pull recent posts for celebrities so one publish cannot enqueue ten million writes."* That sentence shows you know where the hard part is without drawing yet.
+
+Spend three to five minutes clarifying — feed ranking, celebrity behavior, out of scope — then capacity with the fan-out multiplication visible on the board. Draw four boxes: publish → media worker → fan-out worker → feed read, and label CDN on the photo path separately from the metadata path.
+
+Follow-ups to expect: "What if fan-out falls behind?" (async queue depth, SLO on lag, author fast-path), "How do likes stay consistent?" (separate counters, not on the post row), "Chronological vs ranked feed?" (rank score in inbox entries or re-rank at read from a candidate set). Volunteer the celebrity failure mode before they ask: pure push means one post blocks the cluster for minutes; that is why the hybrid exists.
+
+<KeyTakeaways
+  items={[
+    "Instagram interviews test media upload (object storage + CDN + async processing) and feed fan-out (push/pull hybrid), not either alone",
+    "State DAU, posts/day, feed opens/day, and average follows — then multiply publish rate × followers to expose fan-out cost before choosing push",
+    "Hybrid feed: push post ids into follower inboxes below a follower threshold; pull recent posts at read time for high-degree authors",
+    "Publish returns after durable metadata and a queued fan-out job; never synchronously fan out to millions of followers",
+    "Serve feed-optimized image variants from a CDN; process uploads asynchronously and keep like counters off the hot post row",
+    "Declare Stories, DMs, and ads out of scope unless the interviewer trades one in — the core feed + photo path fills forty minutes",
+  ]}
+/>

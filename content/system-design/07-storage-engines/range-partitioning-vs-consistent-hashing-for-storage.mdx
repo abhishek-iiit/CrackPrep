@@ -1,32 +1,82 @@
 ---
 title: "Range Partitioning vs Consistent Hashing for Storage"
 number: "07.15"
-summary: "Range Partitioning vs Consistent Hashing for Storage — notes in progress."
-status: draft
+summary: "Why storage systems split into contiguous key ranges for scans or hash keys onto a ring for uniform load, and the hot-range and rebalancing costs each choice carries."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [partitioning, consistent-hashing, sharding, storage]
+updated: "2026-09-15"
 ---
 
-## The problem
+## A scan wants order; a hash wants none of it
 
-What breaks without this, and the situation that forces the decision.
+07.14 S3-Style Object Storage Architecture lays out an object store's pieces end to end. The next several lessons zoom into specific ones, starting with the choice that shapes everything built on top of it: how the keyspace itself gets divided across nodes.
 
-## How it works
+Every partitioned storage system answers the same question for every key: which partition owns this, and therefore which node do I talk to. There are exactly two ways to answer it that scale. Either the keyspace is cut into contiguous ranges, so a key's neighbors are its partition-mates and the mapping is "which range am I in" — or every key is hashed, scattering neighbors across the whole cluster, and the mapping is "where does this hash land." 04.07 Consistent Hashing covers the ring mechanism itself: how nodes get positions on a hash ring, how virtual nodes even out the load, how adding a node moves only a fraction of the keys. This lesson is about the choice one level up — why a storage system picks one of these two shapes over the other, and what it gives up either way.
 
-The mechanism, step by step.
+The two failure modes sit on opposite sides of the same coin. Range partitioning preserves order, so a scan over "orders placed this week" or "events between 9:00 and 9:05" touches a handful of adjacent partitions instead of the whole cluster. But if the write traffic itself follows that same order — every new row keyed by a monotonically increasing timestamp or auto-increment id — every recent write lands on the same partition, the one holding the tail of the range, while every other partition sits idle. Consistent hashing does the opposite trade: hashing destroys any relationship between a key and its neighbors, so writes spread near-uniformly across the ring no matter what order they arrive in, but that same destruction means a range scan has nothing to exploit — "give me everything from A to M" has to fan out to every partition and filter, because the hash gave up exactly the locality a scan needs.
 
-## Tradeoffs
+## Range partitioning: order first, and a split machinery to keep it working
+
+A range-partitioned store divides the keyspace into contiguous, non-overlapping intervals and assigns each to a partition — keys `A`–`H` on partition 0, `I`–`Q` on partition 1, and so on. Two properties make this attractive. Keys sort, so a range scan reads sequentially from as few partitions as the range spans, and a system that already sorts its data on disk — an SSTable in 07.09 LSM Tree Storage Engine is sorted for exactly this reason — gets range partitioning almost for free, since the sort order inside a file and the partitioning scheme across files are the same idea at two scales.
+
+The cost shows up under skew. Any key distribution that isn't uniform across the chosen ranges creates a hot partition: 04.06 Hot Partitions covers the general mechanics, but the range-partitioned case is its own classic — time-ordered keys, sequential ids, or a popular tenant's prefix all concentrate load on one boundary of the keyspace while the rest of the cluster is cold. The standard mitigations are structural, not tuning knobs: reverse or shuffle the leading bits of a timestamp key so consecutive writes land unpredictably, prefix a key with a random or hashed salt and store the salt separately for range queries that still need it, or shard explicitly by tenant so no single customer's traffic can dominate a boundary.
+
+Because hot ranges and uneven growth are expected, not exceptional, a range-partitioned store needs a live splitting mechanism: when a range grows past a size threshold, it is cut at a chosen boundary — usually the median key — into two ranges, each reassigned to a partition, sometimes on a different node to spread the new load immediately. Bigtable and HBase call this a tablet or region split, triggered once a region's backing file crosses a configured size, commonly quoted in the range of a few hundred megabytes to a few gigabytes depending on the deployment. DynamoDB does the same under the hood for its range-partitioned tables, splitting a partition once it approaches a size threshold on the order of 10 GB — the exact number has shifted over the product's life and isn't published as a hard guarantee, so treat it as illustrating the mechanism rather than a spec to design against.
+
+### HBase, Bigtable, and range-ordered stores
+
+These systems exist specifically because their workloads want sorted access — time-series data, web crawl results keyed by reversed domain name, anything where "give me the next N rows after this key" is a first-class query. The keyspace is usually curated by the application precisely to avoid the hot-range trap: Bigtable's own design guidance is to key rows so that writes spread across the space rather than clustering at one end, which is really an admission that range partitioning hands the hot-key problem to the schema designer instead of solving it automatically.
+
+### DynamoDB, Cassandra, and hash-ordered stores
+
+These systems default to hashing the partition key before placement, specifically to make hot-key mitigation automatic rather than the schema designer's job. A monotonic id or timestamp used directly as a partition key in one of these systems is hashed away before it ever reaches the ring, so the pathological "all writes hit the newest partition" case mostly can't happen by construction. The price is exactly what the opening section named: DynamoDB's own query model reflects it, offering fast lookups by partition key and efficient range queries only within a single partition's sort key — a global range scan across partition keys is not an efficient operation, because the hash threw away the order that scan would need.
+
+<Callout type="note">
+Some systems try to have both: range-partition within a shard that is itself chosen by a hash of a coarser key. DynamoDB's partition key plus sort key is one version of this — hash the partition key for uniform placement, then range-order the sort key within that one partition for efficient scans of a bounded slice, like "all orders for this customer." It doesn't remove the tradeoff, it just narrows the scope where each side of it applies.
+</Callout>
+
+## What actually differs, side by side
+
+| | Range partitioning | Consistent hashing |
+| --- | --- | --- |
+| Order preserved | Yes — adjacent keys are adjacent in storage | No — hashing discards it deliberately |
+| Range scan cost | Proportional to the ranges spanned | Fans out to most or all partitions |
+| Load under skewed key distributions | Can concentrate on one boundary — needs active mitigation | Naturally uniform, by construction |
+| Rebalancing on node add/remove | A split or merge, targeted at the affected range | Moves roughly `1/N` of keys, spread across the ring |
+| Typical systems | Bigtable, HBase, CockroachDB-style range shards | DynamoDB, Cassandra, most consistent-hash rings |
+| Where the complexity lives | Split/merge machinery and schema-level key design | The hash function, virtual nodes, and ring maintenance |
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Reach for range partitioning when"
+  againstTitle="Reach for consistent hashing when"
+  forItems={[
+    "Range scans over sorted or time-ordered data are a primary access pattern, not an occasional query",
+    "You can control the key design well enough to avoid concentrating writes at one edge of the keyspace",
+    "You already sort data on disk for another reason (an LSM engine, a B-tree), so partitioning by range reuses that order instead of fighting it",
+    "You need a live splitting mechanism anyway — the data volume is uneven enough that fixed hash buckets would waste capacity",
+  ]}
+  againstItems={[
+    "Point lookups by key dominate and range scans across the whole keyspace are rare or absent",
+    "The write pattern is naturally skewed — sequential ids, timestamps, a popular prefix — and you would rather the placement scheme neutralize that automatically",
+    "Rebalancing needs to move a small, bounded fraction of keys when a node joins or leaves, not require an explicit split decision",
+    "You want placement to be a pure function of the key, so a client can often compute where to send a request without asking a directory service first",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Name the access pattern before naming either mechanism: "reads are point lookups by id" points at hashing, "reads are time-range queries" points at range partitioning, and saying that out loud shows the decision follows from the workload rather than familiarity with one system. Expect the follow-up about hot keys either way — for range partitioning, name the mitigation (salting, reversed keys, tenant-level sharding) unprompted; for consistent hashing, be ready to explain that a single overloaded key still creates a hot node no matter how uniform the hash is, because hashing balances key count per node, not request rate per key.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Range partitioning keeps keys sorted so scans stay cheap, at the cost of concentrating skewed write traffic on one boundary of the keyspace",
+    "Consistent hashing spreads keys near-uniformly by discarding key order, which is exactly what a range scan needs and cannot get from it",
+    "Hot ranges in a range-partitioned store are mitigated by key design — salting, reversing, or explicit tenant sharding — not by the partitioning scheme itself",
+    "Rebalancing looks different in each: range partitioning splits or merges a specific range, consistent hashing moves roughly one over N of the keys spread across the ring",
+    "Bigtable and HBase choose range partitioning because their workloads want ordered scans; DynamoDB and Cassandra default to hashing to make skew mitigation automatic",
+    "A single overloaded key can still create a hot node under consistent hashing, because the hash balances key count, not request rate",
+  ]}
+/>

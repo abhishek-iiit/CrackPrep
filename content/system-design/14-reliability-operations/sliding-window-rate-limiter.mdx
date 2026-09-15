@@ -1,32 +1,101 @@
 ---
 title: "Sliding Window Rate Limiter"
 number: "14.14"
-summary: "Sliding Window Rate Limiter — notes in progress."
-status: draft
+summary: "How sliding-window and sliding-log counters approximate fair request budgets over time — smoother than fixed windows, cheaper than tracking every timestamp forever."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 14
+tags: [rate-limiting, sliding-window, algorithms, redis]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Fixed windows invite a double-spend at the boundary
 
-What breaks without this, and the situation that forces the decision.
+A fixed-window counter — "100 requests per calendar minute" — resets on the clock. A client can send 100 requests at 0:59 and 100 more at 1:00 and stay "within limit" while delivering 200 requests in two seconds. That boundary burst is the classic fixed-window failure mode. Sliding-window limiters remove (or shrink) that cliff by charging requests against a window that moves with *now*, not with wall-clock buckets alone.
 
-## How it works
+14.13 Rate Limiter Placement And Keys decides *who* shares a budget. This lesson is the **counting algorithm** behind one key: fixed window, sliding log, sliding window counter, and how they trade accuracy for memory.
 
-The mechanism, step by step.
+## Algorithms compared
 
-## Tradeoffs
+| Algorithm | State per key | Accuracy | Cost |
+| --- | --- | --- | --- |
+| Fixed window | One counter + window id | Bad boundary bursts | Minimal |
+| Sliding log | Timestamp per request (or sorted set) | Exact over last N seconds | Memory grows with request rate |
+| Sliding window counter | Two buckets + weighted sum | Approximates sliding; small error | Near fixed-window cheap |
+| Token bucket / leaky bucket | Tokens + timestamp | Smooth rate + burst parameter | Excellent for shaping; different mental model |
+
+Token bucket is often what you want for API product quotas (sustained rate `r`, burst `b`). Sliding windows are what people reach for when the requirement is literally "no more than N in any rolling T seconds." Know both; do not pretend they are identical.
+
+## Sliding log
+
+Keep timestamps of accepted requests for the key. On each request, drop timestamps older than `T`, reject if count ≥ `N`, else append *now*. Exact, simple to explain, expensive when `N` is large — a key allowed 1M events/day cannot store 1M timestamps cheaply in Redis for every active key. Use for low `N` (OTP sends, login attempts) or when exactness matters more than memory.
+
+## Sliding window counter (approximate)
+
+Store the previous window's count and the current window's count (windows of size `T`). Estimate the sliding total as:
+
+<Formula label="Approximate sliding count">estimate = prev_count · (1 − elapsed/T) + curr_count</Formula>
+
+where `elapsed` is how far you are into the current window. As time advances, weight on `prev_count` decays linearly. The estimate is not exact — it can slightly under- or over-admit versus a true sliding log — but it kills the fixed-window double-spend and uses O(1) memory per key. This is the usual production compromise for high-volume HTTP quotas.
+
+<Steps>
+  <Step title="Identify window and budget">
+    Example: N = 100 requests, T = 60 seconds, key = user id + route (from 14.13).
+  </Step>
+  <Step title="Load counters for this key">
+    Read `curr_window_start`, `curr_count`, `prev_count` from the shared store (or local store if approximate per-node is acceptable).
+  </Step>
+  <Step title="Roll the window if needed">
+    If `now` is past `curr_window_start + T`, shift: `prev_count ← curr_count` (or 0 if you skipped windows), reset `curr_count`, advance start.
+  </Step>
+  <Step title="Compute estimate and decide">
+    If `estimate ≥ N`, reject with `429` and a retry hint. Else increment `curr_count` and accept.
+  </Step>
+</Steps>
+
+Race conditions matter: two replicas can both admit past `N` without atomic increment-and-check. Use Redis `INCR`/`EVAL` (or equivalent) so the read-modify-write is one critical section per key, or accept small overshoot as policy.
+
+<Callout type="note">
+At the instant a window rolls, `prev_count` holds the previous full bucket; the weighted formula is what makes the limit "feel" continuous. Purely resetting to zero on roll without weighting restores fixed-window behavior — the bug people ship when they rename a fixed window to "sliding" in a design doc only.
+</Callout>
+
+## Distributed deployment
+
+Sticky routing to one limiter instance avoids Redis but fails when stickiness breaks. A central store gives global enforcement for that key. Multi-region actives either shard keys by region (separate budgets — often wrong for a global user) or accept cross-region latency on the hot path for a shared counter. Document which you chose.
+
+Failure mode of the store: fail open (availability over quotas) versus fail closed (quotas over availability). Payment OTP and login usually fail closed; static asset CDN edge might fail open. Decide explicitly (14.12).
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Use sliding window counter / log when"
+  againstTitle="Prefer fixed window or token bucket when"
+  forItems={[
+    "Requirement is 'N per any rolling T' and boundary bursts would hurt",
+    "You can afford approximate counting with O(1) state at high QPS",
+    "Low-N exactness (sliding log) fits security-sensitive side effects",
+    "Clients are adversarial toward clock-aligned burst patterns",
+    "You already have a shared atomic counter store for keys",
+  ]}
+  againstItems={[
+    "Simple per-minute quotas with tolerance for boundary burst are enough",
+    "You need explicit burst capacity separate from sustained rate — token bucket states that directly",
+    "Request volume per key makes sliding logs memory-infeasible and approximation error is unacceptable — rethink N/T or sample",
+    "Local per-pod fixed windows are acceptable flood control and simplicity wins",
+    "Hardware or mesh rate limits already enforce a coarse fixed window upstream",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Explain the fixed-window boundary burst in one sentence, then offer sliding window counter as the O(1) approximate fix and sliding log as the exact low-N option. Mention atomic increments in a shared store for multi-replica correctness. Separate this from key design (14.13) and from token bucket if the interviewer wants burst control parameters. Name fail-open versus fail-closed when Redis dies.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Fixed windows allow up to roughly 2N requests across a boundary; sliding windows exist to remove that cliff",
+    "Sliding logs are exact but store per-request timestamps — best for low N",
+    "Sliding window counters keep O(1) state and weight previous and current buckets to approximate a rolling window",
+    "Atomic increment-and-check in a shared store prevents multi-replica oversell of the same key's budget",
+    "Token bucket is a related but distinct model when you want sustained rate plus explicit burst",
+    "Decide fail-open vs fail-closed when the counter store is unavailable — security endpoints usually fail closed",
+  ]}
+/>

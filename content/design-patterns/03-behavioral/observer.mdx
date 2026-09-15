@@ -1,0 +1,98 @@
+---
+title: "Observer"
+number: "03.06"
+summary: "One-to-many notification lets a subject broadcast changes so dependents update themselves without the subject knowing their types."
+status: published
+free: true
+difficulty: core
+estMinutes: 13
+tags: [behavioral, events, pub-sub]
+updated: "2026-09-15"
+---
+
+## Models that should not know every view
+
+A stock ticker changes price. A chart redraws, a table updates, an alert engine checks thresholds, analytics logs the tick. If the `Stock` class imports `Chart`, `Table`, and `AlertService`, every new consumer edits the subject. Remove a feature and you leave dead imports. Test the model in isolation and you mock half the application.
+
+Observer inverts the dependency. The subject maintains a list of observers and **notifies** them when state changes. Observers subscribe and unsubscribe themselves. The subject knows only an interface — `update(event)` — not concrete UI widgets or services.
+
+Event emitters, reactive streams, DOM events, and Kafka topics are Observer at different scales. The pattern name is less important than the contract: push notification, pull details if needed.
+
+## Subject, observer, and the notification contract
+
+- **Subject** — holds state, provides `attach(observer)`, `detach(observer)`, `notify()`.
+- **Observer** — implements `update(subject)` or receives a typed event payload.
+- **Concrete subject** — calls `notify()` after mutating state (or on a debounced schedule).
+
+<Steps>
+<Step title="Observer subscribes">
+`subject.attach(chart)` registers interest. Subscription is dynamic — widgets mount and unmount in UI frameworks constantly.
+</Step>
+<Step title="Subject changes state">
+Business logic mutates fields, then marks dirty or calls `notify()` immediately. Batch multiple field changes into one notification when listeners are expensive.
+</Step>
+<Step title="Observers react">
+Each observer pulls what it needs from the subject or reads the event payload. Keep notifications coarse enough to avoid chatty updates, specific enough that observers do not scan the whole model on every tick.
+</Step>
+</Steps>
+
+```typescript
+interface Observer {
+  update(data: StockTick): void;
+}
+
+class StockTicker {
+  private observers = new Set<Observer>();
+  attach(o: Observer) { this.observers.add(o); }
+  detach(o: Observer) { this.observers.delete(o); }
+  private notify(tick: StockTick) {
+    for (const o of this.observers) o.update(tick);
+  }
+  setPrice(price: number) {
+    const tick = { price, at: Date.now() };
+    this.notify(tick);
+  }
+}
+```
+
+<Callout type="gotcha">
+Notification during notification — an observer's `update` mutates the subject and triggers another `notify` — causes re-entrancy bugs and infinite loops. Guard with a "currently notifying" flag, queue events, or forbid synchronous mutations from observers.
+</Callout>
+
+## Observer vs Mediator
+
+03.04 Mediator centralises **coordination**: "when A changes, tell B and C specifically." Observer **broadcasts**: "something changed; whoever cares, react." Mediator owns the joint policy; Observer distributes it. A dialog with strict cross-field rules is Mediator; a model feeding multiple independent views is Observer.
+
+Leaky abstraction failure: passing the entire subject into `update` so observers poke private state. Prefer immutable event payloads or read-only snapshots.
+
+<Tradeoff
+  forTitle="Reach for Observer when"
+  againstTitle="Avoid Observer when"
+  forItems={[
+    "One object's state change should fan out to an open-ended set of dependents you do not want the subject to name",
+    "Subscribers come and go at runtime — UI components, plugins, feature flags",
+    "The subject should stay domain-focused without imports from presentation or analytics layers",
+    "Event payloads are small and observers can react independently without a central coordinator",
+    "Your platform already has pub/sub — Node EventEmitter, RxJS, browser events — and you are aligning with it"
+  ]}
+  againstItems={[
+    "Multiple objects must update each other in precise orchestrated ways — 03.04 Mediator centralises that better",
+    "Order of observer execution matters and is implicit — you need a defined pipeline or state machine instead",
+    "Thousands of observers on a hot path fire synchronously and block the subject — debounce, async dispatch, or pull-based polling",
+    "Debugging 'who reacted to this?' is already painful and broadcast makes causality opaque",
+    "Consistency requires all subscribers to see the same transactional snapshot — use a store commit, not ad hoc notify"
+  ]}
+/>
+
+## In an interview
+
+Say: "The model should not import views — I would let views subscribe to price updates." Draw subject → many observers. Expect Observer vs Mediator, sync vs async delivery, and memory leaks from forgotten `detach`. Mention weak references or framework auto-cleanup (React effects) for long-lived subjects. Name the failure: re-entrant notify loops and observers doing heavy work synchronously on the hot path.
+
+<KeyTakeaways items={[
+  "Observer defines a one-to-many dependency so when the subject changes, all registered observers get notified automatically.",
+  "The subject knows observer interface, not concrete classes — new listeners attach without editing the subject.",
+  "Prefer event payloads or read-only views over handing observers mutable access to internal state.",
+  "Batch or debounce notifications when one logical edit touches many fields — observers should not repaint six times per keystroke.",
+  "Use 03.04 Mediator when coordinated multi-object reactions are the rule; Observer when reactions are independent.",
+  "Unsubscribe is not optional — long-lived subjects with forgotten attachments leak memory and stale UI updates."
+]} />

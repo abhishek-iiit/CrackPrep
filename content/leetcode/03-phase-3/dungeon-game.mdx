@@ -1,0 +1,109 @@
+---
+title: "Dungeon Game"
+number: "03.41"
+summary: "Forward greed fails — work backward from the princess so each cell knows the minimum HP needed to survive the rest of the path."
+status: published
+free: true
+difficulty: deep
+estMinutes: 20
+tags: [dp, grid]
+updated: "2026-09-15"
+---
+
+## Forward planning cannot see the health floor ahead
+
+The knight starts at the top-left of an `m × n` grid. Each cell holds a signed integer: positive rooms heal, negative rooms damage. The knight's HP must stay **strictly above 0** at every moment — entering a cell with 0 HP is death, even if the room heals afterward. Reach the bottom-right princess with minimum **initial** HP.
+
+A forward "maximize HP along the path" approach fails because the constraint is existential: you need enough HP at the **start** to survive the worst stretch ahead, not the best path you already walked. On grid `[[-2,-3,3],[-5,-10,1],[10,30,-5]]`, the answer is **7** — you must enter with 7 HP to absorb the early damage and still arrive alive.
+
+Greedy "pick the less damaging next step" also fails: a locally gentle cell may lead into a deadly corridor. The right question is: **standing in cell (i, j), what is the minimum HP I must have when I enter this cell to guarantee I can finish?**
+
+## Backward DP from the princess
+
+Define `need[i][j]` = minimum HP required **upon entering** cell `(i, j)` so the knight can reach the princess and never drop to 0 or below along the way.
+
+At the princess cell `(m-1, n-1)`, you need at least 1 HP when you arrive (after applying that cell's effect). Working backward:
+
+```
+need[i][j] = max(1, min(need[i+1][j], need[i][j+1]) - dungeon[i][j])
+```
+
+After the room effect `dungeon[i][j]`, your HP becomes `need[i][j] + dungeon[i][j]`. That must be at least `need[next]` for whichever neighbor you move to. Rearranging gives the formula. The `max(1, …)` enforces the strict positivity rule at every step.
+
+<Steps>
+<Step title="Initialize the princess cell">
+  `need[m-1][n-1] = max(1, 1 - dungeon[m-1][n-1])` — you need enough HP to survive the final room and finish with at least 1.
+</Step>
+<Step title="Fill bottom row and right column">
+  Only one neighbor exists — no `min` across two directions.
+</Step>
+<Step title="Fill remaining cells right-to-left, bottom-to-top">
+  Each cell reads the minimum need of its right and down neighbors.
+</Step>
+<Step title="Return need[0][0]">
+  That is the minimum initial HP for the top-left entry.
+</Step>
+</Steps>
+
+Space can drop to **O(n)** by keeping only the next row — the recurrence reads `(i+1, j)` and `(i, j+1)`.
+
+## Solution
+
+```ts
+function calculateMinimumHP(dungeon: number[][]): number {
+  const m = dungeon.length;
+  const n = dungeon[0].length;
+  const need = new Array<number>(n + 1).fill(Infinity);
+  need[n - 1] = 1;
+
+  for (let i = m - 1; i >= 0; i--) {
+    for (let j = n - 1; j >= 0; j--) {
+      const next = Math.min(need[j], need[j + 1]);
+      need[j] = Math.max(1, next - dungeon[i][j]);
+    }
+    need[n] = Infinity;
+  }
+
+  return need[0];
+}
+```
+
+Time **O(m × n)**. Space **O(n)** with one rolling row.
+
+<Tradeoff
+  forTitle="Backward minimum-need DP when"
+  againstTitle="Forward max-HP DP when"
+  forItems={[
+    "The objective is minimum starting resources to guarantee survival — a 'weakest link ahead' question",
+    "Health must stay strictly positive at every step, not just at the end",
+    "Grid size up to 200×200 — O(mn) table is fine, rolling row saves memory",
+    "Only right and down moves — fixed topology simplifies the backward recurrence",
+    "Follow-up asks for the actual path — backtrack from need[0][0] toward lower neighbor need",
+  ]}
+  againstItems={[
+    "Problem asks maximum loot collected with a health cap — forward knapsack-style DP",
+    "You may revisit cells — backward DP on a DAG breaks; need cycle-aware search",
+    "Death is allowed and you minimize revives — different state includes death count",
+    "Grid is tiny and interviewer wants BFS with explicit HP states first",
+    "All rooms are nonnegative — forward greedy 'always take max heal' can suffice",
+  ]}
+/>
+
+## In an interview
+
+Restate the strict positivity rule: 0 HP at any moment is death. Walk through a 2×2 example backward — show why entering a negative cell early demands higher initial HP.
+
+Say: "Forward max-HP does not answer 'minimum start'; I compute from the princess backward what HP each cell requires upon entry."
+
+Bug to name: forgetting `max(1, …)` and returning 0 initial HP; or applying the room effect in the wrong direction (adding instead of subtracting when working backward).
+
+Follow-ups: return the optimal path; allow four-direction movement; 03.40 Cherry Pickup shares grid DP but optimizes a sum, not a survival floor.
+
+<KeyTakeaways items={[
+  "Dungeon Game asks for minimum initial HP — backward DP from the princess, not forward max health.",
+  "need[i][j] = max(1, min(need[i+1][j], need[i][j+1]) - dungeon[i][j]) encodes the strict positivity constraint.",
+  "The princess cell seeds the base case; fill bottom row and right column before the general interior.",
+  "Rolling one row reduces space to O(n) while preserving the same time complexity.",
+  "Forward greedy on local damage fails because a cheap step may lead into an unavoidable deadly corridor.",
+  "03.40 Cherry Pickup and 03.24 Path With Minimum Effort are grid DP cousins — this one minimizes starting resource, not path cost.",
+]} />

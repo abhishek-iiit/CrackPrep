@@ -1,0 +1,115 @@
+---
+title: "Binary Tree Maximum Path Sum"
+number: "02.13"
+summary: "A path may bend at any node; post-order DFS tracks the best downward arm and the best crossing path separately."
+status: published
+free: true
+difficulty: deep
+estMinutes: 18
+tags: [binary-tree, dfs, recursion]
+updated: "2026-09-15"
+---
+
+## Paths that turn in the middle
+
+Given a binary tree with integer values (negative nodes allowed), find the maximum sum of any **path**. A path is a sequence of nodes where each adjacent pair shares a parent-child edge. The path does not need to include the root or be purely downward — it can look like left subtree → node → right subtree, bending at an internal node.
+
+Example: tree `[-10, 9, 20, null, null, 15, 7]` — the best path is `15 → 20 → 7` with sum 42, not a root-to-leaf walk.
+
+Brute force — enumerate every path — is exponential. Even counting all root-to-leaf paths is O(n) paths on a balanced tree but each path can be O(n) long; the real issue is that the optimal path may **not** pass through the root at all, so fixing an endpoint at the root misses cases.
+
+The insight: at each node, the best path that **uses this node as the highest point** is `node.val + max(0, leftGain) + max(0, rightGain)`. Left and right gains are the best sums you can bring upward from each child — downward only, because a path cannot fork twice.
+
+## Post-order: gain upward vs answer global
+
+Define `gain(node)` = maximum sum of a downward path starting at `node` and going to some descendant (possibly stopping at `node`). While computing gain, update a global `best` with the crossing path through `node`.
+
+At node `n`:
+- `leftGain = max(0, gain(n.left))` — ignore negative contributions
+- `rightGain = max(0, gain(n.right))`
+- crossing candidate = `n.val + leftGain + rightGain` → maybe update `best`
+- return `n.val + max(leftGain, rightGain)` to parent (only one child can continue upward)
+
+<Steps>
+<Step title="DFS post-order on each node">
+  Compute left and right gains from children first.
+</Step>
+<Step title="Update global best with the bent path">
+  Use both arms plus current value — this is the only place a path turns.
+</Step>
+<Step title="Return single-arm gain to parent">
+  Parent can extend at most one direction through this node.
+</Step>
+</Steps>
+
+Initialize `best` to `-Infinity` — all-negative trees still have an answer (the least negative single node).
+
+## Solution
+
+```ts
+class TreeNode {
+  val: number;
+  left: TreeNode | null;
+  right: TreeNode | null;
+  constructor(val?: number, left?: TreeNode | null, right?: TreeNode | null) {
+    this.val = val ?? 0;
+    this.left = left ?? null;
+    this.right = right ?? null;
+  }
+}
+
+function maxPathSum(root: TreeNode | null): number {
+  let best = -Infinity;
+
+  function gain(node: TreeNode | null): number {
+    if (node === null) return 0;
+
+    const left = Math.max(0, gain(node.left));
+    const right = Math.max(0, gain(node.right));
+
+    best = Math.max(best, node.val + left + right);
+    return node.val + Math.max(left, right);
+  }
+
+  gain(root);
+  return best;
+}
+```
+
+Time **O(n)** — one visit per node. Space **O(h)** stack, O(n) skewed worst case.
+
+<Tradeoff
+  forTitle="Single-pass post-order gain when"
+  againstTitle="Root-fixed or brute enumeration when"
+  forItems={[
+    "Paths may start and end anywhere — not only root-to-leaf",
+    "Node values can be negative; zero-clamping on child gains is required",
+    "You need O(n) time on trees up to 10⁴ nodes",
+    "Follow-up asks for the actual path nodes, not just the sum — same DFS, track choices",
+    "This pattern (return one thing to parent, update global with combo) appears in diameter problems too",
+  ]}
+  againstItems={[
+    "Tree is a path graph and two-pointer ends work — still O(n) but less general",
+    "Interviewer only wants root-to-leaf max — simpler recursion without global best",
+    "You mis-implement and try to return the crossing path upward — breaks the single-arm invariant",
+    "n is tiny and enumerating paths is acceptable for clarity first",
+    "Values are all non-negative — greedy root-to-leaf seems tempting but still misses internal bends",
+  ]}
+/>
+
+## In an interview
+
+Clarify what "path" means: connected nodes by edges, minimum one node, no requirement to touch root. Walk through a small tree where the answer bends at an internal node, not at the root.
+
+Before coding, state two quantities: "gain going down from a node" vs "best bent path using this node as apex." Say you clamp child contributions at zero so negative subtrees are skipped.
+
+Bug to mention: returning `left + right + val` to the parent (that would allow double forks). Also forgetting that `best` must handle all-negative trees. Follow-ups: print the path; count max-path-sum paths; same logic on a grid.
+
+<KeyTakeaways items={[
+  "The optimal path may turn at an internal node — root-to-leaf DFS alone is insufficient.",
+  "At each node, crossing sum = val + max(0, leftGain) + max(0, rightGain); update a global best.",
+  "Return to parent only val + best single child gain — a path cannot split twice upward.",
+  "Clamp child gains at zero so negative subtrees do not reduce a crossing path incorrectly.",
+  "O(n) time, O(h) space; initialize best to -Infinity for all-negative inputs.",
+  "Same post-order shape as tree diameter — local combo for answer, single arm for parent.",
+]} />

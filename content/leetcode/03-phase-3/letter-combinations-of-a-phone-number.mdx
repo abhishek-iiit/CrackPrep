@@ -1,0 +1,106 @@
+---
+title: "Letter Combinations of a Phone Number"
+number: "03.04"
+summary: "Each digit fans out to 3–4 letters — DFS builds one string per root-to-leaf path through the digit tree."
+status: published
+free: true
+difficulty: core
+estMinutes: 12
+tags: [backtracking, recursion, string]
+updated: "2026-09-15"
+---
+
+## Digits in, strings out — the tree depth is the string length
+
+Given a string of digits 2–9, return every letter combination the phone keypad could produce. `"23"` maps to `["ad","ae","af","bd","be","bf","cd","ce","cf"]` — 3 × 3 = 9 strings because digit `2` has three letters and digit `3` has three.
+
+Nested loops work when digit count is fixed at two or three. For length d, the output size is up to 4^d (digit 7 and 9 have four letters). Backtracking treats each digit as one tree level: pick a letter, append, advance to the next digit, undo on return.
+
+## One level per digit
+
+Map each digit to its letter string (standard phone layout). Recurse on index `i` into `digits`. At depth `i`, try every character in `map[digits[i]]`. When `i === digits.length`, push the built string.
+
+The invariant: `path.length === i` and only valid keypad letters appear at each position. Empty input `""` returns `[]` — no digit means no combinations.
+
+<Steps>
+<Step title="Build digit → letters map">
+  Fixed table: `'2'→"abc"`, `'3'→"def"`, …, `'9'→"wxyz"`. Digit `1` and `0` are absent on standard LeetCode constraints.
+</Step>
+<Step title="Recurse on digit index">
+  At index `i`, loop letters for `digits[i]`, push char, call `backtrack(i + 1)`, pop char.
+</Step>
+<Step title="Collect full strings">
+  When `i === digits.length`, join `path` (or push accumulated string) into result.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function letterCombinations(digits: string): string[] {
+  if (digits.length === 0) return [];
+
+  const map: Record<string, string> = {
+    "2": "abc", "3": "def", "4": "ghi", "5": "jkl",
+    "6": "mno", "7": "pqrs", "8": "tuv", "9": "wxyz",
+  };
+
+  const result: string[] = [];
+  const path: string[] = [];
+
+  function backtrack(i: number): void {
+    if (i === digits.length) {
+      result.push(path.join(""));
+      return;
+    }
+    for (const ch of map[digits[i]]) {
+      path.push(ch);
+      backtrack(i + 1);
+      path.pop();
+    }
+  }
+
+  backtrack(0);
+  return result;
+}
+```
+
+Time **O(4^d × d)** — at most 4 branches per level, d levels, each string length d. Space **O(d)** for recursion and path, excluding output.
+
+<Tradeoff
+  forTitle="Backtracking when"
+  againstTitle="Iterative cartesian product when"
+  forItems={[
+    "Digit string length is variable and you want the standard DFS template",
+    "Output is all strings — enumeration is required, not just count",
+    "Same pattern extends to generate parentheses and other fixed-alphabet trees",
+    "d ≤ 4 on typical constraints — recursion depth is tiny",
+    "Interviewers expect choose-explore-unchoose on a string builder",
+  ]}
+  againstItems={[
+    "You prefer BFS level-by-level (queue of partial strings) for iterative style",
+    "Length is fixed at 2–3 and nested loops are faster to write",
+    "Follow-up adds wildcards or invalid digits — map lookup needs validation first",
+    "Memory must avoid recursion — iterative doubling on a list of strings works",
+    "Problem asks for one combination at a time streamed — use generator/yield pattern",
+  ]}
+/>
+
+## In an interview
+
+Restate: digits 2–9 only, return all letter strings. Example `"23"` → nine results. Handle empty string → `[]` before coding.
+
+Describe the tree: depth equals digit count, branching factor 3 or 4. Say you will map digits to letters and backtrack on index.
+
+Follow-ups: digits including 0/1 with custom mapping, or return count only. Bug to mention: forgetting empty input, or using `digits` length 0 and returning `[""]` instead of `[]`.
+
+<KeyTakeaways
+  items={[
+    "Letter Combinations is backtracking over digit indices — each level tries all letters for one digit.",
+    "Output size is O(4^d) in the worst case; time includes building each string of length d.",
+    "Empty digits returns an empty list, not a list containing the empty string.",
+    "Fixed phone keypad map means no sorting or dedup — unlike subset problems with duplicates.",
+    "BFS on partial strings is an equivalent iterative formulation with the same asymptotics.",
+    "This problem is the gentlest multi-level backtracking warm-up before 03.05 Word Break II and partition problems.",
+  ]}
+/>

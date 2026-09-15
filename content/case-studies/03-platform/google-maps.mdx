@@ -1,0 +1,149 @@
+---
+title: "Google Maps"
+number: "03.03"
+summary: "Geospatial indexes, vector tiles at the edge, and a routing graph that must answer 'near me' and 'fastest route' under very different latency budgets."
+status: published
+free: true
+difficulty: deep
+estMinutes: 22
+tags: [geospatial, maps, routing]
+updated: "2026-09-15"
+---
+
+## Three products wearing one icon
+
+"Design Google Maps" sounds like one system. In an interview it is three problems with incompatible latency budgets: **place search** ("coffee near me" — 200 ms, geospatial index), **map rendering** (pan and zoom at 60 fps — tile CDN, megabytes of vectors), and **routing** (turn-by-turn — graph search over millions of edges, seconds of compute acceptable but not minutes). Candidates who draw one database in the middle miss the point. Interviewers want to see you split the problem, pick the right index per sub-problem, and name what is precomputed versus computed on demand.
+
+The geospatial tension is dimensionality. Lat/long is continuous; databases want B-trees on scalar keys. You cannot `WHERE lat BETWEEN ... AND lng BETWEEN ...` on a global table and hit an index — you get a bounding box full of false positives near the poles and dateline, and the index scans half the planet. The fix is a space-filling curve or tree structure that preserves locality: geohash, Quadtree, R-tree, or Google's S2 cells.
+
+## Clarify: search, tiles, or directions?
+
+> "I'll cover place search, map tile serving, and driving directions for a consumer maps app. Real-time traffic, street-view imagery, and turn-by-turn voice are partially in scope — traffic affects routing weights, imagery is CDN-only. Out of scope: map editing/crowdsourcing tools, ads on the map, and offline map downloads."
+
+**Functional requirements:**
+
+- **Place search**: text query + optional user location → ranked list of places (name, address, lat/lng, category).
+- **Map display**: given viewport (bounding box + zoom) → **vector or raster tiles** for rendering roads, labels, buildings.
+- **Directions**: origin + destination (+ waypoints) → polyline route, ETA, turn list.
+- **Geocoding** (if asked): address ↔ coordinates via a lookup service.
+
+**Non-functional requirements:**
+
+- Search p99 **< 300 ms**; tile load **< 100 ms** from edge; routing **< 2 s** for a 500 km drive (order-of-magnitude).
+- **Availability** 99.9% — cached tiles degrade gracefully; routing can fall back to static weights without live traffic.
+- **Global coverage** — shard by geography.
+
+Ask: "Driving, walking, or transit?" Each changes the graph. "Do we need live traffic?" If yes, edge weights update every few minutes — that is a streaming overlay on the routing graph, not a redesign of storage.
+
+## Capacity: tiles dominate egress, routing dominates CPU
+
+| Assumption | Value | Derived |
+|---|---|---|
+| DAU | 200M | |
+| Map sessions per user per day | 2 | 400M sessions/day |
+| Tile requests per session (pan/zoom) | ~200 | **80B tile requests/day** → **~925k/s** average, **~2.8M/s** peak (3×) |
+| Tile size (vector, compressed) | ~30 KB average | **~84 GB/s** peak egress — CDN mandatory |
+| Place searches per session | 3 | **2.4B searches/day** → **~28k/s** avg, **~85k/s** peak |
+| Direction requests per session | 0.5 | **400M routes/day** → **~4.6k/s** avg, **~14k/s** peak |
+| POI corpus | 200M places worldwide | Geospatial index size |
+| Road graph | ~500M nodes, ~1B edges (continent-scale) | Preprocessed per region |
+
+**Tile math is the headline.** Nearly a million tile requests per second average means origin servers never see that traffic — **CDN caches tiles by `(z, x, y, version)`** with immutable URLs when the map version bumps. Origin is only for cache miss (~1–5%).
+
+**Routing CPU:** Contraction Hierarchies or A* on a continental graph is milliseconds to low seconds per query on preprocessed data — 14k/s peak needs a **routing farm** of stateless servers holding in-memory regional graphs, not one Postgres query.
+
+## High-level design
+
+Split into three subsystems from the first box on the whiteboard.
+
+<Steps>
+<Step title="Place search path">
+
+Client sends `GET /v1/places/search?q=coffee&lat=37.7&lng=-122.4&radius=2km`. **Search Service** runs two queries in parallel:
+
+1. **Text match** on name/category — inverted index (Elasticsearch or custom) for "coffee", "starbucks".
+2. **Geo filter** on candidates — **S2 cell** or **geohash prefix** index: user's location maps to cell `89c2594`; query neighboring cells at appropriate resolution for 2 km radius.
+
+Merge, **rank by distance × text relevance × popularity**, return top 20. Hot cities cache `(query_hash, cell) → results` in Redis for 5 minutes.
+
+</Step>
+
+<Step title="Map tile path">
+
+Client computes visible tile coordinates at zoom level z and requests `GET /tiles/v3/{z}/{x}/{y}.pbf`. Request goes to **CDN** — cache hit returns protobuf vector tile directly. Miss hits **Tile Origin** which reads pre-rendered tiles from **object storage** (S3/GCS). Tiles are **built offline** by a map pipeline from OpenStreetMap-style source data; version in the URL path enables instant CDN invalidation on deploy.
+
+</Step>
+
+<Step title="Routing path">
+
+Client sends `POST /v1/directions { origin, destination, mode: driving }`. **Router Service** snaps points to nearest graph nodes (spatial index on node coordinates), loads **regional graph shard** into memory (Europe graph ≠ Asia graph), runs **Contraction Hierarchies** or **A*** with **landmark heuristic** on edges weighted by `(length / speed_limit) × traffic_multiplier`. Traffic multipliers come from a **Traffic Service** reading recent GPS probe aggregates (updated every 2–5 min). Returns encoded polyline + ETA breakdown.
+
+</Step>
+</Steps>
+
+| Subsystem | Index / store | Latency budget |
+|---|---|---|
+| Place search | Inverted index + S2/geohash spatial index | &lt; 300 ms |
+| Tiles | Object storage + CDN | &lt; 100 ms edge |
+| Routing | In-memory preprocessed road graph per region | &lt; 2 s |
+| Traffic overlay | Stream aggregates → edge weight cache | Refreshed every few min |
+
+## Deep dive: geospatial index and routing graph
+
+### S2 cells versus geohash
+
+**Geohash** is simple — base32 string, prefix match equals bounding box (with edge-case distortion at cell boundaries). **S2** (Hilbert curve on a sphere) gives more uniform cell shapes globally. Both let you store `place_id → cell_id` and query `cell_id IN (user_cell, neighbors)`. At 200M POIs, each cell at city-block resolution holds hundreds of entries — fetch cell buckets, filter precise distance with Haversine, sort. Interviewers accept either if you name the **neighbor-cell lookup** step — forgetting neighbors misses places sitting on a cell boundary.
+
+### Preprocessed routing, not Dijkstra from scratch
+
+Running Dijkstra on 500M nodes per request is impossible. Offline preprocessing builds **Contraction Hierarchies** or **highway hierarchies** — shortcuts that make online search touch thousands of nodes instead of millions. Graphs are **partitioned by region**; cross-region routes stitch border nodes. Memory per region is tens of GB — each router pod loads one or two regions.
+
+Live traffic adjusts **edge weights**, not graph topology. GPS probes (from apps opting in) aggregate into `(edge_id → speed_factor)` in a stream processor; router reads a snapshot refreshed every few minutes. Stale traffic is wrong ETAs, not broken routes — say that.
+
+<Callout type="tip">
+For "near me" without a text query, skip the inverted index entirely — pure geo lookup on S2 cells sorted by distance. Text + geo is a merge of two ranked lists; mention **Reciprocal Rank Fusion** or simple interleaving if the interviewer pushes on ranking.
+</Callout>
+
+### Tile pyramid and versioning
+
+Zoom level z has 4^z tiles globally — you never pre-generate all levels to z=20 worldwide. Generate down to city detail where users exist; ocean tiles are empty and cached as 404 shortcuts. **Version prefix** in the URL (`/v47/`) means deploy new map data without purging the entire CDN — old URLs remain valid until TTL expires.
+
+## CDN-first tiles versus compute-on-demand routing
+
+<Tradeoff
+  forTitle="Precomputed tiles + preprocessed graph when"
+  againstTitle="More dynamic generation when"
+  forItems={[
+    "Tile QPS is millions per second — only a CDN-backed immutable object store survives that egress",
+    "Road topology changes daily at most — offline graph preprocessing amortizes over billions of queries",
+    "Routing latency under 2 s requires Contraction Hierarchies or similar — online Dijkstra on the full graph cannot meet the budget",
+    "Place corpus updates hourly — batch index rebuild fits search freshness requirements",
+    "Global sharding by S2 region or geohash prefix keeps each search node’s working set bounded",
+  ]}
+  againstItems={[
+    "Map style is user-customizable per request — vector tiles may need runtime styling, pushing compute closer to the client",
+    "Indoor routing or parking-lot micro-graphs change frequently — smaller graphs can be computed on demand",
+    "Prototype or city-only scope — a single Postgres with PostGIS and OSRM on one machine is enough to demo",
+    "Traffic must alter routes sub-minute and graph preprocessing cannot keep up — dynamic weight overlays help but extreme cases need replanning",
+    "Dataset is small (&lt;1M POIs, one metro) — brute-force geo scan in memory is acceptable",
+  ]}
+/>
+
+## In an interview
+
+Open by splitting: "Three subsystems — search, tiles, routing — different stores and latency budgets." Three minutes clarify (modes, traffic), five minutes capacity (tile QPS is the big number), twelve minutes across the three paths, five minutes on S2 + Contraction Hierarchies.
+
+Follow-ups: "Route across oceans?" (ferry edges or disallow), "Dateline crossing?" (S2 handles; geohash needs care), "How edit a POI?" (write to primary DB, async index update — not on the hot path).
+
+Volunteer: "Serving tiles from origin at map scale bankrupts you on egress — immutable versioned URLs on CDN are non-negotiable." For routing: "Stale traffic data gives wrong ETAs before it gives wrong routes — distinguish the failure modes."
+
+<KeyTakeaways
+  items={[
+    "Split maps into place search (geospatial + text index), tile serving (CDN + object storage), and routing (preprocessed in-memory graph) — one database cannot serve all three",
+    "Geospatial lookup uses S2 cells or geohash with neighbor-cell queries; precise distance is a Haversine filter after the index narrows candidates",
+    "Tile traffic is billions of requests per day — pre-rendered vector tiles, versioned URLs, and CDN caching; origin only sees cache misses",
+    "Routing uses offline-preprocessed graphs (Contraction Hierarchies); live traffic adjusts edge weights on a snapshot, not graph structure per request",
+    "Place search merges text relevance and distance ranking; pure 'near me' is geo-only without touching the inverted index",
+    "Shard by geography — regional routing graphs and spatial indexes keep memory bounded per server",
+  ]}
+/>

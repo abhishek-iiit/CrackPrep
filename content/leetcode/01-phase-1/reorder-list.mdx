@@ -1,0 +1,117 @@
+---
+title: "Reorder List"
+number: "01.45"
+summary: "Find the middle, reverse the second half, then zip-merge two halves — L0→Ln→L1→Ln−1 without extra array."
+status: published
+free: true
+difficulty: deep
+estMinutes: 18
+tags: [linked-list, two-pointers, reverse]
+updated: "2026-09-15"
+---
+
+## Reorder in place: L0 → Ln → L1 → Ln−1 → …
+
+Given `1 → 2 → 3 → 4`, reorder to `1 → 4 → 2 → 3`. Given `1 → 2 → 3 → 4 → 5`, reorder to `1 → 5 → 2 → 4 → 3`. You must not copy values into an array and rewrite pointers from scratch — the point is to **rewire the existing nodes**.
+
+Copying to an array, reordering indices, and rebuilding links is O(n) time but O(n) space and sidesteps the linked-list skills the problem tests. The standard in-place recipe is three phases you already know separately: find middle, reverse second half, merge alternating.
+
+## Three phases, three invariants
+
+<Steps>
+<Step title="Find the middle (slow/fast)">
+  Slow/fast from head: when fast reaches the end, slow is at the first node of the second half (for even length) or the true middle (for odd — second half starts at slow.next).
+</Step>
+<Step title="Reverse the second half">
+  Same pointer reversal as 01.40 Reverse Linked List. Cut the list at the middle so the first half no longer points into the reversed segment incorrectly.
+</Step>
+<Step title="Zip merge">
+  Alternate nodes from `first` and `second` heads: save `first.next`, link `first` to `second`, advance; link `second` back to saved next of first. Stop when second is exhausted; if first has a tail left (odd length), it already points correctly.
+</Step>
+</Steps>
+
+For `1 → 2 → 3 → 4 → 5`: middle at `3`, second half `4 → 5` reverses to `5 → 4`, merge gives `1 → 5 → 2 → 4 → 3`.
+
+## Solution
+
+```ts
+class ListNode {
+  val: number;
+  next: ListNode | null;
+  constructor(val?: number, next?: ListNode | null) {
+    this.val = val ?? 0;
+    this.next = next ?? null;
+  }
+}
+
+function reorderList(head: ListNode | null): void {
+  if (head === null || head.next === null) return;
+
+  // 1) Middle
+  let slow: ListNode = head;
+  let fast: ListNode = head;
+  while (fast.next !== null && fast.next.next !== null) {
+    slow = slow.next!;
+    fast = fast.next.next!;
+  }
+
+  // 2) Reverse second half
+  let second: ListNode | null = slow.next;
+  slow.next = null;
+  let prev: ListNode | null = null;
+  while (second !== null) {
+    const next = second.next;
+    second.next = prev;
+    prev = second;
+    second = next;
+  }
+  second = prev;
+
+  // 3) Merge alternately
+  let first: ListNode | null = head;
+  while (second !== null) {
+    const fNext = first!.next;
+    const sNext = second.next;
+    first!.next = second;
+    second.next = fNext;
+    first = fNext;
+    second = sNext;
+  }
+}
+```
+
+Time **O(n)**, space **O(1)**.
+
+<Tradeoff
+  forTitle="Split, reverse, zip in place when"
+  againstTitle="Array copy and index reorder when"
+  forItems={[
+    "O(1) extra space is required",
+    "You are drilling linked-list pointer manipulation for interviews",
+    "n up to 5×10⁴ and allocation overhead matters",
+    "The three subroutines reuse 01.40 reverse and slow/fast middle finding",
+  ]}
+  againstItems={[
+    "Correctness matters more than space and you want the shortest bug-free path",
+    "The list is read-only shared structure and you must not mutate original links",
+    "You need random access to nodes by index repeatedly anyway",
+    "Production code would serialize to an array for logging before reordering",
+  ]}
+/>
+
+## In an interview
+
+Walk a 4-node example on the board before coding. State three phases explicitly; interviewers prefer structure over a monolithic loop.
+
+Self-flag bugs: not breaking the link at the middle (infinite merge), reversing the whole list instead of the second half, losing `first.next` during zip without saving `fNext`.
+
+Follow-ups: palindrome linked list (same middle + reverse compare); reorder with a different pattern; do it recursively (stack implicit O(n) space).
+
+<KeyTakeaways items={[
+  "Reorder L0→Ln→L1→Ln−1 by finding the middle, reversing the second half, and merging alternately.",
+  "Slow/fast with `fast.next.next` stops slow at the last node of the first half for even-length lists.",
+  "Cut `slow.next = null` before reversing so halves are independent lists.",
+  "During zip merge, save first.next before overwriting links or you lose the rest of the first half.",
+  "Array copy reorder is O(n) time and O(n) space — valid but not what the in-place constraint targets.",
+  "Combines skills from 01.40 Reverse Linked List and two-pointer middle finding used in 01.44.",
+]} />

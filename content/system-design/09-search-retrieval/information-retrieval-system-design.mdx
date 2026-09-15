@@ -1,32 +1,76 @@
 ---
 title: "Information Retrieval System Design"
 number: "09.01"
-summary: "Information Retrieval System Design — notes in progress."
-status: draft
+summary: "Why a search box is a ranking problem, not a lookup, and how splitting index-time from query-time work is the first design decision."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: intro
+estMinutes: 8
+tags: [search, information-retrieval, architecture]
+updated: "2026-09-15"
 ---
 
-## The problem
+## A relevance-ranked answer is not a lookup
 
-What breaks without this, and the situation that forces the decision.
+A database query has a right answer. `WHERE user_id = 42` returns the row with that id or it does not; there is no partial credit and no ordering to argue about. A search query has no such answer. "Best noise-cancelling headphones under $200" matches thousands of documents to varying degrees, none of them exactly, and the entire job of the system is deciding which handful of imperfect matches to show first. That is a different kind of problem, and it does not get easier by throwing a bigger database at it — the same table with a `LIKE '%headphones%'` still can't tell you that one match is a better answer than another, only that both mention the word.
 
-## How it works
+That distinction is the reason a search system exists as its own subsystem rather than a query pattern on top of the primary datastore. Everything downstream in this module — inverted indexes, boolean retrieval, TF-IDF, BM25 — is machinery built to answer one question well: out of everything that could match, what should show up first, and how fast can that decision get made.
 
-The mechanism, step by step.
+## Push the work to whichever side of the query can afford it
 
-## Tradeoffs
+A search system has two clocks running on two completely different budgets. Indexing happens whenever a document is created or changes, asynchronously, with no user waiting on it — an indexing job can take seconds per document and nobody notices. Querying happens while a user is staring at a spinner, shared across however many other queries are running at that instant, with a budget usually measured in tens or a few hundred milliseconds at the high percentiles.
+
+Every real design decision in this module is a variant of the same move: do the expensive part once, at index time, so query time only has to run cheap, precomputed lookups. Build the inverted index (09.02 Inverted Index And Posting Lists) once per document, not once per query. Compute a document's static quality score once, not per query. Precompute a champion list (09.06 Stop Words And Champion Lists) once per term, not once per request. None of this is free — it costs index storage, index-build compute, and staleness while a change propagates from the primary store into the index (09.10 Search Index Synchronization) — but that cost is paid once and amortized over however many queries the index serves before it next changes, while query-time cost is paid on every single request, at a much tighter budget, under load from every concurrent user at once.
+
+## Precision and recall pull in opposite directions
+
+Two numbers describe how good a result set is. **Recall** is the fraction of everything actually relevant that the system returned. **Precision** is the fraction of what it returned that is actually relevant. A system that returns every document in the corpus has perfect recall and terrible precision. A system that returns nothing has perfect precision — trivially, an empty set contains no wrong answers — and zero recall. Neither is useful, and the entire ranking problem lives in the tension between them.
+
+Production search systems resolve that tension with a two-stage architecture rather than one algorithm trying to do both jobs:
+
+1. **Retrieve for recall.** Use cheap, exact operations — boolean AND/OR over an inverted index (09.03 Boolean Tiered Search) — to pull a candidate set that is very likely to contain every genuinely relevant document, plus a lot of irrelevant ones. This stage is deliberately generous. Missing a relevant document here is unrecoverable; including too many irrelevant ones is not, because the next stage is about to filter them.
+2. **Rank for precision.** Score every candidate against the query with a relevance function — TF-IDF (09.04 TF-IDF Relevance Scoring) or, in production, BM25 (09.05 BM25 Production Ranking) — and return only the top few. This stage is where "how good is this match" actually gets decided; the first stage only decided "could this possibly be a match."
+
+Splitting the problem this way is what makes both halves tractable. Retrieval only has to be complete and fast; it never has to be smart. Ranking only has to be smart over a candidate set that is already small; it never has to touch the whole corpus.
+
+<Callout type="note">
+The corpus size, query rate, freshness requirement (how fast a new or edited document must become searchable), and query latency budget are the four numbers that shape this whole design, the same way 01.01 Requirements Clarification asks for daily actives, peak rate, payload size, and retention before any other system. Get them with units before assuming a two-stage architecture is even necessary — a ten-thousand-row product catalog with predictable queries may never need more than a database index and a `LIKE`.
+</Callout>
+
+## When a database index is not enough
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Reach for a dedicated search system when"
+  againstTitle="A database index still covers it when"
+  forItems={[
+    "Queries are free text with an implicit ranking, not exact or range matches — relevance, not correctness, is the question being asked",
+    "The candidate set for a typical query is far larger than what should be shown, so a ranking stage has real work to do",
+    "Query latency has to stay flat as the corpus grows into the millions of documents, which needs a structure built for that, not a full scan behind a WHERE clause",
+    "The workload needs tokenization, stemming, typo tolerance, or per-field weighting that a LIKE or a single b-tree index cannot express",
+    "Freshness of a few seconds to a few minutes after a write is acceptable, so the index can be updated asynchronously rather than inline with every write",
+  ]}
+  againstItems={[
+    "The corpus and query volume are both small enough that a b-tree index (03.04 B-Tree) or a trigram index answers every query inside the latency budget",
+    "Matches are exact or range-based — a user id, a SKU, a date range — not relevance-ranked free text",
+    "The team cannot take on a second, eventually-consistent copy of the data with its own sync pipeline and its own availability story",
+    "The database's own full-text extension has been measured against the actual query patterns and is not the bottleneck",
+    "There is no real ranking question — matches are unambiguous, so there is nothing for a relevance function to decide",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Introduce the topic by naming the shape of the problem before naming any structure: "This needs ranked results over free text, not exact lookups, so I want a retrieve-then-rank pipeline — a cheap stage that finds every plausible candidate, and a scoring stage that orders the ones worth showing." That sentence answers the first three follow-ups before they're asked: why not just a database query, what the two stages are for, and where the latency budget goes.
 
-<KeyTakeaways items={["", "", ""]} />
+Expect to be asked what happens when the two stages disagree with intuition — a document that matches every query term but never surfaces, or the opposite. The answer is almost always in which stage is misbehaving: a missing document is a recall problem in retrieval; a badly-ordered one is a precision problem in ranking. Naming which stage owns which failure mode, before being asked, is what separates having used a search engine from being able to design one.
+
+<KeyTakeaways
+  items={[
+    "A search query has no single correct answer the way a database lookup does — the system's job is to rank imperfect matches, not verify an exact one",
+    "Index-time work is paid once per document and amortized; query-time work is paid on every request under a much tighter latency budget, so push work toward index time whenever it can be precomputed",
+    "Recall is the fraction of relevant documents returned, precision is the fraction of returned documents that are relevant, and no single-stage design optimizes both at once",
+    "Production systems split the problem into a cheap, generous retrieval stage for recall and an expensive, selective ranking stage for precision",
+    "Get corpus size, query rate, freshness requirement, and latency budget with units before assuming a dedicated search system is needed at all",
+    "A missing result is a retrieval failure; a badly-ordered one is a ranking failure — naming which stage owns a symptom is the core diagnostic skill",
+  ]}
+/>

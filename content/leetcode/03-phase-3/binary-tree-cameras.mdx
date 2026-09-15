@@ -1,0 +1,125 @@
+---
+title: "Binary Tree Cameras"
+number: "03.47"
+summary: "Post-order greedy: place a camera when a child is uncovered — cover the parent and sibling, not every node."
+status: published
+free: true
+difficulty: deep
+estMinutes: 19
+tags: [binary-tree, greedy, dfs]
+updated: "2026-09-15"
+---
+
+## Covering every node is not the same as minimizing cameras
+
+Binary tree nodes need monitoring. A camera on node `x` watches `x`, its parent, and its immediate children. Return the **minimum** number of cameras to monitor all nodes.
+
+Putting a camera on every node works but wastes hardware. Putting cameras only on leaves fails — a single-child chain leaves the parent uncovered. The problem is a **set cover** flavor on a tree, which admits greedy structure because there is no cycle.
+
+The winning approach: post-order DFS returning one of three states for each node:
+
+- **0 — uncovered:** node has no camera and is not watched by a child or parent camera yet
+- **1 — covered, no camera:** node is watched but does not host a camera
+- **2 — has camera:** node hosts a camera
+
+Process children first. If **any child is uncovered (0)**, this node **must** get a camera (state 2) — increment count. Else if **any child has a camera (2)**, this node is covered (state 1). Else both children are covered without cameras — this node remains uncovered (0) and pushes the obligation upward.
+
+After DFS, if the root returns uncovered (0), place one more camera on the root.
+
+## Greedy placement intuition
+
+Cameras on a node cover its parent — so the optimal strategy pushes cameras **upward** toward parents of uncovered children rather than blanket leaf placement. One camera at a parent can cover two subtrees' worth of nodes.
+
+<Steps>
+<Step title="Post-order recurse on children">
+  Obtain leftState and rightState (0, 1, or 2).
+</Step>
+<Step title="If any child is 0">
+  Place camera on current node; return 2.
+</Step>
+<Step title="Else if any child is 2">
+  Current node is covered; return 1.
+</Step>
+<Step title="Else return 0">
+  Both children covered without camera here — parent must handle this node.
+</Step>
+<Step title="After DFS, if root state is 0">
+  Increment camera count by one.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+class TreeNode {
+  val: number;
+  left: TreeNode | null;
+  right: TreeNode | null;
+  constructor(val?: number, left?: TreeNode | null, right?: TreeNode | null) {
+    this.val = val ?? 0;
+    this.left = left ?? null;
+    this.right = right ?? null;
+  }
+}
+
+function minCameraCover(root: TreeNode | null): number {
+  let cameras = 0;
+
+  function dfs(node: TreeNode | null): number {
+    if (node === null) return 1; // empty subtree treated as covered
+
+    const left = dfs(node.left);
+    const right = dfs(node.right);
+
+    if (left === 0 || right === 0) {
+      cameras++;
+      return 2;
+    }
+    if (left === 2 || right === 2) return 1;
+    return 0;
+  }
+
+  if (dfs(root) === 0) cameras++;
+  return cameras;
+}
+```
+
+Null returns **1** (covered) so a leaf with no children does not force a camera on itself — the parent decides.
+
+Time **O(n)**. Space **O(h)**.
+
+<Tradeoff
+  forTitle="Post-order three-state greedy when"
+  againstTitle="DP / brute placement when"
+  forItems={[
+    "Tree structure — greedy provably optimal without explicit DP table",
+    "Camera covers parent and children — local uncovered child forces parent camera",
+    "n up to 1000 — O(n) single pass is required",
+    "Follow-up is minimum vertex cover on general graphs — tree greedy does not transfer",
+    "State encoding (0/1/2) is compact and interview-friendly",
+  ]}
+  againstItems={[
+    "Graph with cycles — tree greedy fails; need general set cover or MIS variants",
+    "Cameras have range > 1 edge — recurrence changes entirely",
+    "You must return camera placement positions — store choices during DFS",
+    "n ≤ 20 — bitmask DP over subsets is acceptable for derivation",
+    "Weighted camera costs per node — knapsack-style DP replaces uniform greedy",
+  ]}
+/>
+
+## In an interview
+
+Explain coverage: camera on node sees itself, parent, left child, right child. Draw a three-node chain — camera on middle covers all three.
+
+Walk the three states before coding. Name the root edge case: if root stays uncovered after DFS, add one camera.
+
+Bug: returning 0 for null (forces every leaf to host a camera). Follow-ups: return positions; general graph minimum dominating set.
+
+<KeyTakeaways items={[
+  "Binary Tree Cameras: post-order greedy with states 0 (uncovered), 1 (covered), 2 (camera).",
+  "If any child is uncovered, place camera on current node — covers parent and both child subtrees.",
+  "Null child returns 1 (covered) so leaves are not forced to carry cameras unnecessarily.",
+  "After DFS, an uncovered root needs one additional camera.",
+  "O(n) time — tree structure makes greedy optimal where general set cover is hard.",
+  "02.13 Binary Tree Maximum Path Sum shares post-order aggregation, but optimizes a sum not a cover.",
+]} />

@@ -1,32 +1,89 @@
 ---
 title: "Streaming Percentile Analytics"
 number: "10.12"
-summary: "Streaming Percentile Analytics — notes in progress."
-status: draft
+summary: "How to run p50/p95/p99 dashboards and alerts on live traffic by bucketing t-digests (or histograms) per dimension without drowning in raw samples."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [percentiles, streaming, latency, observability]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Averages lie; percentiles need a pipeline, not a one-liner
 
-What breaks without this, and the situation that forces the decision.
+Once a team decides latency SLOs live at p99, someone still has to compute p99 every minute for hundreds of services, versions, and regions. The algorithm choice — t-digest, HDR histogram, or exact sort on a sample — is only half the design. The other half is **where** digests live, **how** they roll across time and shards, and **which** dimensions explode the cardinality of the time series you materialize.
 
-## How it works
+10.11 TDigest Quantile Sketch covers the structure. This lesson is the system around it: streaming percentile analytics as a product that ops can trust without storing every request body forever.
 
-The mechanism, step by step.
+## A reference shape that holds up
 
-## Tradeoffs
+<Steps>
+  <Step title="Record the numeric observation on the request path or sidecar">
+    Each completed request contributes one value — latency ms, payload bytes, queue wait — tagged with a small label set: service, route group, region, maybe release. Avoid unbounded labels (raw user id, full URL with ids) or the digest map becomes a cardinality bomb before percentiles ever misbehave.
+  </Step>
+  <Step title="Update a local digest for the open time bucket">
+    In-process or in an agent, maintain a t-digest (or histogram) per label set for the current minute (10.06 Bucketed Time Window Aggregation). Hot path cost is an insert into a few-kilobyte structure, not a remote call per request.
+  </Step>
+  <Step title="Flush sealed digests to a metrics backend">
+    On bucket close, export digest bytes or precomputed percentile gauges. Prefer exporting the digest when you still need flexible merge and arbitrary quantiles later; export gauges when the consumer only ever wants fixed percentiles and you accept losing merge fidelity.
+  </Step>
+  <Step title="Merge across instances before you chart a service">
+    Five pods each with a p99 gauge are not a service p99 — the max of p99s overestimates, the average of p99s is meaningless. Merge digests (10.05, 10.11) or merge histograms by bucket, then read percentiles once. If you only stored gauges, you already threw away the information needed for a correct combine.
+  </Step>
+  <Step title="Alert on burn against an SLO, with sketch error in mind">
+    Page on sustained budget burn, not on a one-minute p99 blip inside digest noise. Keep a slower exact or HDR path for deep incident review if the sketch and the user complaints disagree.
+  </Step>
+</Steps>
+
+<Callout type="warn">
+Pre-averaging latencies on each instance and then taking a percentile of averages produces comforting fiction. Percentiles do not commute with averaging. If the backend cannot merge digests or histograms, push raw sampled observations (10.10 Reservoir Sampling) to a central aggregator that can.
+</Callout>
+
+## Cardinality and retention tradeoffs
+
+| Choice | Benefit | Cost |
+| --- | --- | --- |
+| High label cardinality | Fine-grained debug | Exploding series count, merge fan-in, bill shock |
+| Export digests | Correct cross-instance merge later | Larger payloads than a few gauges |
+| Export only p50/p95/p99 gauges | Tiny, cheap | Cannot correctly merge or ask p999 later |
+| Fine time buckets | Sharp incident shape | More storage; more flushes |
+| Long raw sample retention | Exact recomputation | Storage; privacy review |
+
+Raw events versus digests is the same split as 10.07 Raw Events Vs Derived Analytics: digests are derived speed layers. A low-rate reservoir of slow requests (latency above a threshold) next to the digest gives humans something to read during an incident without keeping every successful 40 ms call.
+
+Bloom filters and Count-Min Sketch do not compute percentiles; they answer membership and frequencies. Teams sometimes reach for them when the real missing piece is a digest pipeline — wrong tool family.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Build streaming percentile pipelines when"
+  againstTitle="Compute percentiles offline from logs when"
+  forItems={[
+    "SLOs and dashboards need minute-level p95/p99 during the incident, not the next morning",
+    "Traffic volume makes retaining every sample per dimension impractical",
+    "You can constrain label cardinality and merge digests or histograms correctly across shards",
+    "Approximate quantiles with known sketch behavior are acceptable for first-line alerting",
+    "Multiple consumers need different quantiles from the same flushed digest",
+  ]}
+  againstItems={[
+    "Volume is low and exact sort of stored samples already meets latency needs",
+    "You cannot merge correctly and would only publish misleading per-instance percentile gauges",
+    "Label explosion cannot be controlled — the metrics system will fail before the math does",
+    "Hard certification requires exact order statistics from retained traces for every window",
+    "The only consumer is a weekly batch report that can scan a warehouse cheaply",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Walk the pipeline, not only the sketch: "Per instance I update a t-digest each minute with bounded labels, flush digests, merge across instances, then read p99 — I will not average per-host p99s." Mention cardinality control and why gauges-only export breaks merge. Expect a question on p99 of p99s; say it is wrong and explain merge-then-quantile. Tie back to 10.11 for the digest mechanics and 10.06 for bucket sealing.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Streaming percentile analytics is a pipeline: local digest updates, sealed time buckets, correct merge across instances, then quantile reads",
+    "Percentiles do not commute with averaging — merging digests or histograms is required for a service-level p99",
+    "Exporting only percentile gauges is cheap but prevents correct merges and later arbitrary quantiles",
+    "Unbounded high-cardinality labels destroy metrics systems faster than sketch error destroys trust",
+    "Use t-digest or histograms for distributions; leave HLL, CMS, and Bloom filters for cardinality, frequency, and membership",
+    "Keep digests as derived data and retain selective raw or reservoir samples for incident forensics and validation",
+  ]}
+/>

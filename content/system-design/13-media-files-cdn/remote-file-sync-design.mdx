@@ -1,32 +1,93 @@
 ---
 title: "Remote File Sync Design"
 number: "13.09"
-summary: "Remote File Sync Design — notes in progress."
-status: draft
+summary: "How to sync files across devices without re-uploading unchanged bytes — local detection, remote diffing, and the conflict model you ship whether you admit it or not."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 14
+tags: [file-sync, delta-sync, conflicts, clients]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Re-uploading the whole file is the design that does not survive the second laptop
 
-What breaks without this, and the situation that forces the decision.
+A naive sync loop — hash the file, if different upload the entire object — works until the working set is large, the network is a phone hotspot, or the user edits a 200 MB video project to change one timeline marker. Bandwidth and battery become the product constraints. Remote file sync is the problem of converging replicas of a file tree across clients and a cloud authority while transferring as few bytes as possible and failing in a way users can understand when two edits collide.
 
-## How it works
+This is adjacent to but not the same as 13.10 Fixed Block Chunking And Content Addressing, which is the byte-splitting mechanism many sync systems use underneath. Here the design questions are detection, orchestration, and conflicts — what the client does before it ever opens a chunk pipeline.
 
-The mechanism, step by step.
+## The sync loop
 
-## Tradeoffs
+<Steps>
+  <Step title="Detect local change cheaply">
+    Filesystem watchers (inotify, FSEvents, USN) notify on path events; a periodic scan catches anything the watcher missed. Persist a per-file fingerprint: mtime + size as a fast filter, content hash when the filter says "maybe changed." mtime-only is wrong on clock skew and on some copy tools that preserve stamps; size-only misses same-size edits.
+  </Step>
+  <Step title="Reconcile with the remote namespace">
+    Fetch a compact remote listing — path, version or etag, size, content hash or blocklist hash — for the scoped folder. Compare to the local index to classify: upload new, download new, conflict, or already equal.
+  </Step>
+  <Step title="Transfer only the delta">
+    Whole-file put/get for small objects (often under a few MB, tune to RTT). For large files, chunk and send only missing blocks (13.10), or use a rolling-hash protocol in the rsync family when the server can compute signatures.
+  </Step>
+  <Step title="Commit metadata atomically from the client's point of view">
+    After bytes are durable, update the remote file version / blocklist pointer in one step so readers never see a half-applied new version. 13.11 Blocklist Versioned File Metadata is the usual representation.
+  </Step>
+</Steps>
+
+Partial failure is the normal case: upload three of four blocks and the laptop sleeps. The client must resume by asking which block hashes the server already has, not by restarting the whole file. Idempotent block puts (content-addressed) make retries safe; a non-addressed append channel needs explicit upload session IDs and leases.
+
+## Conflicts are a product decision wearing a sync costume
+
+Two clients editing offline will diverge. The infrastructure can detect divergence (version vectors, monotonically increasing file versions, or conditional puts with `If-Match` etags). It cannot invent the right merge for arbitrary binary files.
+
+| Strategy | Behavior | Fits |
+| --- | --- | --- |
+| Last-write-wins | Higher version or later server timestamp wins; loser becomes `.conflict` copy or is discarded | Photos, downloads, "dumb" files where duplication is safer than merge |
+| Manual conflict copies | Both versions kept side by side for the user | Documents when silent data loss is unacceptable |
+| App-level CRDT / merge | Domain-aware merge (text, canvas) | Collaborative editors — not generic file sync |
+| Server locks / leases | Check-out before edit | Small teams, high contention on few files; fails offline |
+
+Most "Dropbox-like" designs ship last-write-wins plus conflict copies for non-mergeable types, and they say so. Pretending the sync layer merges Word documents is how you get silent corruption.
+
+<Callout type="warn">
+Deleting is a sync event, not an absence of a file. Without tombstones (or a version that records deletion), a stale client that still holds the file will resurrect it on the next upload — the classic undelete loop. Tombstones need their own retention policy or the namespace grows forever.
+</Callout>
+
+## Authority, offline, and fan-out
+
+One cloud namespace is the usual authority for consumer sync: clients may diverge offline, but the server's version clock decides the order of commits. Peer-to-peer sync without a central version authority is a different design (more like 06.05 Clocks And Ordering territory) and rarely what interview prompts mean by "design Dropbox."
+
+Notifications matter as much as upload: a lightweight channel (websocket, push, long poll — see module 11 tradeoffs) tells other clients to pull metadata for a path instead of scanning the entire tree every few minutes. Metadata traffic and block traffic should use different SLAs — listing and version checks are chatty and latency-sensitive; block transfer is throughput-sensitive.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Build delta sync when"
+  againstTitle="Stick to whole-file sync when"
+  forItems={[
+    "Working set includes large files edited in small ways — media projects, VM images, databases, CAD",
+    "Clients regularly sit on constrained or metered networks",
+    "Multi-device resume and dedupe across users or devices justify content-addressed blocks",
+    "You can operate chunking, a block store, and versioned file metadata as first-class systems",
+    "Conflict copies plus clear versioning are acceptable product behavior",
+  ]}
+  againstItems={[
+    "Objects are small and replace-wholly on every save (settings JSON, small images)",
+    "A single-writer workflow means conflicts are rare and full re-upload is operationally simpler",
+    "Engineering time cannot staff block GC, tombstone retention, and corruption tooling yet",
+    "The 'sync' is really backup — periodic whole snapshots with versioning already meet the need",
+    "App-level collaboration already owns merging and the file is just an export artifact",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Introduce sync as convergence under partial failure: "I watch local FS events, reconcile a versioned remote namespace, and transfer content-addressed blocks for large files; deletes are tombstones so stale clients cannot resurrect files." Expect questions on conflict policy — answer with an explicit last-write-wins or conflict-copy choice — and on how resume works after a mid-file disconnect. If asked about rsync versus fixed chunks, say rolling hash minimizes bytes when the server computes signatures online; fixed blocks trade slightly worse delta ratios for simpler durable block stores and cross-user dedupe.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Remote file sync is namespace reconciliation plus delta transfer; re-uploading every changed file does not survive large files or weak networks",
+    "Detect cheaply with watchers and mtime/size filters, then confirm with content hashes before spending bandwidth",
+    "Large-file deltas need chunking or rolling-hash protocols; small files are often cheaper to replace whole",
+    "Commits should expose a new file version only after bytes are durable so readers never observe partial content",
+    "Conflicts are a product policy — last-write-wins, conflict copies, or domain merge — not something generic sync can invent for binary files",
+    "Deletes require tombstones (and retention for those tombstones) or offline clients will bring files back to life",
+  ]}
+/>

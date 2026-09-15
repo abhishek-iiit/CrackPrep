@@ -1,0 +1,112 @@
+---
+title: "Number of Provinces"
+number: "03.14"
+summary: "An adjacency matrix hides a graph — count connected components with DFS or Union-Find on n cities."
+status: published
+free: true
+difficulty: intro
+estMinutes: 10
+tags: [union-find, dfs, graph]
+updated: "2026-09-15"
+---
+
+## Friends of friends, but the graph is a matrix
+
+`n` cities numbered `0..n-1`. `isConnected[i][j] = 1` if city `i` and city `j` are directly connected (same province). Provinces merge by transitivity: if A connects to B and B to C, all three share one province. Return the **number of provinces**.
+
+For `isConnected = [[1,1,0],[1,1,0],[0,0,1]]`, cities 0 and 1 form one province, city 2 is alone — answer **2**. The input is an **adjacency matrix**, not an edge list; `n` can be up to 200, so `O(n²)` to scan the matrix is expected.
+
+Counting components one city at a time with repeated BFS from every unvisited node works. Union-Find merging `(i, j)` whenever `isConnected[i][j] === 1` and `i !== j` is equally natural and sets up harder problems like 03.15 Accounts Merge.
+
+## Count components — DFS or Union-Find
+
+**DFS:** Maintain `visited[]`. For each unvisited city `i`, increment province count and DFS all neighbors where `isConnected[i][j] === 1`. Symmetry means you can scan row `i` or treat the matrix as undirected.
+
+**Union-Find:** Initialize `n` singleton sets. For each pair `i < j` with `isConnected[i][j] === 1`, `union(i, j)`. Answer = number of distinct roots after all merges.
+
+Both are **O(n²)** time because the matrix has `n²` entries; space **O(n)** for visited/parent arrays.
+
+<Steps>
+<Step title="Union-Find setup">
+`parent[i] = i` for all cities; optional rank or size arrays.
+</Step>
+<Step title="Merge connected pairs">
+Double loop `i, j`; if `isConnected[i][j] === 1` and `i !== j`, unite.
+</Step>
+<Step title="Count roots">
+Count indices where `find(i) === i`.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function findCircleNum(isConnected: number[][]): number {
+  const n = isConnected.length;
+  const parent = Array.from({ length: n }, (_, i) => i);
+
+  function find(x: number): number {
+    if (parent[x] !== x) parent[x] = find(parent[x]);
+    return parent[x];
+  }
+
+  function unite(a: number, b: number): void {
+    const ra = find(a), rb = find(b);
+    if (ra !== rb) parent[rb] = ra;
+  }
+
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      if (isConnected[i][j] === 1) unite(i, j);
+    }
+  }
+
+  let provinces = 0;
+  for (let i = 0; i < n; i++) {
+    if (find(i) === i) provinces++;
+  }
+  return provinces;
+}
+```
+
+Time **O(n² × α(n))** ≈ **O(n²)**. Space **O(n)**.
+
+<Callout type="note">
+The diagonal is always 1 — a city connects to itself. Skipping `i === j` in the union loop avoids useless self-unions; including them is harmless with proper union-find.
+</Callout>
+
+<Tradeoff
+  forTitle="Union-Find when"
+  againstTitle="DFS/BFS when"
+  forItems={[
+    "You are building toward 03.15 Accounts Merge and 03.16 Redundant Connection",
+    "The graph is undirected and components are the only output — no traversal order needed",
+    "Edges arrive incrementally in a follow-up — UF supports online merge",
+    "Matrix input already implies O(n²) scan — UF loop matches that budget",
+    "You want uniform code for connected components across many problems"
+  ]}
+  againstItems={[
+    "You need the list of cities per province — DFS collects component members naturally",
+    "The graph is sparse with an edge list — DFS on adjacency list avoids O(n²) matrix scan",
+    "You must detect cycles in directed graphs — UF is wrong tool",
+    "n is huge but edges are few — store sparse adjacency, do not materialize matrix",
+    "01.30 Number of Islands is grid DFS — same component idea, different embedding"
+  ]}
+/>
+
+## In an interview
+
+Restate: adjacency matrix, symmetric, count connected components. Walk the 3-city example. Confirm `n` bounds and that diagonal entries are 1.
+
+Say you will either DFS from each unvisited node or union all connected pairs — same complexity, pick one. Union-Find previews later merge problems.
+
+Expect: "Can you list members of each province?" (DFS with a collector), "What if connections are given as edges?" (same UF on edge list), comparison to 01.34 Number of Connected Components. Bug to name first: counting `n` provinces without merging — treating each 1 on the diagonal as a separate component.
+
+<KeyTakeaways items={[
+  "Number of Provinces is connected-component counting on an undirected graph stored as an adjacency matrix.",
+  "Union-Find merges (i, j) wherever isConnected[i][j] === 1; the answer is the number of distinct roots.",
+  "DFS from each unvisited city is equivalent — increment a counter each time you start a new traversal.",
+  "Time O(n²) is inherent to reading the matrix; space O(n) for parent or visited arrays.",
+  "This problem is the gentle entry to Union-Find before Accounts Merge and Redundant Connection.",
+  "Do not confuse provinces (components) with cliques — transitivity is already baked into component definition."
+]} />

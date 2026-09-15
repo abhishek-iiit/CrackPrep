@@ -1,0 +1,102 @@
+---
+title: "Combination Sum II"
+number: "02.50"
+summary: "Sort and skip equal neighbors at the same depth — each candidate used once, duplicates must not produce duplicate combinations."
+status: published
+free: true
+difficulty: core
+estMinutes: 15
+tags: [backtracking, array]
+updated: "2026-09-15"
+---
+
+## Reusing candidates is gone; duplicates are the new trap
+
+Given a collection of candidate integers (may contain duplicates) and a target, find all unique combinations where chosen numbers sum to target. Each candidate may be used **once** per combination. For `candidates = [10,1,2,7,6,1,5], target = 8` → `[1,1,6], [1,2,5], [1,7], [2,6]`.
+
+01.21 Combination Sum allowed unlimited reuse — `[2,2,2]` style. Here each index is consumed at most once, and duplicate values in the input create duplicate combinations if you naively branch. Sort first, then at each recursion level skip equal neighbors: if `candidates[i] === candidates[i-1]` and `i > start`, continue.
+
+## Sort, backtrack, skip duplicates at same depth
+
+Sort `candidates`. DFS from index `start` with remaining target. At each step, try `candidates[i]` for `i >= start`. Prune when `candidates[i] > target` (sorted — break inner loop). Skip duplicate values at the same tree level with the `i > start && candidates[i] === candidates[i-1]` guard.
+
+<Steps>
+<Step title="Sort candidates ascending">
+  Enables early break on overshoot and duplicate skipping.
+</Step>
+<Step title="DFS(start, remaining, path)">
+  If remaining === 0, record path. If remaining < 0, return.
+</Step>
+<Step title="For i from start to end, skip same-value siblings">
+  Choose candidates[i], recurse with i + 1 and remaining - candidates[i], then backtrack.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function combinationSum2(candidates: number[], target: number): number[][] {
+  candidates.sort((a, b) => a - b);
+  const result: number[][] = [];
+
+  const backtrack = (start: number, remaining: number, path: number[]): void => {
+    if (remaining === 0) {
+      result.push([...path]);
+      return;
+    }
+    if (remaining < 0) return;
+
+    for (let i = start; i < candidates.length; i++) {
+      if (i > start && candidates[i] === candidates[i - 1]) continue;
+      if (candidates[i] > remaining) break;
+
+      path.push(candidates[i]);
+      backtrack(i + 1, remaining - candidates[i], path);
+      path.pop();
+    }
+  };
+
+  backtrack(0, target, []);
+  return result;
+}
+```
+
+Time **O(2ⁿ)** worst case in theory; with pruning and duplicate skipping, practical cost depends on branching. Space **O(n)** recursion depth excluding output.
+
+<Tradeoff
+  forTitle="Sort + skip-same-level when"
+  againstTitle="Use a set for dedup when"
+  forItems={[
+    "Input has duplicates and you need unique combinations, not permutations",
+    "Each candidate used at most once — recurse with i + 1, not i",
+    "Sorting enables break when candidates[i] > remaining — early prune",
+    "Same-level skip (i > start && equal neighbor) is the standard dedup without extra memory",
+    "Direct follow-up to 01.21 Combination Sum — compare unlimited reuse vs single use",
+  ]}
+  againstItems={[
+    "No duplicates in input — skip logic is unnecessary; plain subset backtrack suffices",
+    "You need combinations with unlimited reuse — that is 01.21, recurse with i not i + 1",
+    "Candidate values are huge and sorting cost matters (rare here)",
+    "Interviewer asks for counting combinations only — DP may beat full enumeration",
+    "Order of combinations must be insertion order, not sorted — adjust output handling",
+  ]}
+/>
+
+## In an interview
+
+Restate: `[10,1,2,7,6,1,5], target = 8` → four unique combos. Confirm each number used at most once, solution set must not contain duplicates, order within a combo does not matter.
+
+Say out loud that sorting plus skipping equal values at the same recursion depth prevents `[1,7]` from being found twice via the two different 1s. Contrast with 01.21 where reuse means recurse with `i`, here use `i + 1`.
+
+Follow-ups: 03.03 Subsets II (same dedup trick), combination sum with limited counts per value. The bug interviewers watch for is skipping duplicates globally (`i > 0`) instead of at same level (`i > start`), which drops valid combos like `[1,1,6]`.
+
+<KeyTakeaways
+  items={[
+    "Combination Sum II allows each candidate once — recurse with i + 1 after choosing index i",
+    "Sort first, then skip candidates[i] === candidates[i-1] when i > start to dedupe same-level branches",
+    "Break inner loop when candidates[i] > remaining — sorted order makes larger values hopeless too",
+    "Differs from 01.21 Combination Sum: no reuse, and duplicate input values need explicit dedup",
+    "Time exponential in worst case; space O(n) recursion depth plus output storage",
+    "The i > start guard (not i > 0) is the edge case — global skip removes valid duplicate-value combos",
+  ]}
+/>

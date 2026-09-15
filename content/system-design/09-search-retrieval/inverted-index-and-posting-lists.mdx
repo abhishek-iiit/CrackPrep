@@ -1,32 +1,114 @@
 ---
 title: "Inverted Index And Posting Lists"
 number: "09.02"
-summary: "Inverted Index And Posting Lists — notes in progress."
-status: draft
+summary: "The term→documents map that makes free-text search a merge of sorted lists instead of a scan of every document."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 14
+tags: [search, inverted-index, posting-lists, indexing]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Scanning every document is not a search engine
 
-What breaks without this, and the situation that forces the decision.
+A naive approach to "find documents containing `noise` and `cancelling`" is: for each document, tokenize it, test membership. At ten thousand documents that can be a homework assignment. At tens of millions, with tens or hundreds of queries per second and a latency budget of tens to a few hundred milliseconds (09.01 Information Retrieval System Design), a full corpus scan is not a slow version of search — it is a different product that does not ship.
 
-## How it works
+The inverted index flips the relationship. Instead of document → terms, store term → documents. The query becomes: fetch the list for each term, combine those lists, then rank survivors. Work scales with how common the terms are and how you intersect them, not with total corpus size on every query. That single inversion is the reason dedicated search systems exist.
 
-The mechanism, step by step.
+## Anatomy of the index
 
-## Tradeoffs
+**Dictionary (lexicon).** The set of terms after analysis — lowercasing, Unicode normalization, tokenization, optional stemming or lemmatization (09.07 Query Understanding Pipeline). Each term points to its posting list. The dictionary is often kept hot in memory; it is queried on every request.
+
+**Posting list.** The list of documents (usually document ids) that contain the term. Production lists carry more than an id:
+
+| Payload | Why it is stored |
+| --- | --- |
+| Document id | Identity for intersection and fetching |
+| Term frequency (tf) | Input to TF-IDF / BM25 at rank time (09.04, 09.05) |
+| Positions / offsets | Phrase queries ("noise cancelling" as adjacent tokens) and highlighting |
+| Field id | Title vs body vs tags weighting |
+| Norms / length | Document-length factors for BM25 without re-reading the doc |
+
+Lists are kept **sorted by document id**. Sorted order is not a nicety — it is what makes AND/OR a linear merge instead of a hash-join of arbitrary sets. 09.03 Boolean Tiered Search depends on that invariant.
+
+**Document store (forward index).** Enough of the original document (or a stored subset of fields) to render a hit. The inverted index finds ids; something still has to return title, snippet, and URL.
+
+## Building and updating
+
+Index-time work per document:
+
+<Steps>
+  <Step title="Analyze">
+    Turn raw bytes into a sequence of terms with positions. The same analyzer must run at query time or the query terms will never meet the indexed terms — a silent empty-result bug that looks like "search is broken."
+  </Step>
+  <Step title="Accumulate postings">
+    For each term, append (doc_id, tf, positions, …) to that term's list. In a batch indexer this is often a map in memory flushed to sorted runs on disk; in a near-real-time system, a fresh in-memory segment absorbs writes until it is sealed.
+  </Step>
+  <Step title="Flush immutable segments">
+    Seal a segment: sort each posting list, compress it, write dictionary pointers. New searches see the segment; old segments stay immutable, which makes concurrency and caching straightforward — the same reason LSM-style systems like sealed files (07.09 LSM Tree Storage Engine).
+  </Step>
+  <Step title="Merge / compact">
+    Periodically merge small segments into larger ones to bound how many lists a query must consult per term. Deletes are often tombstones until merge drops the doc id from postings — 09.10 Search Index Synchronization covers keeping this aligned with the source of truth.
+  </Step>
+</Steps>
+
+Compression matters at scale. Posting lists of sorted integers compress extremely well with delta encoding (store gaps between doc ids) plus bit packing or variable-byte / FOR / PFOR schemes — ballpark, an order-of-magnitude reduction versus storing raw 64-bit ids is common, but treat that as a reason compression exists, not as a vendor benchmark. Less memory per list means more of the working set stays RAM-resident, which dominates query latency more than CPU spent decoding.
+
+## What a query actually does
+
+For a two-term AND, the engine loads both posting lists and intersects them — walking two sorted sequences, advancing the smaller cursor. Rare terms (short lists) should be intersected first; that is the core of tiered boolean retrieval in 09.03. OR is a union merge. NOT is trickier and usually applied as a filter against a candidate set rather than materializing the complement of a huge list.
+
+Phrase queries need positions: after the doc-id intersection, verify that term positions are adjacent (or within a slop distance). Without positions in the postings, phrase search either degrades to AND (too loose) or requires reading document text (too slow).
+
+<Callout type="note">
+Document ids in an inverted index are typically internal, dense identifiers assigned by the search engine — not your product UUID. A separate mapping resolves internal id → external id / stored fields. Dense ids keep postings smaller and merges faster; they also mean a full reindex may renumber the world, which is why ops treats rebuilds as a planned event.
+</Callout>
+
+## Cost and failure modes
+
+| Pressure | What you see |
+| --- | --- |
+| Dictionary too large for RAM | Term lookup latency jumps; cold lexicon pages in |
+| Too many tiny segments | Each query fans out to many postings; p99 climbs until merge catches up |
+| Extremely common terms | Enormous posting lists; AND with "the" without stop-word policy (09.06) becomes a merge tax |
+| Analyzer mismatch | Queries return nothing for documents that "obviously" match |
+| Delete lag | Tombstoned docs still rank until merge; users see ghosts |
+
+Sharding the index (09.11 Search Index Sharding) partitions documents across nodes so each shard holds a slice of every term's postings (document-partitioned) — the usual web-search shape — rather than putting whole terms on single nodes (term-partitioned), which imbalances on common words.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Invest in a real inverted index when"
+  againstTitle="A simpler structure still works when"
+  forItems={[
+    "Free-text queries must avoid scanning the corpus on every request as document count grows into the millions",
+    "You need boolean retrieval over terms plus inputs for statistical ranking (tf, df, positions)",
+    "Phrase, proximity, or per-field search is required — payloads on postings earn their keep",
+    "Query latency must stay flat as the corpus grows, which needs list merges not table scans",
+    "You can accept index-time CPU, storage for postings, and an async path from primary writes into segments",
+  ]}
+  againstItems={[
+    "The corpus is small enough that a database full-text feature or trigram index meets the latency budget",
+    "Queries are exact keys or structured filters — a b-tree (03.04 B-Tree) answers them without term analysis",
+    "You cannot operate segment merges, analyzer versioning, and sync lag as a second copy of the data",
+    "There is no ranking problem — membership in a small set is enough",
+    "Write rate and freshness needs force every write through a structure you are not ready to compact continuously",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Define the inversion in one sentence: "I index term to sorted document lists so a query is a merge of a few postings, not a pass over every document." Then say what lives on a posting — at least doc id and tf; positions if phrases matter — and that lists are sorted so intersection is linear.
 
-<KeyTakeaways items={["", "", ""]} />
+Follow-ups to prep: how updates work (immutable segments + merge), why stop words and champion lists exist for huge lists (09.06), and how you shard (almost always by document). If asked how you would find documents containing all query terms, describe intersecting shortest lists first — that is already the opening move of 09.03.
+
+<KeyTakeaways
+  items={[
+    "An inverted index maps each term to a posting list of documents that contain it, turning search into list operations instead of corpus scans",
+    "Posting lists are sorted by document id and often store tf, positions, and field info needed for phrases and ranking",
+    "Index-time analysis must match query-time analysis or terms will never meet — empty results with no error",
+    "Immutable segments plus merges keep writes concurrent and bound how many lists a query touches per term",
+    "Compression of delta-encoded doc ids is why large postings can still fit in memory-friendly footprints",
+    "Common terms create huge lists; boolean tiering, stop words, and champion lists exist to keep merges affordable",
+  ]}
+/>

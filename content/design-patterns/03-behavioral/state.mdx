@@ -1,0 +1,106 @@
+---
+title: "State"
+number: "03.07"
+summary: "When behaviour changes with lifecycle phase, State moves each phase into its own object so the context delegates instead of growing a mode switch."
+status: published
+free: true
+difficulty: core
+estMinutes: 14
+tags: [behavioral, fsm, lifecycle]
+updated: "2026-09-15"
+---
+
+## The order object with forty `if (status === …)` branches
+
+An e-commerce order moves through draft, paid, shipped, delivered, refunded, cancelled. Each status changes what buttons appear, which API calls are legal, and what emails fire. One `Order` class with enum checks handles `pay()`, `ship()`, `refund()` — and every new status adds branches to **every** method. Refund from `shipped` allows partial refund; from `draft` it is nonsense. The bugs are wrong transitions, not wrong arithmetic.
+
+State treats each lifecycle phase as an object implementing the same interface. The **context** (`Order`) holds a reference to the current state object and delegates calls to it. Transitioning means swapping the state reference — `this.state = new ShippedState()`. Behaviour lives in the state class where it belongs; the context stays a thin coordinator.
+
+This is a finite state machine with polymorphism instead of a transition table — though tables are fine when transitions are data, not code.
+
+## Context, state interface, concrete states
+
+- **Context** — holds current state, exposes high-level methods (`pay`, `ship`), forwards to `state.handlePay(this)`.
+- **State** — interface declaring methods for each action, often with default "illegal in this state" behaviour.
+- **Concrete states** — `DraftState`, `PaidState`, etc.; perform work and call `context.setState(new ...)` on success.
+
+<Steps>
+<Step title="Context receives an external action">
+`order.pay()` — the client does not check status first; the current state decides legality.
+</Step>
+<Step title="Current state validates and acts">
+`PaidState` might no-op on `pay`, throw on `ship` if address missing, or call payment APIs from `DraftState` only.
+</Step>
+<Step title="State transitions the context">
+On success, state constructs the next state object and passes it to `context.setState`. Entry actions (send email, start timer) run in the new state's constructor or a dedicated `onEnter` hook.
+</Step>
+</Steps>
+
+```typescript
+interface OrderState {
+  pay(order: Order): void;
+  ship(order: Order): void;
+}
+
+class DraftState implements OrderState {
+  pay(order: Order) {
+    charge(order);
+    order.setState(new PaidState());
+  }
+  ship() { throw new Error("cannot ship unpaid order"); }
+}
+
+class Order {
+  private state: OrderState = new DraftState();
+  setState(s: OrderState) { this.state = s; }
+  pay() { this.state.pay(this); }
+}
+```
+
+<Callout type="tip">
+Illegal transitions should fail loudly in development and return typed errors in production APIs — silent no-ops make clients think `ship()` succeeded when the order was still in draft.
+</Callout>
+
+## State vs Strategy vs Template Method
+
+All three swap behaviour, but the **intent** differs:
+
+| Pattern | What changes | Who switches |
+| --- | --- | --- |
+| **State** (03.07) | Behaviour with lifecycle phase | State objects transition the context |
+| **Strategy** (03.08) | Algorithm choice at setup | Client or context picks a strategy, rarely auto-switches |
+| **Template Method** (03.09) | Steps in a fixed skeleton | Subclass overrides hooks; no runtime swap |
+
+If the object **changes mode** because of its own history, it is State. If the caller **picks an algorithm** once for this request, it is Strategy.
+
+<Tradeoff
+  forTitle="Reach for State when"
+  againstTitle="Avoid State when"
+  forItems={[
+    "Object behaviour depends on a lifecycle phase and transitions are explicit business rules",
+    "Conditionals on a status enum appear in many methods of the same class",
+    "Each phase has distinct allowed operations and illegal ones should be unrepresentable or throw",
+    "New phases arrive regularly and you want to add a class instead of editing every branch",
+    "Entry and exit side effects (timers, notifications) belong to specific phases"
+  ]}
+  againstItems={[
+    "Two or three simple states and one method switches on them — enum plus functions is enough",
+    "Transitions are data-driven tables maintained by ops — a declarative FSM engine fits better",
+    "State objects need huge context back-references and become second contexts — refactor boundaries first",
+    "Behaviour does not change with lifecycle — varying algorithms per request is 03.08 Strategy",
+    "Distributed lifecycle spans services — state belongs in the database and saga, not in-memory objects"
+  ]}
+/>
+
+## In an interview
+
+Lead with the smell: "Pay and ship should not both consult the same growing switch — I would delegate to state objects per order status." Expect State vs Strategy vs Template Method — lifecycle auto-transition vs client-selected algorithm vs fixed skeleton. Ask about persistence: state enum in DB, object graph rebuilt on load. Name the bug: forgetting to persist status after transition, or allowing direct field writes that bypass `setState`.
+
+<KeyTakeaways items={[
+  "State lets an object alter its behaviour when its internal phase changes by delegating to phase objects.",
+  "The context forwards requests to the current state; states perform work and trigger transitions to successor states.",
+  "Replace enum switches scattered across methods with one delegation point and behaviour colocated per phase.",
+  "Illegal operations in a given phase should throw or return errors — not silently no-op unless that is explicit product policy.",
+  "Distinguish from 03.08 Strategy: State transitions are driven by the object's lifecycle; Strategy is usually chosen externally.",
+  "Persist the phase identifier and reconstruct state objects on load — in-memory state objects alone do not survive restarts."
+]} />

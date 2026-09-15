@@ -1,32 +1,107 @@
 ---
 title: "B-Tree"
 number: "03.04"
-summary: "B-Tree — notes in progress."
-status: draft
+summary: "A tree tuned to disk page size so height, not comparisons, bounds a lookup — and why that same page-level layout makes every write an in-place rewrite."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: deep
+estMinutes: 20
+tags: [b-tree, indexing, storage, algorithms]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The problem: binary search is fast in memory and unusable on disk
 
-What breaks without this, and the situation that forces the decision.
+Binary search over a sorted array is the textbook answer to "find one key among many": halve the search space each comparison, `log2(n)` comparisons total. It's also close to the worst thing you can ask a disk to do. Each comparison lands at an arbitrary offset, and on a device where a random read costs orders of magnitude more than a sequential one, `log2(n)` comparisons means `log2(n)` random reads. For a billion sorted rows that's roughly 30 comparisons — 30 random reads, per lookup, before you've read a single byte of data.
 
-## How it works
+What you actually want is a structure where each disk access does more work than one comparison's worth — where loading a page gets you dozens or hundreds of comparisons for the price of the one read that fetched it — and where the total number of disk accesses depends on the tree's height, not on the size of the dataset directly. That's a B-tree: a balanced, sorted tree whose branching factor (fan-out) is tuned to disk page size, so that height grows only logarithmically in the fan-out, not in the raw key count, and the fan-out itself is chosen to be large.
 
-The mechanism, step by step.
+## The shape: pages, not nodes
 
-## Tradeoffs
+Every node in a B-tree is sized to match a physical page — typically 4 KiB or 8 KiB, whatever the storage engine reads and writes in one I/O. An internal node packs as many `(separator key, child pointer)` pairs as fit in one page; a leaf node packs as many `(key, value or row pointer)` pairs as fit. Leaves sit at the same depth throughout the tree — a B-tree stays perfectly balanced by construction, not by a separate rebalancing pass — and are usually linked to their left and right siblings, so a range scan can walk sideways across leaves without climbing back up to the root between them.
+
+Fan-out is the whole trick. With an internal-node entry costing roughly 16 bytes (an 8-byte key or reference plus an 8-byte child pointer — real numbers vary with key width, but this is a reasonable ballpark for a narrow integer key), a 4 KiB page holds on the order of 256 entries. That number compounds fast:
+
+<Formula label="Tree height for n keys at fan-out f">height ≈ ⌈log_f(n)⌉</Formula>
+
+| Rows | Height at fan-out ≈ 256 |
+| --- | --- |
+| 1 thousand | 2 |
+| 1 million | 3 |
+| 1 billion | 4 |
+| 1 trillion | 5 |
+
+Going from a thousand rows to a trillion — nine orders of magnitude — only adds three levels. That's the entire value proposition in one table: a lookup against a billion-row table costs about four page reads, and in practice fewer than that, because the top one or two levels are small enough to stay resident in the buffer cache permanently, leaving one or two actual physical I/Os per lookup rather than four. This is a ballpark to reason with, not a benchmark — real fan-out shifts with key width (a wide text key drops fan-out and adds a level; some engines raise the page size specifically to keep it up), but the shape of the result, shallow height across enormous range, holds generally.
+
+## The insert path
+
+<Steps>
+  <Step title="Descend from the root">
+    At each internal node, binary-search its separator keys to pick the one child whose range contains the target key, and follow that pointer. Repeat until you reach a leaf. This is `height` page reads — the number from the table above, not `log2(n)`.
+  </Step>
+  <Step title="Insert into the leaf, in place, if it fits">
+    Insert the new key/value pair into its sorted position within the leaf page. If the page has room, this is one page rewritten — read, modify the bytes, write back — and the operation is done. No other page in the tree is touched.
+  </Step>
+  <Step title="Split the leaf if it's full">
+    A full leaf can't take one more entry, so it splits: allocate a new leaf, move the upper half of the entries into it, and link it in beside the original. The first key of the new right leaf (or a copy of it, depending on the variant) is promoted upward as a new separator.
+  </Step>
+  <Step title="Insert the promoted separator into the parent">
+    The parent gains one new `(separator key, child pointer)` entry, pointing at the freshly created leaf. If the parent has room, this is another single in-place page rewrite and the insert is finished.
+  </Step>
+  <Step title="Propagate the split upward if the parent is also full">
+    A full parent splits exactly like a leaf does — half its entries move to a new sibling node, and a separator is promoted one level further up. This repeats up the tree for as many levels as are already full, which in a balanced tree with high fan-out is rare past one or two levels.
+  </Step>
+  <Step title="Split the root, if it's the one that overflows">
+    This is the only way a B-tree grows taller. The old root splits into two nodes, and a brand-new root is created above them holding a single separator and two child pointers. Because this happens uniformly at the top, every leaf stays at the same depth — the tree cannot become lopsided.
+  </Step>
+</Steps>
+
+Deletes run the same idea in reverse: remove the entry, and if a leaf falls below some minimum occupancy, borrow an entry from an adjacent sibling or merge with it, propagating the merge upward if the parent then underflows too. Many production engines are deliberately lazy about this — merging on every delete costs write work for space that might be reused by the next insert anyway — which is part of why B-tree indexes fragment and benefit from an occasional rebuild.
+
+## Every write is a page rewritten in place
+
+This is the detail that separates a B-tree from a log-structured engine, and it's worth being precise about because it's the exact fact 07.09 LSM Tree Storage Engine is built to avoid. A B-tree does not append; it mutates. Changing one 100-byte row means reading its 4 KiB page, editing bytes inside it, and writing the entire page back — and if the write must survive a crash, the change is logged to a write-ahead log first (03.08 Database WAL And Recovery), so the device sees roughly the same bytes twice: once in the log, once in the page itself.
+
+When the working set fits in the buffer cache, this costs almost nothing extra — the page was going to be read anyway, the write is asynchronous, and many logical updates land on the same cached page before it's ever flushed to disk. The cost shows up when it doesn't fit: a table larger than memory, updated with keys scattered across the whole key range, forces a real disk read-modify-write for pages that keep falling out of cache before their next hit. That's the exact failure mode that makes random-order, high-volume ingest a bad fit for a B-tree and a good fit for the buffer-then-merge design in 07.09.
+
+<Callout type="gotcha">
+Insert order changes fill factor, not just which pages happen to split. Monotonically increasing keys — an auto-incrementing integer, a roughly time-ordered id — insert almost entirely at the tree's rightmost edge, so leaves fill densely and splits are rare and localized. Keys scattered uniformly across the whole key space — a UUIDv4 primary key is the standard example — insert into a different, effectively random leaf each time, so every leaf fills to capacity and splits independently, leaving pages roughly half-full on average and the working set larger than the logical data would suggest. This is one of the concrete reasons 04.09 UUID vs ObjectId vs Snowflake matters for more than aesthetics: a sortable id keeps B-tree inserts append-mostly, and a random one doesn't.
+</Callout>
+
+## What a B-tree is actually good at
+
+Range scans cost almost nothing extra once you've found the start: descend once, then walk the linked leaves left to right, no repeated tree descents per row. That single property is why a B-tree remains the default choice for a general-purpose relational index even in engines that use a log-structured design for the underlying table storage — the leaf-linking makes `ORDER BY`, `BETWEEN`, and prefix scans cheap in a way that merging several sorted runs (the LSM read path) is not.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Reach for a B-tree when"
+  againstTitle="Reach for something else when"
+  forItems={[
+    "Range scans and ordered iteration are a core access pattern — linked leaves make a scan a sideways walk, not a repeated descent",
+    "Reads must be latency-predictable at high percentiles — cost is a fixed tree height, not however far a background process has fallen behind",
+    "The working set updates a modest, mostly cache-resident portion of the data repeatedly — one page rewrite beats a permanent tail of merge work",
+    "You need in-place, transactional single-row updates with well-understood crash recovery via a write-ahead log (03.08 Database WAL And Recovery)",
+    "Keys arrive in a roughly sorted or monotonic order, keeping fill factor high and splits rare",
+  ]}
+  againstItems={[
+    "Writes dominate and arrive faster than random page rewrites can keep up — an LSM tree (07.09 LSM Tree Storage Engine) turns the same load into sequential appends instead",
+    "Keys insert in effectively random order at very high volume, driving fill factor down and height and cache misses up",
+    "Lookups are equality-only and ordering is never needed — a hash index skips the multi-level descent entirely for that narrower case",
+    "The dataset is far larger than memory and mostly write-once, read-rarely, so you'd be paying a B-tree's random-I/O tax for reads that almost never come",
+    "You can't tolerate rewriting a whole page for a small change at the update rate this workload runs, in bytes-written terms",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Introduce it by fan-out and height, not by "it's a balanced tree": "the branching factor is tuned to the page size, so a billion-row index is about four page reads deep, and the top couple of levels stay cached." Expect three follow-ups. Why not a plain binary search tree — because fan-out 2 means `log2(n)` height, dozens of levels instead of four, and dozens of random reads instead of one or two cached ones. Why are range scans cheap — because leaves are linked and a scan never revisits the root. Why is a write more expensive than it looks — because it's a whole page rewritten in place, logged first for durability, which is precisely the cost an LSM tree is designed around instead of paying.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "A B-tree tunes its branching factor to disk page size so that height, not raw key count, bounds the number of disk accesses per lookup",
+    "Height grows logarithmically in the fan-out: at a fan-out around 256, a billion rows sit about four levels deep, and a trillion about five",
+    "Insert descends to a leaf, writes in place if there's room, and splits — promoting a separator key upward — only when a page is full; the root splits last, and that's the only way the tree grows taller",
+    "Every write mutates a page in place: read, modify, write back the whole page, logged first for durability, which is the direct opposite of an append-only design",
+    "Insert order controls fill factor — monotonic keys stay dense at the rightmost edge, while randomly distributed keys (UUIDv4-style) split every leaf independently and leave pages roughly half full",
+    "Linked leaves make range scans and ordered reads a B-tree's strongest case, and page-granular in-place writes make sustained random-order ingest its weakest",
+  ]}
+/>

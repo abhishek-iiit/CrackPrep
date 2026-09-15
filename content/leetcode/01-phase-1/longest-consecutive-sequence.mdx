@@ -1,0 +1,94 @@
+---
+title: "Longest Consecutive Sequence"
+number: "01.31"
+summary: "O(n) consecutive runs need a set and sequence starts — sorting is the trap that looks obvious and costs O(n log n)."
+status: published
+free: true
+difficulty: core
+estMinutes: 12
+tags: [hash-set, array, union-find]
+updated: "2026-09-15"
+---
+
+## Unsorted input, consecutive output
+
+Given `[100, 4, 200, 1, 3, 2]`, the longest run of consecutive integers is `[1, 2, 3, 4]` — length 4. The array is not sorted, duplicates may appear, and the answer must be found in **O(n)** time. Sorting first gives the right answer in O(n log n), which fails the stated constraint. The brute force — for each element, walk forward while `num+1`, `num+2`, … exist — can revisit the same run from every member and degenerate toward O(n²) on a single long streak.
+
+The fix is not a smarter sort. It is recognizing that each consecutive run has exactly one **start**: the number with no predecessor in the set.
+
+## Only expand from sequence starts
+
+Put every value in a `Set` for O(1) membership. A number `n` is a start when `n - 1` is **not** in the set — if it were, `n` sits in the middle of a run someone else already counted. From each start, walk `n, n+1, n+2, …` until the next value is missing, tracking the longest streak.
+
+<Steps>
+<Step title="Build the set">
+Insert all `nums` into a `Set`. Duplicates collapse automatically.
+</Step>
+<Step title="Skip non-starts">
+For each `n` in the set, if `n - 1` exists, continue — this run was or will be measured from its start.
+</Step>
+<Step title="Walk the streak">
+From start `n`, increment a counter while `n + length` is in the set. Update the global max.
+</Step>
+</Steps>
+
+Each integer is visited as a start at most once and as part of one forward walk at most once — **O(n)** time, **O(n)** space for the set.
+
+## Solution
+
+```ts
+function longestConsecutive(nums: number[]): number {
+  const set = new Set(nums);
+  let best = 0;
+
+  for (const n of set) {
+    if (set.has(n - 1)) continue; // not a sequence start
+
+    let length = 1;
+    while (set.has(n + length)) length++;
+    best = Math.max(best, length);
+  }
+
+  return best;
+}
+```
+
+Time **O(n)** — each element enters the inner `while` at most once across the whole algorithm. Space **O(n)** for the set.
+
+<Callout type="gotcha">
+Iterating `for (const n of nums)` instead of `for (const n of set)` still works if you keep the `n - 1` guard, but duplicates cause redundant start checks. The set iteration is cleaner and matches the invariant directly.
+</Callout>
+
+<Tradeoff
+  forTitle="Hash set + start detection when"
+  againstTitle="Sort first when"
+  forItems={[
+    "The problem states O(n) time — sorting is explicitly ruled out",
+    "Input is a flat array of integers with no natural ordering beyond value",
+    "You want a one-pass mental model: each run counted exactly once",
+    "Follow-ups ask for dynamic insert/delete of numbers into the set",
+    "Memory for O(n) auxiliary structure is acceptable"
+  ]}
+  againstItems={[
+    "O(n log n) is fine and the interviewer did not impose linear time",
+    "You also need the actual subsequence elements, not just the length — sort and scan is simpler to reconstruct",
+    "Input is already sorted or nearly sorted — a linear merge-style scan may suffice",
+    "The domain is tiny (e.g. values in [0, 100]) — counting sort beats a hash set",
+    "You are already sorting for a downstream step in the same solution"
+  ]}
+/>
+
+## In an interview
+
+Restate: unsorted array, find longest consecutive integer streak, aim for O(n). Walk `[100,4,200,1,3,2]` — answer 4. Mention duplicates and empty array (return 0). Before coding, say you will put everything in a set and only expand from numbers whose predecessor is absent — that is the invariant that prevents double-counting.
+
+Expect: "Why not sort?" (O(n log n) vs O(n)), "What if numbers are strings?" (same logic with a set of strings), "Can you do it with Union-Find?" (yes — connect `n` and `n+1` when both exist; count component sizes; same asymptotics). The bug to name first: expanding from every element without the start check, which turns one long run into O(n²) work.
+
+<KeyTakeaways items={[
+  "A consecutive run has exactly one start: the element with no predecessor in the set.",
+  "The hash set gives O(1) membership; the start check ensures each run is walked once.",
+  "Sorting solves the problem but costs O(n log n) — the linear solution is the point of the problem.",
+  "Duplicates are harmless in a set; an empty input returns 0 without special casing beyond initializing `best` to 0.",
+  "The same pattern — localize work to canonical representatives — appears in interval merging and union-find component counting.",
+  "Time O(n), space O(n); each integer participates in at most one forward expansion."
+]} />

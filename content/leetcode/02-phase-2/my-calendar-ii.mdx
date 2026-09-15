@@ -1,0 +1,105 @@
+---
+title: "My Calendar II"
+number: "02.36"
+summary: "Track single overlaps separately so a third booking on the same slot fails while double booking stays allowed."
+status: published
+free: true
+difficulty: deep
+estMinutes: 18
+tags: [design, intervals, overlap]
+updated: "2026-09-15"
+---
+
+## One overlap is fine; two is not
+
+Extend the calendar: bookings may **double-book** (two events overlap) but must not **triple-book** (three overlapping at any minute). Return whether a new `[start, end)` can be added.
+
+02.35 My Calendar I rejected any overlap. Here overlap is allowed once — you need to know whether the new interval would hit a region that is **already double-booked**. Those regions are exactly the intersections of pairs of existing bookings.
+
+Maintain two lists: **bookings** (all accepted events, same as Calendar I) and **overlaps** (intervals where two bookings already intersect). A new book is illegal if it overlaps any interval in `overlaps` (would create a triple). Otherwise merge its intersections with existing bookings into `overlaps`, then append to `bookings`.
+
+## Two layers: bookings and overlap zones
+
+For each existing booking, compute intersection with the candidate. Non-empty intersection goes into a temporary overlap list. If any piece intersects an existing overlap interval, reject. Else add new overlap pieces to `overlaps` and store the booking.
+
+Intersection of `[a,b)` and `[c,d)` is `[max(a,c), min(b,d))` when valid.
+
+<Steps>
+<Step title="Reject if candidate hits a double-booked zone">
+  For each `o` in `overlaps`, if intervals intersect, return false.
+</Step>
+<Step title="Collect intersections with single bookings">
+  Each non-empty intersection becomes a new overlap segment.
+</Step>
+<Step title="Append overlap segments and the booking">
+  Future books must not pierce accumulated overlap zones.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+class MyCalendarTwo {
+  private bookings: [number, number][] = [];
+  private overlaps: [number, number][] = [];
+
+  book(start: number, end: number): boolean {
+    for (const [os, oe] of this.overlaps) {
+      if (start < oe && os < end) return false;
+    }
+
+    for (const [bs, be] of this.bookings) {
+      if (start < be && bs < end) {
+        this.overlaps.push([Math.max(start, bs), Math.min(end, be)]);
+      }
+    }
+
+    this.bookings.push([start, end]);
+    return true;
+  }
+}
+```
+
+Each `book` scans **O(n)** bookings and **O(n)** overlaps — **O(n)** per operation, **O(n)** space. n is bounded (~10³) on LeetCode; segment trees are overkill unless asked.
+
+<Callout type="warn">
+  Check against `overlaps` **before** merging new intersections. Skipping that step allows a triple book through on the third overlapping insert.
+</Callout>
+
+<Tradeoff
+  forTitle="Dual list (bookings + overlaps) when"
+  againstTitle="Event sweep or segment tree when"
+  forItems={[
+    "Only triple-booking is forbidden — double regions are explicit and small in practice",
+    "Operation count stays in the low thousands — O(n) scan per book passes",
+    "Half-open interval math stays consistent with 02.35 My Calendar I",
+    "No deletions — append-only calendar simplifies overlap accumulation",
+    "Interview expects an understandable invariant, not a lazy segment tree",
+  ]}
+  againstItems={[
+    "Book and query volume is huge — maintain a difference array or segment tree on compressed coordinates",
+    "You need k-fold booking limits for general k — sweep line with depth counting",
+    "Arbitrary delete/reschedule breaks the append-only overlap list",
+    "Memory must store minimal geometry — merge overlap intervals after each book",
+    "Offline batch of intervals — sort and sweep once instead of online structure",
+  ]}
+/>
+
+## In an interview
+
+Contrast with Calendar I: two overlapping OK, three not. Sketch `[1,3)`, `[2,4)` accepted, then `[2,3)` rejected because `[2,3)` sits inside existing overlap.
+
+Explain overlaps as "already double-booked segments" checked first. Walk intersection formula for half-open intervals.
+
+Follow-ups: Calendar III (k bookings), or room count like 01.39 Meeting Rooms II. Bug: only checking bookings twice without maintaining overlap zones — the third book slips through.
+
+<KeyTakeaways
+  items={[
+    "My Calendar II separates all bookings from zones that are already double-booked",
+    "A new book fails if it intersects any overlap interval — that would create a triple book",
+    "Intersections of the candidate with existing bookings become new overlap segments",
+    "Half-open intersection is [max(starts), min(ends)) when the range is non-empty",
+    "O(n) per book is acceptable at interview scale; segment trees handle heavier k-limit variants",
+    "Always test overlap list before appending new overlap pieces from the current candidate",
+  ]}
+/>

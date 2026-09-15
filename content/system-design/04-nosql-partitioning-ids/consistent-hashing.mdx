@@ -1,32 +1,104 @@
 ---
 title: "Consistent Hashing"
 number: "04.07"
-summary: "Consistent Hashing — notes in progress."
-status: draft
+summary: "A ring-based key-to-node map where adding or removing a node remaps only about 1/N of the keys, not nearly all of them."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 15
+tags: [hashing, sharding, rebalancing]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The problem: remapping the world when one node leaves
 
-What breaks without this, and the situation that forces the decision.
+Shard with `hash(key) mod N` and the map is simple — until N changes. Grow from 10 nodes to 11 and the modulus changes for almost every key: roughly 10/11 of keys hash to a different node than before. Shrink from 10 to 9 and the same catastrophe runs in reverse. You wanted to add capacity or replace a dead disk; what you got is a cluster-wide data shuffle, cache stampedes, and a migration that saturates the network while serving traffic.
 
-## How it works
+The number of keys that *should* move when membership changes by one is about `1/N` of the keyspace — the fair share of the node that appeared or disappeared. Consistent hashing is the family of maps that get close to that bound. Keys and nodes share one hash space arranged as a ring; a key belongs to the first node clockwise from itself. Remove a node and only the keys that mapped to it need a new home — they fall through to the next node clockwise. Everyone else's assignments stay put.
 
-The mechanism, step by step.
+That property is why the same idea shows up in partitioned caches, distributed hash tables, and some databases' partition placement. 02.07 Consistent Hashing Load Balancing applies it to request routing; 07.15 Range Partitioning vs Consistent Hashing for Storage compares it to range placement for data on disk. Here the focus is the map itself.
 
-## Tradeoffs
+## The ring
+
+Hash the keyspace onto a large circle — typically the output of a 32-bit or 128-bit hash treated as positions on a ring. Place each node at the position `hash(node_id)`. Place each key at `hash(key)`. Walk clockwise from the key until you hit a node; that node owns the key.
+
+```text
+         node C
+        /
+   k2 ·——·——·——· node A
+      |        |
+   node B ——·——·
+              \
+               k1 (owned by A: first clockwise)
+```
+
+When node A leaves, keys that pointed at A now continue clockwise to B (or whoever is next). Keys that already pointed at B or C are untouched. When A rejoins — or a new node D is inserted between B and C — it steals only the arc immediately counterclockwise of itself.
+
+Ideal movement on a one-node change is `K/N` keys for a uniform key distribution over `N` nodes. Plain consistent hashing approximates that; the approximation gets better with the trick in the next section.
+
+### Virtual nodes
+
+A ring with one point per physical node is jumpy. Random placement of a handful of points leaves some arcs much larger than others — one node owns 40% of the ring by bad luck, another owns 5%. Load imbalance shows up even before anyone is popular.
+
+**Virtual nodes** (vnodes): each physical node is hashed many times under different names — `nodeA#0`, `nodeA#1`, … `nodeA#v` — and each lands as a separate point on the ring. The physical node owns the union of its vnodes' arcs. With hundreds of vnodes per node, arc sizes concentrate around the mean and load tracks capacity much more closely. When you add a node, its vnodes are sprinkled around the ring and each steals a small slice from a neighbour — rebalancing traffic spreads across many donors instead of hammering one.
+
+| Design | Load balance | Keys moved on +1 node | Operational note |
+| --- | --- | --- | --- |
+| `hash mod N` | Good while N fixed | ~`(N-1)/N` of keys | Simple; catastrophic on membership change |
+| Consistent hash, 1 point/node | Uneven arcs common | ~`1/N`, but variance hurts | Fine for demos; rough in production |
+| Consistent hash + many vnodes | Much tighter | Still ~`1/N`, smoother donors | Standard production shape |
+| Bounded-load variants | Cap per-node load | Slightly more movement | Used when strict balance matters more than minimal moves |
+
+How many vnodes? Enough that statistical imbalance falls below what you care about — often tens to hundreds per node. Too many and the ring membership map itself gets large and slow to gossip or reload; too few and you recreate the uneven-arc problem. Treat it as a provisioned constant, revisited when node counts change by an order of magnitude.
+
+## What still breaks
+
+Consistent hashing solves *membership churn*. It does not solve *popular keys*. A celebrity id still hashes to one point on the ring and one physical owner — 04.06 Hot Partitions still applies. Virtual nodes spread *random* keys; they do not clone a single hot key.
+
+It also does not delete the data-movement cost. Moving `K/N` keys is far better than moving `K`, but at large `K` that is still a serious migration: disk, network, and cache warm-up. Systems soften it with:
+
+- **Lazy migration** — serve from the old node until the new owner has a copy, or redirect on miss.
+- **Replication** — the next R nodes clockwise hold replicas, so a successor already has data when a primary leaves (ring successor lists in Dynamo-style stores).
+- **Logical partitions** — hash to a large fixed set of partition ids, then map partition → node with consistent hashing so you move whole partitions rather than individual keys.
+
+<Callout type="note">
+"Consistent" here does not mean linearizability or strong consistency. It means the hash map is relatively stable under membership change — the same word, a different branch of computer science. In an interview, one sentence that separates those meanings saves a confused follow-up.
+</Callout>
+
+## When the simpler map is enough
+
+If shard count is fixed for the life of the deployment — you launched with 64 partitions on day one and only ever move whole partitions between machines via an explicit map — you may never need a ring. Many databases over-partition early and treat partition-to-node assignment as a control-plane decision. Consistent hashing earns its complexity when nodes join and leave often and clients or caches must recompute ownership without a central remap of everything: large memcached-style pools, peer-to-peer overlays, object stores with frequent instance replacement.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Use consistent hashing when"
+  againstTitle="Prefer mod N or a fixed partition map when"
+  forItems={[
+    "Nodes join and leave routinely and remapping nearly all keys on each change is unacceptable",
+    "Clients or caches must compute ownership locally from a membership list, without a central directory round trip on every remap",
+    "You can run enough virtual nodes per host to keep arc sizes close to fair",
+    "Minimum data movement on failure (~1/N) matters more than perfect instant balance",
+    "The same ring can place replicas on the next clockwise successors without a second mechanism",
+  ]}
+  againstItems={[
+    "Partition count is fixed and large, and a control plane already assigns partitions to nodes explicitly",
+    "You need strict range locality — sorted scans over adjacent keys — which a hash ring destroys by design",
+    "Membership almost never changes and mod N is operationally simpler for the team",
+    "A directory service already owns placement and can update a small map cheaper than every client holding a ring",
+    "Hot keys dominate; the ring's churn properties do not address skew and salting or dedicated partitions will anyway",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+State the failure of `mod N` first — "adding a node reshuffles almost every key" — then the ring property: keys and nodes on one circle, walk clockwise, membership change moves about `1/N`. Mention virtual nodes unprompted; interviewers treat "one point per node" as an incomplete answer. Be ready for hot keys (still one owner), how replication sits on successors, and whether you would use this for *data* placement or only for *cache* placement — caches can miss and refill, databases have to move bytes. If the prompt is a load balancer sticky session or a CDN edge map, point at 02.07 Consistent Hashing Load Balancing and keep this lesson's vocabulary for datastore partitions.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "hash(key) mod N remaps most keys when N changes; consistent hashing aims to move only about 1/N",
+    "Keys and nodes share a hash ring; a key belongs to the first node clockwise from its hash",
+    "Virtual nodes place many points per physical host so arc sizes — and load — stay closer to even",
+    "The technique stabilises membership churn; it does not cool popular keys or restore range locality",
+    "Moving 1/N is still real work at scale — lazy migration, replicas on successors, and logical partitions soften it",
+    "Prefer a fixed partition count plus explicit assignment when churn is rare; reach for the ring when ownership must track frequent joins and leaves",
+  ]}
+/>

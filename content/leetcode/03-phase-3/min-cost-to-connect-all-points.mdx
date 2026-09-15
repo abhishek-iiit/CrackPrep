@@ -1,0 +1,124 @@
+---
+title: "Min Cost to Connect All Points"
+number: "03.11"
+summary: "Connect every point with minimum Manhattan wire — the complete graph is implicit; Kruskal or Prim grows one MST edge at a time."
+status: published
+free: true
+difficulty: core
+estMinutes: 14
+tags: [union-find, graph, mst]
+updated: "2026-09-15"
+---
+
+## Every pair is an edge — building the graph kills you
+
+You are given `n` points on a plane. The cost to connect `(x1, y1)` and `(x2, y2)` is Manhattan distance `|x1 - x2| + |y1 - y2|`. Return the minimum total cost to connect **all** points so every point reaches every other through some path.
+
+With `n = 3` and points `[[0,0], [2,2], [3,10]]`, the cheapest spanning structure uses edges costing 4 and 9 — total **13**. There is no fixed input graph: every pair of points is a potential edge, so a naive adjacency list has **O(n²)** edges before you run any algorithm.
+
+The trap is materializing that complete graph when you do not have to. Both Kruskal and Prim can consider edges lazily — generate `(i, j, dist)` on the fly, or use Prim's "nearest unvisited neighbor" loop without storing all pairs upfront.
+
+## Minimum spanning tree on implicit edges
+
+This is classic MST. Kruskal: collect all `n(n-1)/2` edge weights (acceptable for `n ≤ 1000`), sort ascending, union-find merge components, skip edges that would cycle. Prim: start from node 0, repeatedly attach the cheapest edge from the growing tree to an outside node — a min-heap of frontier edges works; a simple `O(n²)` Prim loop is fine at this scale.
+
+The invariant: after adding `k - 1` non-crossing edges among `k` nodes in one component, the component is a tree; the MST property guarantees no cheaper global wiring exists.
+
+<Steps>
+<Step title="Generate edges (Kruskal)">
+For each pair `i < j`, push `[dist, i, j]` where `dist` is Manhattan distance. Sort by `dist`.
+</Step>
+<Step title="Grow components with Union-Find">
+Iterate sorted edges. If `find(i) !== find(j)`, add `dist` to the answer and `union(i, j)`. Stop when you have merged into one component — `n - 1` edges accepted.
+</Step>
+<Step title="Alternative: Prim from node 0">
+Track `minDist[v]` = cheapest cost to attach `v` to the tree. Repeat `n` times: pick unvisited `u` with smallest `minDist`, mark visited, relax neighbors `v` with `dist(u,v)`.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function minCostConnectPoints(points: number[][]): number {
+  const n = points.length;
+  const dist = (i: number, j: number) =>
+    Math.abs(points[i][0] - points[j][0]) +
+    Math.abs(points[i][1] - points[j][1]);
+
+  const parent = Array.from({ length: n }, (_, i) => i);
+  const rank = new Array(n).fill(0);
+
+  function find(x: number): number {
+    if (parent[x] !== x) parent[x] = find(parent[x]);
+    return parent[x];
+  }
+
+  function unite(a: number, b: number): boolean {
+    const ra = find(a), rb = find(b);
+    if (ra === rb) return false;
+    if (rank[ra] < rank[rb]) parent[ra] = rb;
+    else if (rank[ra] > rank[rb]) parent[rb] = ra;
+    else { parent[rb] = ra; rank[ra]++; }
+    return true;
+  }
+
+  const edges: [number, number, number][] = [];
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      edges.push([dist(i, j), i, j]);
+    }
+  }
+  edges.sort((a, b) => a[0] - b[0]);
+
+  let cost = 0, used = 0;
+  for (const [w, u, v] of edges) {
+    if (unite(u, v)) {
+      cost += w;
+      if (++used === n - 1) break;
+    }
+  }
+  return cost;
+}
+```
+
+Time **O(n² log n)** — `O(n²)` edges sorted. Space **O(n²)** for the edge list (or **O(n)** with Prim and no explicit edge array). Union-Find operations are nearly **O(1)** amortized per edge.
+
+<Callout type="tip">
+Say "MST on a complete graph with Manhattan weights" out loud. Interviewers often accept Prim's `O(n²)` double loop without a heap when `n ≤ 1000` — simpler to code under pressure.
+</Callout>
+
+<Tradeoff
+  forTitle="Kruskal + Union-Find when"
+  againstTitle="Prim (dense loop) when"
+  forItems={[
+    "The graph is undirected and edge list generation is straightforward",
+    "You already have Union-Find warmed up from 03.16 Redundant Connection",
+    "Sorting edges makes the greedy proof easy to explain in one sentence",
+    "n is up to a few thousand — O(n² log n) is within limits",
+    "You want a pattern that generalizes to sparse graphs with explicit edge lists"
+  ]}
+  againstItems={[
+    "You want to avoid storing O(n²) edges — Prim generates distances on the fly",
+    "n is small (under 200) and a tight double loop is faster to write than sort + UF",
+    "The graph is sparse elsewhere in the problem set — Prim on adjacency lists fits better",
+    "Memory is tight and edge array allocation is the bottleneck",
+    "You are extending to dynamic point insertion — Prim's frontier is easier to update incrementally"
+  ]}
+/>
+
+## In an interview
+
+Restate: connect all points, edge cost = Manhattan distance, minimize total. Confirm `n` bounds (typically ≤ 1000) and that the graph is complete. Walk three points and name two edges that span them.
+
+Say MST before coding — Kruskal with union-find or Prim from an arbitrary start. Mention you will not run a full shortest-path algorithm; greedy edge growth is sufficient because all weights are non-negative and the structure must be a tree.
+
+Expect: "Why not run Dijkstra from every node?" (overkill — you need a tree, not all-pairs paths), "What if coordinates were Euclidean?" (same MST algorithms, different edge weight). Bug to name first: forgetting that exactly `n - 1` edges are required — stopping early or double-counting when union-find already connected the graph.
+
+<KeyTakeaways items={[
+  "Min Cost to Connect All Points is MST on a complete graph with Manhattan edge weights — no adjacency list is given, but every pair is an edge.",
+  "Kruskal sorts all O(n²) edges and merges with Union-Find; stop after n − 1 accepted edges.",
+  "Prim avoids the edge array by repeatedly attaching the nearest outside node — O(n²) without a heap is acceptable at n ≤ 1000.",
+  "Manhattan distance is not a metric shortcut for BFS — you need a global greedy tree construction, not single-source shortest paths.",
+  "The same MST + Union-Find toolkit appears in 03.12 Critical Connections (bridges, not MST) and network design problems.",
+  "Time O(n² log n) for Kruskal; space O(n²) for the edge list or O(n) for Prim's arrays."
+]} />

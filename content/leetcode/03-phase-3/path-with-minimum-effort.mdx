@@ -1,0 +1,117 @@
+---
+title: "Path With Minimum Effort"
+number: "03.24"
+summary: "Minimize the steepest single step on a route — not total climb — so Dijkstra on max-edge weight beats BFS and binary search is the alternate lens."
+status: published
+free: true
+difficulty: core
+estMinutes: 16
+tags: [dijkstra, heap, grid]
+updated: "2026-09-15"
+---
+
+## The bottleneck step defines the path
+
+Given a heights matrix, walk from top-left to bottom-right moving four-way. The **effort** of a path is the maximum absolute height difference between adjacent cells along that path. Return the minimum possible effort among all paths.
+
+This is not "sum of climbs" and not unweighted BFS — a route with twenty gentle steps can beat one short cliff. The cost function for a path is the **max edge weight** on that path (the minimax path problem). Two cells are connected with edge weight `|h1 - h2|`.
+
+Binary search on the answer `E` works: "Is there a path using only moves with difference ≤ E?" is reachability BFS — O(mn log(max height)). **Dijkstra** with priority keyed by current path effort is the direct graph formulation and matches how you explain it in an interview.
+
+## Dijkstra with effort as path max
+
+Start at `(0,0)` with effort `0`. Use a min-heap ordered by effort so far. When relaxing a neighbor, new effort is `max(currentEffort, |h[r][c] - h[nr][nc]|)`. Skip stale heap entries. First time you pop `(rows-1, cols-1)`, return its effort.
+
+The invariant: when a cell is popped at effort `e`, no path with lower maximum edge exists to that cell — same as standard Dijkstra with a non-additive combine, and it still works because the combine is monotonic.
+
+<Steps>
+<Step title="Initialize dist[0][0] = 0 and push on a min-heap">
+All other cells start at infinity.
+</Step>
+<Step title="Pop the smallest effort cell">
+If it is the destination, return. Skip if this effort exceeds dist[r][c].
+</Step>
+<Step title="Relax four neighbors">
+Update dist if the path max improves; push improved states on the heap.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function minimumEffortPath(heights: number[][]): number {
+  const rows = heights.length;
+  const cols = heights[0].length;
+  const dist = Array.from({ length: rows }, () =>
+    new Array(cols).fill(Infinity)
+  );
+  dist[0][0] = 0;
+
+  const heap: [number, number, number][] = [[0, 0, 0]]; // [effort, r, c]
+  const dirs = [[0, 1], [0, -1], [1, 0], [-1, 0]];
+
+  while (heap.length) {
+    heap.sort((a, b) => a[0] - b[0]);
+    const [effort, r, c] = heap.shift()!;
+    if (r === rows - 1 && c === cols - 1) return effort;
+    if (effort > dist[r][c]) continue;
+
+    for (const [dr, dc] of dirs) {
+      const nr = r + dr;
+      const nc = c + dc;
+      if (nr < 0 || nc < 0 || nr >= rows || nc >= cols) continue;
+
+      const nextEffort = Math.max(
+        effort,
+        Math.abs(heights[r][c] - heights[nr][nc])
+      );
+      if (nextEffort < dist[nr][nc]) {
+        dist[nr][nc] = nextEffort;
+        heap.push([nextEffort, nr, nc]);
+      }
+    }
+  }
+
+  return 0;
+}
+```
+
+Time **O(mn log(mn))** with a binary heap; sorting a small array each pop is interview-simple but not optimal. Space **O(mn)** for `dist` and the heap. Binary search + BFS is **O(mn log H)** where H is height range.
+
+<Tradeoff
+  forTitle="Dijkstra when"
+  againstTitle="Binary search on answer + BFS when"
+  forItems={[
+    "You want one algorithm that mirrors 'shortest path with custom edge weight' verbatim",
+    "Grid is moderate (≤ 200×200) and a heap is acceptable",
+    "Follow-ups may change the combine rule — Dijkstra generalizes if the metric stays valid",
+    "Same mental model as 03.09 Network Delay Time on a grid-shaped graph",
+    "You already explain priority queues cleanly in interviews",
+  ]}
+  againstItems={[
+    "Height values are bounded and small — log H binary search steps can beat heap overhead",
+    "You lack a heap library — BFS check per mid is easy to code under pressure",
+    "Problem is unweighted (03.21) — plain BFS suffices and Dijkstra is overkill",
+    "Multiple queries on the same grid — preprocess once, answer many",
+    "Edge weights are all 0 or 1 — 0-1 BFS is O(mn) without log factor",
+  ]}
+/>
+
+## In an interview
+
+Example: a 3×3 height map where going around a 5-cell cliff (effort 2) beats climbing through it (effort 8). Restate: effort = max step on the path, minimize that max.
+
+Say: edge weight is height difference; path cost is max edge on path; Dijkstra pops smallest current max. Mention binary search alternative before coding either.
+
+Follow-ups: return the path, weighted sum instead of max, k-th best effort. Bug: summing differences instead of taking the path maximum.
+
+<KeyTakeaways
+  items={[
+    "Path With Minimum Effort is minimax shortest path — path cost is the largest single-step height gap, not the sum",
+    "Dijkstra applies with relaxation newEffort = max(currentEffort, edgeWeight)",
+    "03.21 Shortest Path in Binary Matrix is the unit-weight special case where BFS replaces Dijkstra",
+    "Binary search on effort E plus BFS reachability is an equivalent O(mn log H) approach",
+    "First pop of the destination cell gives the answer — same early-exit logic as standard Dijkstra",
+    "Four directions only; diagonal moves are not part of this problem's movement model",
+  ]}
+/>

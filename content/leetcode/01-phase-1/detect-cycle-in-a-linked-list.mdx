@@ -1,0 +1,93 @@
+---
+title: "Detect Cycle in a Linked List"
+number: "01.41"
+summary: "Floyd's two pointers detect a cycle in O(1) space; the meeting point is the key to finding where the loop begins."
+status: published
+free: true
+difficulty: core
+estMinutes: 11
+tags: [linked-list, two-pointers, cycle]
+updated: "2026-09-15"
+---
+
+## A cycle turns traversal into an infinite loop
+
+Given the head of a singly linked list, return whether any node is reachable from itself by following `next` pointers. A list `3 → 2 → 0 → -4` with `-4.next` pointing back to `2` has a cycle; `1 → 2 → null` does not.
+
+The naive fix — track every visited node in a `Set` — works and is easy to explain. On a list of length `n` it costs O(n) time and O(n) extra memory. Interviewers ask this problem because there is a second answer that uses two pointer variables and no auxiliary structure, and that answer encodes a real invariant about cyclic motion.
+
+## Floyd's tortoise and hare
+
+Send two pointers into the list: `slow` advances one node per step, `fast` advances two. If there is no cycle, `fast` (or `fast.next`) eventually hits `null`. If there is a cycle, both pointers enter the loop and, inside the loop, the gap between them shrinks by one node every iteration — so they must meet.
+
+<Steps>
+<Step title="Initialize both at head">
+  `slow = head`, `fast = head`. Do not start `fast` one step ahead; the standard cycle-detection proof assumes they start together.
+</Step>
+<Step title="Advance until fast exits or they meet">
+  While `fast` and `fast.next` are non-null, move `slow` once and `fast` twice. Return `true` on meeting, `false` when `fast` reaches the end.
+</Step>
+</Steps>
+
+The follow-up — **find the node where the cycle begins** — uses the same meeting point. Reset one pointer to `head`, keep the other at the meeting node, advance both one step at a time; they meet at the cycle entrance. You rarely need to code that variant here, but naming it signals you understand why Floyd works, not just that it works.
+
+## Solution
+
+```ts
+class ListNode {
+  val: number;
+  next: ListNode | null;
+  constructor(val?: number, next?: ListNode | null) {
+    this.val = val ?? 0;
+    this.next = next ?? null;
+  }
+}
+
+function hasCycle(head: ListNode | null): boolean {
+  let slow: ListNode | null = head;
+  let fast: ListNode | null = head;
+
+  while (fast !== null && fast.next !== null) {
+    slow = slow!.next;
+    fast = fast.next.next;
+    if (slow === fast) return true;
+  }
+  return false;
+}
+```
+
+Time **O(n)**, space **O(1)**. The loop runs at most `n` slow steps before `fast` escapes or they collide.
+
+<Tradeoff
+  forTitle="Hash set of visited nodes when"
+  againstTitle="Floyd's two pointers when"
+  forItems={[
+    "You need the exact set of nodes on the cycle, not just existence",
+    "The list nodes are not guaranteed unique by reference (rare on LeetCode, common in real graphs)",
+    "You are already maintaining a visited set for another reason",
+    "Clarity beats optimization and n is tiny (under a few dozen nodes)",
+  ]}
+  againstItems={[
+    "O(1) extra space is required or strongly preferred",
+    "The follow-up asks for the cycle start node without extra storage",
+    "n can be up to 10⁴–10⁵ and a Set allocation matters in a memory-tight setting",
+    "You want one pattern that extends to cycle length and intersection problems",
+  ]}
+/>
+
+## In an interview
+
+Restate: singly linked list, detect whether following `next` ever revisits a node. Walk the no-cycle example (`1 → 2 → null` → false) and a small cycle (`tail → node at index 1` → true). Mention the hash-set baseline in one sentence, then say you can do O(1) space with two speeds.
+
+Before coding, state the invariant: inside a cycle, the distance between slow and fast decreases by 1 each round, so they meet. The bug to call out yourself: forgetting `fast.next` in the while condition — `fast.next.next` on a null `fast.next` throws.
+
+Follow-ups: return the cycle-start node; compute cycle length; detect intersection of two lists (01.44 Remove Nth Node shares the two-pointer toolkit).
+
+<KeyTakeaways items={[
+  "Floyd's algorithm detects a cycle by advancing slow one step and fast two steps until they meet or fast reaches null.",
+  "Inside a cycle the gap between slow and fast shrinks by one node per iteration, guaranteeing a meeting point.",
+  "A hash set of visited nodes solves the problem in O(n) time and O(n) space with simpler code.",
+  "Reset one pointer to head and walk both one step at a time from the meeting point to find where the cycle begins.",
+  "Always guard with `fast !== null && fast.next !== null` before advancing fast by two.",
+  "Cycle detection on linked structures is the same family as 01.44 Remove Nth Node and 01.45 Reorder List pointer tricks.",
+]} />

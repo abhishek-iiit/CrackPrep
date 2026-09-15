@@ -1,0 +1,95 @@
+---
+title: "Maximum Depth of Binary Tree"
+number: "02.10"
+summary: "Depth is one plus the deeper subtree; null is the base case at zero — post-order DFS in three lines."
+status: published
+free: true
+difficulty: intro
+estMinutes: 8
+tags: [tree, dfs, recursion]
+updated: "2026-09-15"
+---
+
+## Longest root-to-leaf chain of nodes
+
+Given the root of a binary tree, return its **maximum depth** — the number of nodes along the longest path from root down to a leaf. A single node has depth 1; an empty tree has depth 0.
+
+BFS level-by-level counting works: enqueue the root, process each level, increment depth when a level finishes. That is O(n) time and O(w) space for maximum width w — for a skewed tree w = 1, for a balanced tree w ≈ n/2.
+
+Recursive DFS is shorter to write and matches the definition directly: the depth of a node is **1 + max(left depth, right depth)**, with null returning 0. One post-order pass visits every node once — O(n) time, O(h) stack space for height h (O(n) skewed, O(log n) balanced).
+
+## Post-order: children before parent
+
+At each node, you need both subtree depths before you can combine them. That is post-order — left, right, then compute at the current node.
+
+The recurrence:
+
+```
+depth(null) = 0
+depth(node) = 1 + max(depth(node.left), depth(node.right))
+```
+
+Empty tree: root is null → 0. Leaf: both children null → 1 + max(0, 0) = 1.
+
+<Steps>
+<Step title="Base case: if root is null, return 0">
+  Empty subtree contributes no nodes to path length.
+</Step>
+<Step title="Recurse on left and right">
+  Each call returns the depth of that subtree.
+</Step>
+<Step title="Return 1 + max(leftDepth, rightDepth)">
+  The current node adds one edge to the longer child path.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function maxDepth(root: TreeNode | null): number {
+  if (root === null) return 0;
+  return 1 + Math.max(maxDepth(root.left), maxDepth(root.right));
+}
+```
+
+Time **O(n)** — every node visited once. Space **O(h)** recursion stack — h = tree height.
+
+Iterative BFS alternative: queue levels, increment a counter per level — same O(n) time, O(w) space. Either is acceptable; DFS recursion is the usual first answer.
+
+<Tradeoff
+  forTitle="Recursive DFS when"
+  againstTitle="Level-order BFS when"
+  forItems={[
+    "Definition maps directly to the recurrence — three lines, easy to prove correct",
+    "Tree height h ≪ width w — stack O(h) beats queue O(w) on bushy trees",
+    "Same template extends to 02.12 Invert Binary Tree, diameter, and path-sum variants",
+    "Interview expects the recursive structure before iterative refinements",
+    "Skewed tree keeps both DFS stack and BFS queue small",
+  ]}
+  againstItems={[
+    "Tree depth can hit 10⁴ — recursion risks stack overflow; BFS or iterative DFS is safer",
+    "Follow-up needs level-by-level output (02.14 Binary Tree Level Order Traversal) — BFS is already the tool",
+    "Interviewer bans recursion — explicit stack mimics post-order",
+    "You also need shortest path to nearest leaf — BFS finds minimum depth naturally",
+    "Debugging requires seeing levels — BFS order matches human inspection",
+  ]}
+/>
+
+## In an interview
+
+Sketch `[3,9,20,null,null,15,7]` → depth 3 (path 3→20→15 or 3→20→7). Confirm: count nodes not edges; empty tree → 0.
+
+Say the recurrence before coding. Mention base case null → 0 — the bug is returning 1 for null or counting edges (then leaf depth would be 0).
+
+Follow-ups: minimum depth (BFS or DFS with early exit), balanced check, diameter. Leads to 02.14 Binary Tree Level Order Traversal and 02.13 Binary Tree Maximum Path Sum where post-order returns richer aggregates than depth alone.
+
+<KeyTakeaways
+  items={[
+    "Maximum Depth of Binary Tree is 1 + max(left depth, right depth), base case null → 0",
+    "Post-order DFS visits each node once — O(n) time, O(h) stack space",
+    "A single-node tree has depth 1; empty tree has depth 0",
+    "BFS level counting is equivalent but uses O(w) queue space — prefer when levels matter",
+    "Same recursive skeleton powers most tree height and path problems in phase 2",
+    "Off-by-one confusion between edge count and node count — this problem counts nodes",
+  ]}
+/>

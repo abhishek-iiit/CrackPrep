@@ -19,7 +19,10 @@ function walk(dir: string, out: string[] = []): string[] {
 // walk() is only ever called on app/, components/ and lib/, so scripts/ and
 // tests/ entries could never match anything and only made the allow-list look
 // broader than it is. One file may reach the filesystem.
-const ALLOWED_FS = [join("lib", "content", "source.ts")];
+const ALLOWED_FS = [
+  join("lib", "content", "source.ts"),
+  join("lib", "content", "leetcode-urls.ts"),
+];
 
 describe("filesystem access is confined to the content source", () => {
   const files = [...walk("app"), ...walk("components"), ...walk("lib")];
@@ -56,9 +59,9 @@ describe("client components are limited to the seven named leaves", () => {
   // second file of the same name anywhere in the tree, and — worse — an
   // offenders-only assertion cannot notice a DELETION. Deleting
   // SidebarTree.tsx left this suite green while both this describe title and
-  // README's "limited to seven named leaves" became false. Comparing the
-  // exact set both ways, asserting the list is seven long, and asserting each
-  // path exists on disk closes all three holes at once.
+  // README's named-leaves claim became false. Comparing the exact set both
+  // ways, asserting the list length, and asserting each path exists on disk
+  // closes all three holes at once.
   const CLIENT_COMPONENTS = [
     join("app", "error.tsx"), // Next requires error boundaries to be client
     join("components", "layout", "AnnouncementBar.tsx"),
@@ -67,17 +70,18 @@ describe("client components are limited to the seven named leaves", () => {
     join("components", "lesson", "SidebarTree.tsx"),
     join("components", "lesson", "TableOfContents.tsx"),
     join("components", "search", "SearchPalette.tsx"),
+    join("components", "theme", "ThemeProvider.tsx"),
   ];
 
-  it("names exactly seven", () => {
-    expect(CLIENT_COMPONENTS).toHaveLength(7);
+  it("names exactly eight", () => {
+    expect(CLIENT_COMPONENTS).toHaveLength(8);
   });
 
   it.each(CLIENT_COMPONENTS)("%s exists", (file) => {
     expect(existsSync(file)).toBe(true);
   });
 
-  it("declares 'use client' in exactly those seven files", () => {
+  it("declares 'use client' in exactly those eight files", () => {
     const found = [...walk("app"), ...walk("components"), ...walk("lib")]
       .filter((file) => /^\s*["']use client["']/m.test(readFileSync(file, "utf8")))
       .sort();

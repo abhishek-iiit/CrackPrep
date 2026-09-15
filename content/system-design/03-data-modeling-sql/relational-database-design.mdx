@@ -1,32 +1,81 @@
 ---
 title: "Relational Database Design"
 number: "03.01"
-summary: "Relational Database Design — notes in progress."
-status: draft
+summary: "Normalization is a bet against future update anomalies; denormalization is a bet you can keep duplicated data in sync."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [sql, schema, normalization, modeling]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Every table is a claim about what won't change
 
-What breaks without this, and the situation that forces the decision.
+A schema is not a container for data. It is a set of claims: this attribute belongs to exactly one entity, this relationship is one-to-many and not many-to-many, this value will never need to be looked up on its own. Every one of those claims is silent until it's wrong, and it's wrong exactly when the product changes in a direction the schema didn't anticipate.
 
-## How it works
+The clearest version of this: store a user's phone numbers as a comma-joined string in one column. It works, right up until someone asks "which users share this phone number," and now the answer is a string split and a scan across every row instead of an indexed lookup. The claim baked into that column — a user has phone numbers, but nobody will ever query by one — was made silently, by a data type, and nobody signed off on it.
 
-The mechanism, step by step.
+Relational design is the discipline of making those claims on purpose. You draw entities and relationships, decide cardinality explicitly, and use the constraints the database enforces — primary keys, foreign keys, uniqueness — so that a wrong write fails loudly instead of drifting the data into an inconsistent state nobody notices for months.
 
-## Tradeoffs
+## Normalization is named after the anomaly it prevents
+
+Put a customer's address on every order row and you've created three ways to be wrong. Insert an order and you must supply an address whether or not one exists yet. Delete the last order a customer ever placed and their address disappears with it — information lost as a side effect of an unrelated delete. Update the customer's address and, unless you remember to update every historical order too, some rows now disagree with each other about where this customer lives. Those three are the textbook insert, delete, and update anomalies, and normalization exists specifically to make them structurally impossible rather than a discipline you have to maintain by hand.
+
+The normal forms are a ladder, each rung closing off one anomaly:
+
+- **First normal form (1NF)** — every column holds one atomic value, not a list or a repeating group. The comma-joined phone number column violates this directly.
+- **Second normal form (2NF)** — every non-key column depends on the *whole* of a composite primary key, not part of it. This only bites tables with composite keys: an `(order_id, product_id)` line-items table that also stores `customer_name` has a column depending on `order_id` alone, half the key.
+- **Third normal form (3NF)** — no non-key column depends on another non-key column. A `customer_zip` and a `customer_city` on the same row, where city is derivable from zip, is a transitive dependency: update the zip and the city can silently go stale.
+
+In practice most schemas aim for 3NF and stop — it removes the anomalies that actually bite in day-to-day operation, and the forms past it (BCNF and beyond) fix edge cases that rarely show up outside a database theory course.
+
+Keys carry the weight of the design. A **primary key** identifies a row uniquely — a surrogate key (an auto-incrementing integer or a UUID) is stable even if every visible attribute of the row changes, where a **natural key** (an email address, a national id) can turn out to be reused, reassigned, or simply wrong in ways you discover after millions of rows reference it. A **foreign key** is the database enforcing a relationship claim at write time: an order cannot reference a customer that doesn't exist, full stop, and that guarantee costs nothing at read time and a small check at write time. A **many-to-many** relationship — students and courses, users and roles — needs a junction table with its own composite key, `(student_id, course_id)`, which is also where per-relationship attributes belong: an enrollment date, a role's grant timestamp.
+
+<Callout type="note">
+Junction tables are the recurring shape of "I have a many-to-many and don't know where to put this extra fact." If the fact belongs to the relationship rather than to either side — when someone enrolled, who granted a role — it goes on the junction table, not bolted onto one of the entities it connects.
+</Callout>
+
+## Denormalization is normalization run in reverse, on purpose
+
+Every join costs something: a second index lookup, a second page fetch, more work for the query planner (03.05 Query Planning) to order correctly. Normalization trades that cost for consistency guarantees. Denormalization is the deliberate reversal — duplicate data to avoid a join, once you've actually measured that the join is the bottleneck, and accept that you now owe the system a story for how the copies stay in sync.
+
+The canonical case: a `comment_count` column on a post row, maintained by a trigger or an application-level transaction each time a comment is inserted or deleted, so that rendering a feed of posts never has to run `COUNT(*)` against the comments table for every post on the page. Another: copying a product's name and price onto an order line item at the moment of purchase, deliberately, because a historical order should show what the product was called and cost *then* — this isn't even really denormalization for performance, it's recognizing that "the product at time of purchase" and "the product right now" are different entities that happen to share most of their fields.
+
+What makes denormalization safe is precision about the sync mechanism: a single transaction that updates both tables together, a database trigger, or an asynchronous job with a stated staleness bound you've actually accepted. What makes it dangerous is skipping that question — duplicating data because a join felt slow, with no answer for what happens when the two copies disagree.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Normalize when"
+  againstTitle="Denormalize when"
+  forItems={[
+    "Data changes over time and must stay consistent everywhere it appears — a customer's address, a product's current price",
+    "Skipping it would create a real insert, update, or delete anomaly, not just a hypothetical one",
+    "The workload is write-heavy or transactional, where correctness on write is worth paying a join on read",
+    "The schema is still evolving and you don't yet know every read pattern — normalized data is the safer default; see 03.12 Schema Evolution",
+    "Redundant copies would cost meaningful storage multiplied across a large table",
+  ]}
+  againstItems={[
+    "A specific read path is hot, measured, and a join has been identified as the actual bottleneck — not a guess",
+    "The duplicated fact changes rarely relative to how often it's read, or represents a point-in-time snapshot rather than a live value",
+    "You can state precisely how the copies stay in sync — one transaction, a trigger, or an async job with a known staleness bound",
+    "You're deliberately building a read-optimized copy — a reporting table, a search index — rather than letting redundancy creep into the system of record",
+    "The join cost has to be paid on every request on a path with a tight latency budget, and precomputing removes it from the hot path entirely",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Draw the entities and name the cardinality of every relationship out loud before you draw a single column — "a user has many orders, an order has many line items, a line item references exactly one product." That sentence is the schema; the tables are its translation. Expect to be asked what happens at scale, and have an answer ready that isn't "add more normalization": past a point, the answer is a denormalized read path (03.02 SQL-Backed Key-Value Store shows the extreme version of this), an index strategy (03.03 Database Indexing), or moving off a single relational instance altogether (03.10 Relational Database Scaling, or 04.01 NoSQL Decision Boundaries if the data doesn't want to be relational at all).
 
-<KeyTakeaways items={["", "", ""]} />
+Name the anomaly you're avoiding, not just the normal form. "I'm normalizing this because otherwise updating a customer's address only updates it on their most recent order" is a design decision. "I'm putting this in 3NF" is a vocabulary word.
+
+<KeyTakeaways
+  items={[
+    "A schema encodes claims about cardinality and change — get the cardinality wrong and every query built on it is wrong in the same way",
+    "Normalization exists to make insert, update, and delete anomalies structurally impossible rather than something you remember to avoid",
+    "Most production schemas target third normal form and stop there; forms beyond it fix edge cases that rarely occur in practice",
+    "A surrogate key stays stable when visible attributes change; a natural key can turn out to be reused or reassigned after millions of rows depend on it",
+    "Denormalization is a deliberate, measured reversal of normalization, and it's only safe once you can state exactly how the duplicated copies stay in sync",
+    "A many-to-many relationship needs its own junction table, and any fact that belongs to the relationship itself — not either side — lives there",
+  ]}
+/>

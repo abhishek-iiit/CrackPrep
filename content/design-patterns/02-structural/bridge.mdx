@@ -1,0 +1,106 @@
+---
+title: "Bridge"
+number: "02.02"
+summary: "Split an abstraction from its platform implementations so each can evolve independently without a cartesian subclass explosion."
+status: published
+free: true
+difficulty: core
+estMinutes: 14
+tags: [structural, abstraction, platforms]
+updated: "2026-09-15"
+---
+
+## Two axes of variation, one inheritance hierarchy
+
+Your remote-control app renders shapes on screen, sends them to a printer, and exports to PDF. Shapes come in at least three kinds — circle, square, triangle. Output targets come in at least three — raster display, PostScript printer, vector file. The naive design inherits: `RedCircleOnScreen`, `RedCircleOnPrinter`, `BlueCircleOnScreen`, `BlueCircleOnPrinter` — and every new shape multiplies every new renderer.
+
+That is the cartesian product trap. With *S* shape variants and *R* renderers you need *S × R* classes if you encode both axes in one hierarchy. Add anti-aliasing as a third axis and the count becomes unmaintainable before the feature list is half done. The bug you will ship is not in any one subclass — it is in the matrix itself, because fixing circle-on-printer logic requires hunting through classes whose only shared trait is accidental.
+
+Bridge separates the two dimensions. **Abstraction** (what the client sees — `Shape`, `RemoteControl`) holds a reference to **Implementor** (how it actually renders — `Renderer`, `Device`). Each axis grows independently: a new shape adds one class; a new output device adds one class. Total classes become *S + R*, not *S × R*.
+
+## Abstraction and Implementor, linked by composition
+
+The pattern has four roles:
+
+- **Abstraction** — the high-level interface (`Shape.draw()`). Often refined by `RoundedShape`, `FilledShape`.
+- **Implementor** — the platform interface (`Renderer.drawCircle(x, y, r)`).
+- **Concrete Abstraction** — `Circle`, `Square`; each knows *what* to draw.
+- **Concrete Implementor** — `ScreenRenderer`, `PdfRenderer`; each knows *how* to draw on its platform.
+
+The Abstraction never calls platform APIs directly. It delegates to the Implementor reference, set at construction or swapped at runtime.
+
+<Steps>
+<Step title="Client holds an Abstraction">
+`const shape = new Circle(new PdfRenderer());` — the client sees `Shape`, not PDF details.
+</Step>
+<Step title="Abstraction delegates geometry to Implementor">
+`Circle.draw()` computes bounding box and calls `this.renderer.drawCircle(cx, cy, radius)`.
+</Step>
+<Step title="Implementor handles platform specifics">
+`PdfRenderer` writes path operators; `ScreenRenderer` calls the canvas API. Same circle, different wire format.
+</Step>
+<Step title="Either axis can change without touching the other">
+Add `SvgRenderer` — one new class, zero changes to `Circle`. Add `Triangle` — one new class, works with every existing renderer.
+</Step>
+</Steps>
+
+```typescript
+interface Renderer {
+  drawCircle(x: number, y: number, r: number): void;
+}
+
+class Circle {
+  constructor(private renderer: Renderer) {}
+  draw() { this.renderer.drawCircle(this.cx, this.cy, this.r); }
+}
+```
+
+Bridge looks like dependency injection because it is — the difference is intent. You are not injecting for testability alone; you are encoding two independent variation axes as two hierarchies joined by a stable interface.
+
+<Callout type="note">
+Bridge is often introduced *after* the cartesian hierarchy already exists — you extract the Implementor interface from the duplicated platform code in the leaf subclasses. The refactor pays for itself the first time someone adds a second platform without touching every shape.
+</Callout>
+
+## Bridge versus the patterns it resembles
+
+**02.04 Decorator** also wraps an object and delegates, but Decorator adds behavior layers on one interface (`BufferedStream` around `FileStream`). Bridge splits two *different* responsibilities that happen to collaborate — shape logic versus rendering logic.
+
+**02.05 Facade** hides multiple subsystems behind one simple call. Bridge exposes both sides deliberately; the client may even choose the Implementor.
+
+**03.08 Strategy** swaps algorithms at runtime on a single task ("sort this list"). Bridge structures a permanent collaboration between an abstraction and its platform — the Implementor is not a throwaway algorithm pick, it is half the design.
+
+<Tradeoff
+  forTitle="Reach for Bridge when"
+  againstTitle="Skip Bridge when"
+  forItems={[
+    "Two independent dimensions vary — UI widget × theme, shape × renderer, remote control × device — and subclassing both into one tree is exploding",
+    "Platform implementations must be swappable at runtime or compile time without recompiling every abstraction",
+    "You expect both axes to keep growing (new shapes *and* new outputs) over multiple releases",
+    "The Implementor interface is stable even when Concrete Implementors differ wildly (screen vs printer vs file)",
+    "You are mid-refactor extracting duplicated platform code from a cartesian inheritance mess",
+  ]}
+  againstItems={[
+    "Only one axis actually varies — a single hierarchy with one abstract base is enough",
+    "There is one implementation and no credible second platform; Bridge is two interfaces where one class suffices",
+    "The 'two axes' are really one feature toggled on and off — Strategy or a simple flag beats a parallel hierarchy",
+    "The team will never add a second Implementor; the indirection makes every draw call harder to trace",
+    "The variation is purely behavioral on identical data — 03.08 Strategy covers algorithm swap without a structural split",
+  ]}
+/>
+
+## In an interview
+
+Say: "I have shapes and renderers as two independent axes — I'd use Bridge so adding a PDF backend does not mean N new shape subclasses." Draw two parallel hierarchies with a composition arrow from Abstraction to Implementor. The follow-up is almost always Decorator or Strategy. Decorator stacks behavior on the *same* role; Bridge splits *different* roles. Strategy swaps one algorithm; Bridge encodes a long-lived platform split.
+
+Name the misuse: applying Bridge when there is only one renderer and one shape — you have built dependency injection with extra class files and no second axis to justify them.
+
+<KeyTakeaways
+  items={[
+    "Bridge breaks a cartesian subclass explosion by separating Abstraction (what) from Implementor (how) and linking them with composition",
+    "Adding a new variant on either axis costs one class, not a cross-product of classes on the other axis",
+    "The Implementor interface is the contract both sides depend on; Concrete Abstractions delegate all platform work through it",
+    "Bridge resembles Strategy and Decorator but differs in intent — permanent platform split, not algorithm swap or behavior stacking",
+    "Extract Bridge from an existing matrix hierarchy by pulling shared platform code into a Implementor interface",
+    "Skip it when only one axis varies; the second hierarchy is indirection without a payoff",
+  ]}
+/>

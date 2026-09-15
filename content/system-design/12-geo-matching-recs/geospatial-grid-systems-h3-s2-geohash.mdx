@@ -1,32 +1,108 @@
 ---
 title: "Geospatial Grid Systems H3 S2 Geohash"
 number: "12.03"
-summary: "Geospatial Grid Systems H3 S2 Geohash — notes in progress."
-status: draft
+summary: "Three ways to tile the earth for indexing — square geohash, hex H3, and sphere-covering S2 — and how to pick among them by neighbour shape, area distortion, and ecosystem."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [geospatial, h3, s2, geohash]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Same job, three tilings
 
-What breaks without this, and the situation that forces the decision.
+Every scalable nearby search and density map eventually asks the same question: how do we chop continuous latitude and longitude into discrete buckets that an index can key on? Geohash, H3, and S2 are three answers that differ in cell shape, how neighbours work, how badly area and shape distort across the globe, and what libraries and warehouses already speak them.
 
-## How it works
+They are not competing brands of the same algorithm. Choosing one is choosing which geometric lies you are willing to tell — and which operational tools you inherit.
 
-The mechanism, step by step.
+## Geohash: the string you already know
 
-## Tradeoffs
+Geohash (12.02) produces rectangular cells on a Plate Carrée-style grid via bit interleaving, encoded as Base32. Neighbours are the eight adjacent rectangles. Prefix truncation coarsens the grid.
+
+**Strengths.** Trivial to store and debug — a human can read `9q8yyk` and compare prefixes. Works anywhere a string or bytes key works. Explains cleanly in interviews and in SQL.
+
+**Weaknesses.** Cell area shrinks with latitude. Rectangles have awkward diagonal neighbours. Space-filling discontinuities mean geographically close points sometimes sit in cells that do not share a long prefix, so neighbour expansion is mandatory rather than optional.
+
+Use geohash when the product is regional (one country or latitude band), the team wants minimum moving parts, and candidate generation — not cartographic purity — is the goal.
+
+## H3: hexagons with a hierarchy
+
+Uber's H3 tiles the world mostly with hexagons at a chosen resolution, with a handful of pentagons to close the sphere. Each hex has six neighbours of roughly equal centre-to-centre distance — a cleaner "ring" API than eight rectangles plus varying diagonal lengths. Parent/child relationships let you roll up from fine cells to coarse ones for analytics.
+
+**Strengths.** Hex rings are natural for "expand radius by k cells". Roughly equal edge neighbours make distance approximations from grid hops more honest than on squares. Strong fit for demand heatmaps, surge regions, and any feature that thinks in rings.
+
+**Weaknesses.** Cell indexes are 64-bit integers, not readable prefixes. Hierarchy is not a simple string truncation — children of a parent do not pack into a lexicographic range the way geohash prefixes do, so "give me everything under this parent" needs H3-aware APIs or precomputed child lists. Dependency on the H3 library across languages becomes part of your platform.
+
+Use H3 when neighbour rings and aggregate analytics on cells are central — mobility, delivery density, environmental meshes — and you are ready to standardise on the library.
+
+## S2: cells on a sphere via a cube projection
+
+Google's S2 projects the globe onto a cube's faces, then recursively subdivides each face with a quad tree. Cells are identified by 64-bit cell ids that preserve a useful space-filling order. Because the model starts from a sphere (via the cube), it is built for global applications that care about covering arbitrary regions with cells of bounded size.
+
+**Strengths.** Excellent region covering: given a polygon or cap, S2 can return a compact set of cells that cover it at a target precision — the primitive behind many "index this shape" pipelines. Cell ids sort in a Hilbert-ish order that keeps many spatially close cells near each other in a one-dimensional index. Battle-tested in global geo backends.
+
+**Weaknesses.** Mentally heavier than geohash. Covering algorithms have knobs (max cells, max level) that you must tune or you over-cover and drown the index. Hexagonal intuition does not apply; neighbours and rings are a different vocabulary.
+
+Use S2 when you need to index polygons and caps globally, or when your stack already centres on S2 (BigQuery geography internals, several Google-derived systems).
+
+## Side-by-side
+
+| | Geohash | H3 | S2 |
+| --- | --- | --- | --- |
+| Cell shape | Rectangle | Hexagon (pentagons at poles of the topology) | Spherical quadrilateral |
+| Id form | Base32 string | 64-bit index | 64-bit cell id |
+| Coarsen | Truncate prefix | `parent()` API | Parent cell id / level |
+| Neighbours | 8 rectangles | 6 hexes (ring APIs) | Edge/vertex neighbours; covering preferred for regions |
+| Area distortion | Increases toward poles | Milder; designed for roughly uniform area at a resolution | Controlled via level; cube-face seams exist |
+| Best at | Simple nearby candidate keys, SQL/search terms | Rings, density, mobility analytics | Polygon/cap covering, global indexes |
+| Ecosystem | Universal | Uber H3 libs, growing warehouse support | Google S2 libs, several cloud GIS paths |
+
+## How to choose without a religion
+
+Start from the query, not the logo:
+
+1. **Radius nearby on a regional catalog, string index already in play** → geohash.
+2. **Ring expansion, hex heatmaps, driver/demand grids** → H3.
+3. **Arbitrary polygons, global covering, "index this shape"** → S2 (or a GIS type that uses it under the hood).
+4. **Hot path radius on live points at high QPS** → often Redis GEO (12.04) for serving, with one of the above for analytics and cold query — they compose rather than exclude each other.
+
+Mixing systems is allowed and common: H3 for surge polygons and analytics, geohash or Redis for the consumer nearby API. What hurts is dual-writing two grids for the *same* query path without a clear ownership line — pick one serving encoding and stick to it.
+
+<Callout type="tip">
+In an interview, say what you would pick and one sentence why, then move on. Spending five minutes comparing Hilbert curves while the API surface is still undefined reads as stalling. "Geohash precision 7 with 8-neighbour expansion for a 500 m radius; if we later need hex heatmaps we add H3 for analytics, not for the first serving path" is enough.
+</Callout>
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Standardise on one grid when"
+  againstTitle="Keep GIS / multiple representations when"
+  forItems={[
+    "One query shape dominates — radius nearby, or hex rings, or polygon covering — and a single encoding matches it",
+    "You need the same cell ids in OLTP, cache keys, and stream partitions for locality",
+    "Engineering cost of one library and one mental model beats cartographic perfection",
+    "Candidate generation is the goal and exact geometry is a second pass anyway",
+    "You can name the distortion you accept (polar geohash shrink, H3 pentagons, S2 face seams) and it does not break the product",
+  ]}
+  againstItems={[
+    "Regulatory or municipal boundaries must be exact polygons — store real geometries and use PIP (12.05), with cells only as a prefilter",
+    "Different products genuinely need different tilings and dual-maintaining them is cheaper than forcing a bad fit",
+    "A managed geography type already meets latency and the team does not want to own cell math",
+    "You are still clarifying radius, region, and update rate — picking H3 vs S2 early is premature locking",
+    "Cross-team interchange requires a lowest-common-denominator (often lat/lon + geohash) regardless of internal H3/S2",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Map the prompt to one row of the table above in one breath. Acknowledge that all three only produce candidates for radius search, and that geofencing is a different problem (12.05). If asked about sharding, note that cell ids are natural partition keys but dense cities create hot partitions — the same hot-key problem as any location-skewed workload (04.06 Hot Partitions).
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Geohash, H3, and S2 all discretise the earth for indexing; they differ in cell shape, neighbour semantics, distortion, and ecosystem — not in whether you still need an exact-distance or PIP pass",
+    "Geohash optimises for simplicity and prefix indexes; H3 for hex rings and density; S2 for sphere-aware region covering",
+    "Choose from the dominant query shape: radius+string index, ring analytics, or polygon covering",
+    "Serving path and analytics path may use different grids; dual-writing the same path twice usually does not",
+    "Cell ids make good partition keys and good hot-spot magnets in dense cities — plan for skew",
+    "In interviews, pick one with a reason and move to API and capacity; a grid bake-off is not the design",
+  ]}
+/>

@@ -1,0 +1,100 @@
+---
+title: "Palindromic Substrings"
+number: "02.08"
+summary: "Count palindromes by expanding from every center — each successful outward step is one distinct substring."
+status: published
+free: true
+difficulty: core
+estMinutes: 13
+tags: [string, two-pointers]
+updated: "2026-09-15"
+---
+
+## How many contiguous palindromes live in s?
+
+Given a string `s`, return the number of **palindromic substrings** — contiguous slices that read the same forward and backward. `"aaa"` has six: three length-1, two length-2 (`"aa"` at indices 0–1 and 1–2), one length-3.
+
+Enumerating all O(n²) substrings and running a palindrome check on each is O(n³) naive or O(n²) with caching — workable at n = 1000, heavy at scale. The same **expand around center** trick from 02.07 Longest Palindromic Substring counts palindromes without storing them: every time the expand loop succeeds, you have found one more palindrome centered on the current span.
+
+For `"aaa"`, center at index 1 odd-expand gives `"a"`, then `"aaa"` — two counts from one center. Even center at 0–1 gives another `"aa"`. Summing across all centers totals every palindrome exactly once.
+
+## Count on each successful expand layer
+
+Reuse the expand helper. Instead of tracking max length, **increment a counter** each time `s[left] === s[right]` before moving outward — each layer is a distinct substring with a definite start and end.
+
+There are still 2n − 1 centers. The total number of expansions across all centers is O(n²) in the worst case (all same character).
+
+<Steps>
+<Step title="Initialize count = 0">
+  Single-character strings contribute n palindromes before any expand — but expand(i,i) counts those as the first successful layer.
+</Step>
+<Step title="For each i, expand(i, i) and expand(i, i + 1)">
+  Same centers as longest palindrome — odd and even.
+</Step>
+<Step title="Inside expand, increment count on each matching layer">
+  One increment per valid (left, right) pair while expanding.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function countSubstrings(s: string): number {
+  let count = 0;
+
+  function expand(left: number, right: number): void {
+    while (left >= 0 && right < s.length && s[left] === s[right]) {
+      count++;
+      left--;
+      right++;
+    }
+  }
+
+  for (let i = 0; i < s.length; i++) {
+    expand(i, i);
+    expand(i, i + 1);
+  }
+
+  return count;
+}
+```
+
+Time **O(n²)** worst case — all-`a` string triggers maximum expansions. Space **O(1)** — only the counter and indices.
+
+<Tradeoff
+  forTitle="Expand and count when"
+  againstTitle="DP[i][j] palindrome table when"
+  forItems={[
+    "You need the count only, not the substrings listed — expand avoids storage",
+    "Same O(n²) as 02.07 Longest Palindromic Substring with a one-line change from max to count",
+    "n ≤ 1000 fits the judge comfortably",
+    "Implementation is short and less error-prone than filling a 2D table",
+    "Follow-up is longest palindrome — you already have the helper",
+  ]}
+  againstItems={[
+    "Follow-up asks for longest palindrome decomposition or partition — interval DP is the next tool",
+    "Many queries on different ranges — preprocess DP for O(1) per query",
+    "You must list every palindromic substring, not count — enumerate during expand with slice recording",
+    "Interviewer wants explicit recurrence P(i,j) for pedagogical reasons",
+    "n is large enough that O(n²) TLEs — Manacher counts in O(n)",
+  ]}
+/>
+
+## In an interview
+
+Example: `"abc"` → 3 (each letter alone); `"aaa"` → 6. Clarify contiguous substrings only, not subsequence.
+
+Say you will reuse center expansion from 02.07 and count layers. Mention double-counting trap: do not also add n upfront if expand already counts length-1 centers.
+
+Follow-ups: return longest instead of count; distinct palindromes if duplicates matter; binary string with wildcards. Bug: counting centers instead of expansions — one center can yield multiple palindromes of different lengths.
+
+<KeyTakeaways
+  items={[
+    "Palindromic Substrings counts by expanding from each of 2n − 1 centers, incrementing on every matching layer",
+    "The expand helper is identical in shape to 02.07 Longest Palindromic Substring — max tracking becomes counting",
+    "An all-same-character string of length n has n(n+1)/2 palindromic substrings — the worst case for expand work",
+    "O(n²) time, O(1) space — no DP table required for the count",
+    "Each palindrome is counted exactly once via its unique center and radius",
+    "Empty string returns 0; single character returns 1",
+  ]}
+/>

@@ -1,32 +1,83 @@
 ---
 title: "When Not To Add Infrastructure"
 number: "01.13"
-summary: "When Not To Add Infrastructure — notes in progress."
-status: draft
+summary: "Infrastructure added before a number justifies it still has to be run, patched, and understood today, while the benefit it buys stays speculative."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: intro
+estMinutes: 9
+tags: [architecture, process, simplicity]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The box is free to draw and expensive to run
 
-What breaks without this, and the situation that forces the decision.
+A queue, a cache, a second service, a sharded database — each is one box on a whiteboard, drawn in seconds, and each is also a thing that has to be deployed, monitored, upgraded, and understood by whoever is on call the night it misbehaves. The gap between those two costs is where premature infrastructure comes from: the box looked free because only the drawing was free.
 
-## How it works
+Every piece of infrastructure a system does not yet need is not neutral. It is negative — a new failure mode nobody has seen yet, a new deploy pipeline, a new thing a new engineer has to learn before they can be productive, and in the specific case of state (a cache, a shard, a queue with messages in flight) a thing that is expensive to remove once it has data in it. The reason not to add it is not thrift for its own sake. It is that the cost is real and paid starting immediately, while the benefit is speculative and arrives, if it ever does, later.
 
-The mechanism, step by step.
+## What premature infrastructure usually looks like
 
-## Tradeoffs
+The most common version is a mechanism copied from a talk about a company running at a hundred times the scale the current system will see this year. A sharded database for a table with ten million rows. A message queue in front of a call that happens twice a second. A dedicated caching layer in front of a query that takes single-digit milliseconds and is called once per page load. None of these are wrong in general — they are wrong for the number in front of them, and the number is usually available, or estimable with the four numbers from 01.01 Requirements Clarification, before the decision is made.
+
+The tell is in the justification. "We might need it later" is not a number, and it never resolves into a decision about when "later" arrived. A justification that actually holds names the metric it responds to: "p99 write latency has been climbing for two weeks and the trend line crosses our SLO in six" is a reason. "This will probably need to scale eventually" is not — it is true of nearly everything, and true-of-everything is not evidence for any particular action today.
+
+The flip side is a real failure mode too, and it is worth naming so this doesn't read as an argument for never adding anything: waiting until a system is on fire to add the component that was obviously needed is its own mistake, and it is the more expensive one to make in production, because now it is happening under incident pressure with no time to design it properly. The discipline this lesson argues for is not delay for its own sake — it is adding infrastructure in response to a measured number crossing a stated threshold, instead of in response to a guess about the future or a reaction to an outage that already happened.
+
+<Steps>
+  <Step title="Name the number that is actually failing today">
+    Not "this could be slow at scale" — an actual metric, measured, with a value: p99 latency, queue depth, lock contention, error rate. If there is no number, there is no problem yet, only a prediction, and predictions deserve a plan, not a deploy.
+  </Step>
+  <Step title="Ask what the cheapest fix for that specific number is">
+    The fix for a slow query is sometimes an index, not a cache. The fix for a hot table is sometimes a better key, not a shard. Jumping straight to the heaviest tool skips the possibility that the actual bottleneck is something an afternoon can fix.
+  </Step>
+  <Step title="Price what the new component costs even while idle">
+    A queue, a cache cluster, a second region all cost money and attention every day they run, independent of whether they are earning their keep yet — 01.12 Cost-Aware Architecture covers this side of the ledger directly.
+  </Step>
+  <Step title="Check whether the decision is reversible">
+    Standing up a cache you didn't need is a quiet decommission later. Sharding a database you didn't need to shard, or choosing a queue whose delivery semantics the rest of the system now depends on, is a migration project. Weight the caution in proportion to how hard the choice would be to undo.
+  </Step>
+  <Step title="Name who owns it operationally">
+    Every new component needs someone who knows how it fails and gets paged when it does. If no one on the team can currently answer what to do when it goes down, that is itself a cost of adding it, separate from whether it is architecturally justified.
+  </Step>
+</Steps>
+
+<Callout type="tip">
+A cheap test for whether a proposed component is premature: ask what specific number, if it changed, would make you remove the component again. If nobody can answer that, the component was never really justified by a number in the first place — it was justified by a feeling, and it will stay in the system indefinitely because there is no threshold at which anyone agreed to reconsider it.
+</Callout>
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Hold off adding the component when"
+  againstTitle="Add it now when"
+  forItems={[
+    "No current metric names the problem it would solve — the justification is a prediction about the future, not a measurement of the present",
+    "A cheaper, smaller fix for the same symptom hasn't been tried yet, such as an index, a query rewrite, or a bigger instance",
+    "The team cannot yet name who would operate it or what they'd do when it fails at 3am",
+    "The decision is hard to reverse — sharding, a message broker's delivery guarantees, a cross-region topology — and the current numbers don't demand it yet",
+    "The stated reason is that it will probably be needed eventually, with no threshold attached at which eventually has arrived",
+  ]}
+  againstItems={[
+    "A specific metric has already crossed a stated threshold, not merely trended toward one",
+    "The cheaper fixes have been tried and the number is still failing",
+    "The cost of waiting until it becomes an incident is worse than the cost of building it slightly early — a payment path double-charging under load is not a good place to discover a queue was needed",
+    "The team can name who owns it and has a plan for its failure modes before it ships, not after",
+    "The change is reversible enough, or contained enough in blast radius, that being a little early costs little if the prediction turns out wrong",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Restraint reads as seniority when it's explicit. Saying "I would start with a single database instance and add a read replica once read latency or replica lag data tells me to, not before" is a stronger answer than opening with a five-box distributed architecture for a prompt that gave no numbers suggesting it's needed — interviewers read premature complexity as a warning sign as often as they read underdesign that way, because it suggests pattern-matching to a scale that was never stated rather than reasoning from the numbers in the room.
 
-<KeyTakeaways items={["", "", ""]} />
+The strongest version of this answer names the threshold, not just the restraint: "I'd add a cache once the database is the bottleneck at the read/write ratio we discussed, and I'd know that from p99 read latency crossing our target, not from assuming it will." That sentence does the work of showing you know both when to add something and, just as importantly, what evidence you're waiting for before you do.
+
+<KeyTakeaways
+  items={[
+    "Every piece of infrastructure costs something starting the moment it exists — operational surface, on-call burden, a new failure mode — regardless of whether it is earning its keep yet",
+    "'We might need it later' is not a number and does not resolve into a decision about when to act; a real justification names a metric and a threshold",
+    "Check for a cheaper fix before reaching for the heaviest tool — an index or a bigger instance solves more problems than people credit before a cache or a shard gets proposed",
+    "Reversibility should scale the caution: a cache is easy to remove later, a sharding scheme or a queue's delivery semantics are not",
+    "Waiting until an outage forces the decision is the opposite failure mode, and it is the more expensive one — the goal is measured, threshold-driven timing, not blanket delay",
+    "A good test for premature infrastructure: if nobody can name the number that would justify removing it again, it was never justified by a number in the first place",
+  ]}
+/>

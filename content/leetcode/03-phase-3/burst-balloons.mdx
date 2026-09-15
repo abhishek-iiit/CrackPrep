@@ -1,0 +1,114 @@
+---
+title: "Burst Balloons"
+number: "03.30"
+summary: "Burst order changes neighbor products — interval DP picks the last balloon k inside (left, right) so left and right subproblems stay independent."
+status: published
+free: true
+difficulty: deep
+estMinutes: 20
+tags: [dynamic-programming, interval-dp]
+updated: "2026-09-15"
+---
+
+## Last burst, not first
+
+You have balloons with integers `nums[i]`. Bursting balloon `i` yields `nums[i-1] * nums[i] * nums[i+1]` (out-of-range neighbors count as 1). Maximize total coins. You may burst all balloons.
+
+Bursting **first** leaves a hole — neighbors change for every later decision, and the remaining indices shift. The fix is the classic interval-DP reframe: **`dp[left][right]` = max coins from bursting all balloons strictly between `left` and `right`**, treating `left` and `right` as sentinels that are never burst. Choose the **last** balloon `k` to burst inside `(left, right)`; when `k` goes last, its neighbors are exactly `left` and `right` — boundaries stay fixed.
+
+Pad `nums` with `[1, ...nums, 1]` so edge balloons always have multiplier 1 outside.
+
+The traps: thinking left-to-right linear DP; using `k` as first burst and breaking independence; forgetting padding so index `-1` logic gets messy.
+
+## Interval DP by increasing length
+
+For each interval length ≥ 3 (at least one balloon inside), for each `(left, right)`, try every `k` in `(left, right)` as last burst:
+
+`dp[left][right] = max over k of dp[left][k] + dp[k][right] + balloons[left]*balloons[k]*balloons[right]`.
+
+Answer: `dp[0][n-1]` on padded array.
+
+<Steps>
+<Step title="Pad nums with 1 at both ends">
+Virtual balloons never burst; they anchor products.
+</Step>
+<Step title="Iterate interval length from 3 to n">
+Shorter intervals must be solved before longer ones.
+</Step>
+<Step title="For each (left, right), try last burst k">
+Combine sub-interval results plus triple product.
+</Step>
+<Step title="Return dp[0][paddedLength-1]">
+All original balloons lie strictly inside sentinels.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function maxCoins(nums: number[]): number {
+  const balloons = [1, ...nums, 1];
+  const n = balloons.length;
+  const dp = Array.from({ length: n }, () => new Array(n).fill(0));
+
+  for (let len = 3; len <= n; len++) {
+    for (let left = 0; left <= n - len; left++) {
+      const right = left + len - 1;
+      for (let k = left + 1; k < right; k++) {
+        dp[left][right] = Math.max(
+          dp[left][right],
+          dp[left][k] +
+            dp[k][right] +
+            balloons[left] * balloons[k] * balloons[right]
+        );
+      }
+    }
+  }
+
+  return dp[0][n - 1];
+}
+```
+
+Time **O(n³)** for n balloons — three nested loops over length, left, and split k. Space **O(n²)** for the table.
+
+<Callout type="gotcha">
+Thinking "burst k first" merges subproblems with shifting indices. "Burst k **last** inside the interval" is what keeps `(left, right)` boundaries fixed while coins from sub-intervals add independently.
+</Callout>
+
+<Tradeoff
+  forTitle="Interval DP (last burst) when"
+  againstTitle="Simulate every burst order when"
+  forItems={[
+    "n ≤ 500 — O(n³) is intended; factorial burst orders are impossible",
+    "Neighbor product depends on who remains adjacent — order matters exponentially",
+    "Padding with 1 avoids edge-case branches in the recurrence",
+    "Same interval-DP family as matrix chain multiplication and palindrome partitioning splits",
+    "Interview tests whether you can invert the decision ('last' vs 'first') under pressure",
+  ]}
+  againstItems={[
+    "n ≤ 10 — brute permutation confirms the DP answer while learning",
+    "Linear DP applies when burst order does not change neighbor sets — not this problem",
+    "Only need minimum coins — same recurrence with min instead of max",
+    "Balloons fixed on a circle — wraparound breaks simple interval DP without duplication",
+    "Greedy 'burst smallest first' — wrong and fast to disprove with counterexample",
+  ]}
+/>
+
+## In an interview
+
+Example: `[3,1,5,8]` → 167. Explain padding: `[1,3,1,5,8,1]`. Work one small interval by hand showing why last-burst k splits cleanly.
+
+State subproblem `dp[l][r]` = max coins inside open interval before coding triple loop order (length outermost).
+
+Follow-ups: return burst order, circular array, memoized recursion vs tabulation. Bug: bursting first and mutating the array — indices collapse mid-DP.
+
+<KeyTakeaways
+  items={[
+    "Burst Balloons is interval DP — dp[left][right] maximizes coins from balloons strictly between sentinels",
+    "Choose the last balloon k burst in (left, right); subproblems dp[left][k] and dp[k][right] stay independent",
+    "Pad nums with 1 at both ends so edge bursts use neighbor product ×1 without special cases",
+    "O(n³) time, O(n²) space — three loops over interval length, left boundary, and split k",
+    "First-burst thinking breaks index management; last-burst thinking preserves fixed boundaries",
+    "Same inversion trick as matrix-chain multiplication — where you split last, not first",
+  ]}
+/>

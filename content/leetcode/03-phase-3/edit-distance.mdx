@@ -1,0 +1,106 @@
+---
+title: "Edit Distance"
+number: "03.27"
+summary: "Insert, delete, and replace each cost one — the minimum edits to match two strings is classic 2D DP where dp[i][j] is the cost for the first i and j characters."
+status: published
+free: true
+difficulty: core
+estMinutes: 16
+tags: [dynamic-programming, string]
+updated: "2026-09-15"
+---
+
+## Three operations, one table
+
+Given strings `word1` and `word2`, convert `word1` into `word2` using insert, delete, and replace — each costing 1. Return the minimum number of operations.
+
+Trying all edit sequences is exponential. The subproblem that repeats: **minimum cost to align the first `i` characters of `word1` with the first `j` of `word2`**. Every optimal edit sequence ends with either a match, an insert into `word1`, a delete from `word1`, or a replace — giving a recurrence with only three neighbors in the table.
+
+The traps: empty string base cases (`dp[i][0] = i` deletes, `dp[0][j] = j` inserts); off-by-one indexing between table and string; using LCS logic when replace is allowed at cost 1.
+
+## The dp recurrence
+
+`dp[i][j]` = min edits for prefixes `word1[0..i-1]` and `word2[0..j-1]`.
+
+- If `word1[i-1] === word2[j-1]`: `dp[i][j] = dp[i-1][j-1]`.
+- Else: `1 + min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1])` for delete, insert, replace.
+
+Fill row-major or with two rolling rows. Answer at `dp[m][n]`.
+
+<Steps>
+<Step title="Initialize first row and column">
+Transforming to/from empty string costs full prefix length.
+</Step>
+<Step title="For each (i,j), apply match or min of three edits">
+Match skips cost; mismatch tries all three operations.
+</Step>
+<Step title="Return dp[m][n]">
+No backtrack needed unless interviewer asks for the edit script.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function minDistance(word1: string, word2: string): number {
+  const m = word1.length;
+  const n = word2.length;
+  const dp = Array.from({ length: m + 1 }, (_, i) =>
+    Array.from({ length: n + 1 }, (_, j) => (i === 0 ? j : j === 0 ? i : 0))
+  );
+
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      if (word1[i - 1] === word2[j - 1]) {
+        dp[i][j] = dp[i - 1][j - 1];
+      } else {
+        dp[i][j] =
+          1 +
+          Math.min(dp[i - 1][j], dp[i][j - 1], dp[i - 1][j - 1]);
+      }
+    }
+  }
+
+  return dp[m][n];
+}
+```
+
+Time **O(m · n)**. Space **O(m · n)** full table, or **O(min(m,n))** with two rows.
+
+<Tradeoff
+  forTitle="2D DP table when"
+  againstTitle="Recursive DFS + memo when"
+  forItems={[
+    "Both strings up to 500 characters — O(mn) is the intended solution",
+    "You need the distance only, not the operation sequence — bottom-up is straightforward",
+    "Same framework extends to 03.28 Distinct Subsequences and 03.29 Interleaving String",
+    "Interviewers expect the insert/delete/replace recurrence without hesitation",
+    "Rolling array optimization is an easy follow-up if space is questioned",
+  ]}
+  againstItems={[
+    "One string is very short — O(mn) still fine but recursion with memo is quicker to write",
+    "Only delete allowed (no insert/replace) — reduces to LCS variant (01.19 Longest Common Subsequence family)",
+    "Need actual edit script — backtrack from dp[m][n] through the table",
+    "Strings share long common suffixes — trim ends before DP to shrink table",
+    "03.31 Regular Expression Matching adds pattern matching — different recurrence entirely",
+  ]}
+/>
+
+## In an interview
+
+Example: `"horse"` → `"ros"`: replace h→r, delete r, delete s → 3. Confirm all three ops cost 1 and either string may start empty.
+
+State subproblem before coding: `dp[i][j]` = min edits for prefixes. Walk base case row/column.
+
+Follow-ups: print operations, one operation free, only insert/delete. Bug: `dp[i][j]` indexing vs `word1[i]` (use `i-1` for last char).
+
+<KeyTakeaways
+  items={[
+    "Edit Distance is the canonical insert/delete/replace DP on two string prefixes",
+    "Base cases: dp[i][0]=i and dp[0][j]=j — empty prefix costs equal prefix length",
+    "Match transfers dp[i-1][j-1] free; mismatch adds 1 to min of delete, insert, replace predecessors",
+    "O(m·n) time; space compresses to O(min(m,n)) with two rows if only the distance is needed",
+    "01.19 Longest Common Subsequence is the no-replace cousin — do not reuse its recurrence blindly",
+    "03.28 Distinct Subsequences counts alignments; this problem minimizes edit cost — related table shape, different goal",
+  ]}
+/>

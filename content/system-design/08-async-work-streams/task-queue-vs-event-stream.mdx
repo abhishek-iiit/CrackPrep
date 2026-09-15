@@ -1,32 +1,91 @@
 ---
 title: "Task Queue Vs Event Stream"
 number: "08.02"
-summary: "Task Queue Vs Event Stream — notes in progress."
-status: draft
+summary: "Two different delivery contracts hide behind the word 'queue' — consumed-once work versus a replayable, multi-consumer log — and a rule for picking between them."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 16
+tags: [queues, streams, kafka, messaging]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Two different promises hiding behind the word "queue"
 
-What breaks without this, and the situation that forces the decision.
+Once you've decided to hand work off the request path (08.01 Delegation And Async Work), the obvious next question sounds like a technology choice — SQS or Kafka, RabbitMQ or Kinesis — but it's really a question about what promise the hand-off needs to make. Two shapes cover almost every real system, and they are not the same tool with different marketing.
 
-## How it works
+A task queue hands a unit of work to exactly one consumer and then forgets it. "Resize this image," "charge this card," "send this email" — each message is an instruction, someone claims it, does it, acknowledges it, and it's gone. An event stream instead keeps an ordered, durable log of things that happened — "order placed," "user signed up," "inventory decremented" — retained for a window and readable, independently, by as many consumers as care to read it, each at its own pace, each able to rewind and read it again.
 
-The mechanism, step by step.
+Picking the wrong one doesn't fail loudly. A task queue used where a stream was needed quietly loses the ability to add a second consumer without the first team's cooperation. A stream used where a queue was needed means every consumer has to remember not to double-process a message that, semantically, only one system was ever supposed to act on — and now they all see it.
 
-## Tradeoffs
+## What actually differs underneath
+
+The two mechanisms differ in four places, and each difference has a real consequence.
+
+**Consumption.** A task queue message is claimed by one worker and removed once acknowledged — sometimes called point-to-point or competing consumers, because multiple workers race to pull from the same queue and each message goes to exactly one of them. An event stream is log-structured: a record is appended and stays in the log; reading it doesn't remove it. Multiple consumer groups can each read the same log independently, tracking their own offset — a bookmark of how far each has read.
+
+**Ordering.** A task queue generally makes no ordering promise across the whole queue — workers pull whatever's next available, and a FIFO variant, where one exists, only orders within a narrow scope like a single group id, at a real throughput cost. An event stream partitions by key — user id, order id — and guarantees order within a partition, because a partition is read by exactly one consumer instance at a time within a group. That's a strong, cheap guarantee for anything that needs "all updates to this one entity land in the order they happened," and it's why streams, not queues, are the default when order matters.
+
+**Retention and replay.** Once a task queue message is acknowledged, it's gone. There is no "replay last week's jobs" — if you need that, you have to have logged the inputs somewhere else yourself. An event stream retains records for a configured window — hours, days, sometimes indefinitely for compacted topics — independent of whether anyone has read them yet. A new consumer that didn't exist when an event happened can still read it, and an existing consumer that shipped a bug can rewind its offset and reprocess history. That replayability is the single biggest reason to reach for a stream over a queue even when the workload looks queue-shaped at first glance.
+
+**Fan-out.** A task queue is built so exactly one worker does the work — that's the point, you don't want two workers both charging the same card. An event stream is built so many independent systems can each react to the same fact — analytics, fraud detection, the recommendation index, and the notification service can all consume "order placed" without knowing about each other or coordinating deploy schedules.
+
+| | Task queue | Event stream |
+| --- | --- | --- |
+| Shape | Point-to-point; one consumer per message | Log-structured; many independent consumer groups per record |
+| After consumption | Message is deleted or archived to a dead-letter queue | Record stays in the log until its retention window expires |
+| Ordering | Usually none, or narrow FIFO groups at a throughput cost | Guaranteed within a partition, by design |
+| Replay | Not supported — once acknowledged, it's gone | Native — rewind an offset and reprocess |
+| Adding a new consumer | Requires the producer to duplicate or re-route the message | Free — a new consumer group just starts reading from an offset |
+| Canonical technology | SQS, RabbitMQ, a `SELECT ... FOR UPDATE SKIP LOCKED` table | Kafka, Kinesis, Pulsar |
+| Failure unit | One job fails, retries, or dead-letters independently | A consumer group falls behind; the record itself is untouched |
+
+## The decision rule
+
+Ask one question first: is this message an instruction for exactly one system to carry out, or a fact that any number of systems might care about?
+
+If it's an instruction — "send this email," "transcode this video," "charge this card" — reach for a task queue. There is exactly one correct consumer, the work either completes or it doesn't, and once it's done there is nothing left to replay; a completed job has no future readers. 08.06 Postgres SKIP LOCKED Work Queue is the simplest real version of this: a table, a row per job, and `SKIP LOCKED` to let multiple workers claim rows without stepping on each other.
+
+If it's a fact — "this order was placed," "this user signed up" — default to a stream, even if today there's only one consumer, because product facts accumulate consumers over the life of a system in a way that instructions don't. Nobody adds a second worker that also wants to resize the same thumbnail, but a business event routinely gains a fraud-detection consumer, an analytics consumer, and a lifecycle-email consumer over its first year, none of which existed when the code that emits the event was written. 08.03 Event Bus For Product Events covers exactly this shape.
+
+Two secondary questions reinforce the same rule: do you need strict per-entity ordering (points at a stream, via partitioning by key), and do you ever need to reprocess history — a bug fix that requires replaying last week's events through corrected logic, or a new system that needs to bootstrap from everything that already happened (points hard at a stream; a task queue has already thrown the history away).
+
+<Callout type="gotcha">
+A stream's "at least once" delivery interacts badly with its own replay feature if consumers aren't idempotent. Replaying a range of events to fix a bug re-delivers everything in that range, including events a downstream system already acted on correctly the first time — if "order placed" triggers "charge the card" with no deduplication key, a replay for an unrelated reason can charge real customers a second time. 02.09 Retries Timeouts And Idempotency is not optional once replay is on the table; it's a precondition for using it safely.
+</Callout>
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Reach for a task queue when"
+  againstTitle="Reach for an event stream when"
+  forItems={[
+    "Exactly one system should ever act on a given message, and once it's done there's nothing to replay",
+    "You need built-in per-message retry and dead-lettering with minimal setup — most queue clients give you this for free",
+    "The workload is transactional jobs — send, resize, charge, notify — not a record of something that happened",
+    "You want consumers to compete for throughput: any free worker takes the next job, with no ordering to preserve",
+    "Operational simplicity matters and you don't need replay, multi-consumer fan-out, or long retention",
+  ]}
+  againstItems={[
+    "More than one independent system needs to react to the same fact, now or eventually, without the producer knowing who they are",
+    "You need per-entity ordering — every update to one order or one user processed in the sequence it happened",
+    "You need to replay history — backfilling a new consumer, rebuilding a derived index, or reprocessing after a bug fix",
+    "The thing being recorded is a fact about the business, not an instruction to a specific system",
+    "You can afford the operational cost of partition management, consumer-group offset tracking, and a retention policy",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Name the distinction before you're asked to justify a specific product: "the question isn't which broker, it's whether this is a job for one worker or a fact for many consumers." If a follow-up scenario turns out to need a second, unrelated consumer down the road — which interviewers love to add mid-conversation — that's the moment to say "that's exactly the sign this should have been a stream, not a queue," and show you know the mistake is expensive to walk back: retrofitting fan-out onto a queue-shaped design means teaching every existing consumer to ignore messages meant for the new one, or standing up a second delivery path from scratch.
 
-<KeyTakeaways items={["", "", ""]} />
+Be ready to say what breaks when a consumer falls behind in each model. In a task queue, a slow consumer just means jobs pile up in the one queue everyone shares. In a stream, each consumer group has its own offset, so one slow consumer doesn't block another — but it does mean that consumer's view of the world gets stale, which is precisely what 08.04 Queue Lag measures and pages on.
+
+<KeyTakeaways
+  items={[
+    "A task queue delivers a message to exactly one consumer and discards it after acknowledgment; an event stream retains an ordered log that many independent consumers can each read at their own pace",
+    "The core decision question is whether a message is an instruction for one system or a fact that multiple systems might care about, now or later",
+    "Streams guarantee order only within a partition, keyed by something like user id or order id — not across the whole topic",
+    "Replay is the stream's defining advantage: a new consumer can bootstrap from history, and a fixed bug can be reprocessed against old events",
+    "Both models are at-least-once in practice, so consumers on either side need to be idempotent, and replay on a stream makes that non-negotiable",
+    "Product facts tend to accumulate consumers over a system's life even when only one exists today, which is why business events default to a stream and single-purpose jobs default to a queue",
+  ]}
+/>

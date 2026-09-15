@@ -1,0 +1,104 @@
+---
+title: "Subsets II"
+number: "03.03"
+summary: "Duplicate values double-count subsets unless you sort and skip equal neighbors at the same recursion depth."
+status: published
+free: true
+difficulty: core
+estMinutes: 14
+tags: [backtracking, recursion, array]
+updated: "2026-09-15"
+---
+
+## Same multiset, many arrays — brute force dedup is too late
+
+Given an integer array that **may contain duplicates**, return all **unique** subsets. For `[1, 2, 2]` the answer is `[[]`, `[1]`, `[1,2]`, `[1,2,2]`, `[2]`, `[2,2]` — six subsets, not eight. Without dedup, choosing the first `2` then the second `2` and choosing them in reverse order both produce `[2,2]` as separate branches.
+
+Sorting is the setup. Once equal values sit adjacent, you can enforce: at recursion depth `d`, if `nums[i] === nums[i-1]` and you skipped picking `nums[i-1]` at this depth, skip `nums[i]` too. That rule generates each subset once without a Set at the end.
+
+## Subsets template plus skip-duplicate
+
+Same skeleton as 03.02 Subsets: push `path` at every node, loop from `start`, recurse with `i + 1`. After sorting, add inside the for-loop:
+
+`if (i > start && nums[i] === nums[i - 1]) continue;`
+
+The invariant: among equal values, you only branch on the **first unused copy** at each depth. Picking the second `2` without picking the first at this level would duplicate subsets already explored via the first `2`.
+
+<Steps>
+<Step title="Sort nums">
+  Duplicates must be adjacent for the skip rule to fire.
+</Step>
+<Step title="Push path, extend from start">
+  Identical to Subsets — every prefix is recorded.
+</Step>
+<Step title="Skip equal neighbor at same depth">
+  When `i > start` and `nums[i] === nums[i-1]`, continue. You already explored "skip this duplicate" via the previous iteration.
+</Step>
+</Steps>
+
+<Callout type="gotcha">
+The condition is `i > start`, not `i > 0`. At the root you may still pick any copy of a duplicated value — the skip only prevents choosing the second 2 when you chose not to choose the first 2 at this same depth.
+</Callout>
+
+## Solution
+
+```ts
+function subsetsWithDup(nums: number[]): number[][] {
+  nums.sort((a, b) => a - b);
+  const result: number[][] = [];
+  const path: number[] = [];
+
+  function backtrack(start: number): void {
+    result.push([...path]);
+    for (let i = start; i < nums.length; i++) {
+      if (i > start && nums[i] === nums[i - 1]) continue;
+      path.push(nums[i]);
+      backtrack(i + 1);
+      path.pop();
+    }
+  }
+
+  backtrack(0);
+  return result;
+}
+```
+
+Time **O(n × 2^n)** worst case — still exponential in n, with less constant duplication on repeated values. Space **O(n)** recursion depth, excluding output.
+
+<Tradeoff
+  forTitle="Sort-and-skip when"
+  againstTitle="Generate-then-deduplicate when"
+  forItems={[
+    "Duplicates are in the input and you must enumerate unique subsets once",
+    "You already know 03.02 Subsets and need one extra line of dedup logic",
+    "Interview time favors extending a known template over hash-set post-processing",
+    "Same pattern transfers to 02.50 Combination Sum II and 03.01 Permutations II",
+    "n is small enough that exponential output is still the bottleneck, not dedup overhead",
+  ]}
+  againstItems={[
+    "n is tiny and a Set of serialized subsets is quick to implement under pressure",
+    "Input cannot be sorted (follow-up preserves original order) — then track counts or use multiset state",
+    "You only need the count of unique subsets — DP on frequency maps replaces enumeration",
+    "Duplicates are extremely sparse — post-dedup may be simpler to reason about",
+    "Interviewer wants bitmask with duplicate-aware counting instead of backtracking",
+  ]}
+/>
+
+## In an interview
+
+Restate: duplicates allowed, unique subsets only. Walk `[1,2,2]` and show why two paths reach `[2,2]` without the skip rule.
+
+Say you will sort first, then reuse Subsets with `i > start && nums[i] === nums[i-1]` skip — one sentence that signals you know the duplicate-combination family.
+
+Follow-ups: **Combination Sum II** (each candidate once plus target), **Permutations II** (used array plus skip at depth). Bug to mention: using `i > 0` instead of `i > start`, which incorrectly kills valid subsets at the root.
+
+<KeyTakeaways
+  items={[
+    "Subsets II is Subsets plus sorted input and skip-if-equal-previous when i > start at the same recursion depth.",
+    "The skip rule prevents choosing a duplicate value when you already skipped its equal predecessor at this level.",
+    "Sorting is required for the O(n log n) setup; the search remains O(n × 2^n) worst case.",
+    "This dedup pattern is shared with Combination Sum II and Permutations II — learn it once.",
+    "Post-hoc Set dedup works on small n but hides the structural insight interviewers want.",
+    "Condition i > start (not i > 0) preserves the right to pick the first occurrence of a duplicated value at each depth.",
+  ]}
+/>

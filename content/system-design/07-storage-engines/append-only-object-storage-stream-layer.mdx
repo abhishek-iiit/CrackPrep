@@ -1,32 +1,114 @@
 ---
 title: "Append-Only Object Storage Stream Layer"
 number: "07.18"
-summary: "Append-Only Object Storage Stream Layer — notes in progress."
-status: draft
+summary: "Storage nodes treat disks as append-only streams of immutable chunks so a PUT is sequential I/O, and reclaiming space becomes compaction and garbage collection — not in-place overwrite."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: deep
+estMinutes: 18
+tags: [object-storage, append-only, streams, storage-engines]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Random overwrites are how disks get slow; object PUTs should not be random overwrites
 
-What breaks without this, and the situation that forces the decision.
+A storage node that implements `PUT` as "open the file for this object and rewrite it" inherits every problem 07.01 Storage Engine Design Constraints and 07.07 Log-Structured Storage already named: small writes become scattered I/O, flash pays garbage-collection amplification inside the device, and concurrent updates to the "same" object need locks. Object stores mostly refuse that model. An object version is immutable once committed. A new PUT creates new bytes; the old version remains until lifecycle or a delete marker makes it reclaimable. On disk, that philosophy becomes an **append-only stream layer**: the node allocates space by appending to large sequential files (or a log-structured block store), records where each chunk landed, and never edits a committed chunk in place.
 
-## How it works
+07.14 S3-Style Object Storage Architecture put "storage nodes" at the bottom of the diagram. This lesson is what those nodes do with a disk.
 
-The mechanism, step by step.
+## Streams, chunks, and indexes
 
-## Tradeoffs
+Think of each storage node as owning a set of **streams** (sometimes called volumes, extents, or fragment files) — large, append-only byte sequences on local disk:
+
+```text
+stream S7 (append-only)
+
+  [chunk A: obj version V1, off 0, len 2MB]
+  [chunk B: obj version V2, off 2MB, len 900KB]
+  [chunk C: multipart part 3, ...]
+  ...
+  [live end -->]
+```
+
+- **Chunk** — a contiguous region written in one append: an entire small object, a part of a multipart upload, or a fixed-size slab that will be referenced by an indirection table.
+- **Stream** — the file (or device region) being appended to; rotated when it hits a size or time limit so failure domains and compaction units stay bounded.
+- **Per-object index (local)** — on the storage node, a map from `(partition, object-version id)` or chunk id to `(stream id, offset, length, checksum)`. This is not the global metadata DB (07.17); it is the node's own answer to "where did I put the bytes for this replica?" Global metadata points at the partition; the node resolves the rest locally.
+
+Reads become: look up the local index, then `pread` the byte range (or reconstruct from erasure fragments). Writes become: append, fsync the stream (or group-commit several appends), update the local index, acknowledge. The append is sequential. The index update is small and can itself be log-structured.
+
+## The write path on a storage node
+
+<Steps>
+  <Step title="Accept a write RPC for a chunk">
+    The frontend or primary streams bytes with an expected checksum (07.20 End-To-End Checksums). The node verifies length and checksum as data arrives when possible, or at the end before durability.
+  </Step>
+  <Step title="Append to the active stream">
+    Bytes go to the tail of the current stream file. No seeking to an old object's region. If the active stream is full, seal it and open a new one before continuing.
+  </Step>
+  <Step title="Group-commit durability">
+    Many concurrent PUTs share an fsync of the stream tail — the same amortization idea as a WAL group commit in 03.08 Database WAL And Recovery. Durable write rate is then bounded by fsync batches times batch size, not by one fsync per object, for small objects.
+  </Step>
+  <Step title="Publish the local index entry">
+    Record stream, offset, length, checksum, and owning object-version id. Until this is durable, a crash must not acknowledge the chunk upward. Some designs put the index in a small embedded engine; others append index records to a separate metadata stream and rebuild on restart.
+  </Step>
+  <Step title="Acknowledge to the control path">
+    Replication or erasure-coding logic (07.19) waits for enough nodes to acknowledge before the global metadata commit runs. The stream layer's job ends at "this node will not forget these bytes across crash."
+  </Step>
+</Steps>
+
+## Reclamation: the bill for append-only
+
+Deletes and overwrites do not punch holes in the middle of a stream on the hot path. They mark chunk references dead in the local index (and eventually in global metadata). Live data fraction in old streams falls. A **compaction** or **garbage-collection** process copies live chunks into new streams, updates indexes, and deletes sealed streams that no longer contain anything live.
+
+That process is the object-store cousin of LSM compaction (07.09, 07.12): deferred work, background bandwidth, and a failure mode where GC falls behind and free space appears to vanish even though logical data size is flat. Operators see "disk 95% full" while the metadata DB insists the bucket holds less; the missing free space is stranded in streams awaiting compaction.
+
+| Pressure | What you tune |
+| --- | --- |
+| Small-object PUT rate | Active stream count, group-commit window, index flush policy |
+| Free space | GC aggressiveness, sealed-stream thresholds, fragmentation targets |
+| Read latency after GC debt | Prefer not to let live data scatter across too many streams per object |
+| Restart time | How much of the local index is checkpointed versus rebuilt from stream headers |
+
+<Callout type="note">
+Erasure-coded fragments are still append-only chunks; they just encode slices of the object rather than full replicas. The stream layer does not need to know the coding scheme beyond "store this opaque fragment with this id." Reconstruction is a read-time concern for the durability layer above.
+</Callout>
+
+## What this layer deliberately does not do
+
+It does not implement buckets, LIST, or ACLs — that is metadata. It does not choose which nodes hold copies — that is the partition map (07.16). It does not provide POSIX rename or byte-range overwrite of an existing object version as a first-class mutable file. If a client needs to "edit" an object, the product uploads a new version or performs a server-side copy into a new key. That restriction is what keeps the disk path simple enough to scale.
+
+Byte-range **reads** are encouraged; byte-range **writes** into an existing version are usually not. Partial updates that must appear atomic become "write new chunks + metadata swap," not "overwrite bytes 1–100 in place."
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Use an append-only stream layer when"
+  againstTitle="Prefer mutable files or a block store when"
+  forItems={[
+    "The API already treats object versions as immutable and overwrite means a new version",
+    "You need sequential write throughput and predictable fsync batching under many small PUTs",
+    "You can run background GC/compaction and provision disk headroom for it",
+    "Local indexes plus sealed streams make crash recovery and scrubbing tractable",
+    "Erasure coding or multi-replica placement sits cleanly on opaque chunk identifiers",
+  ]}
+  againstItems={[
+    "Workloads require frequent in-place mutation of large files (databases on block storage, not object versions)",
+    "You cannot spare background I/O for GC and would rather pay in-place update complexity",
+    "Object counts and churn are so low that ordinary files on a filesystem are operationally enough",
+    "Strict latency SLOs forbid compaction interference and you lack isolation between GC and client I/O",
+    "The team has no appetite for dual indexes (global metadata + per-node chunk maps)",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Frame it as the data-plane twin of log-structured storage: "storage nodes append chunks to sealed streams, index by offset, and reclaim with GC — PUTs never overwrite live bytes." Tie commit order upward: local append durable, then replica quorum, then global metadata. Name the failure mode as GC debt presenting as mysterious disk full, the same way LSM compaction debt presents as write stalls.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "An append-only stream layer turns object PUTs into sequential appends of immutable chunks instead of in-place file overwrites",
+    "Each storage node keeps a local chunk index from object-version or chunk id to stream, offset, length, and checksum",
+    "Group commit amortizes fsync across concurrent small objects the same way a WAL batches durability",
+    "Deletes and overwrites free space only after GC copies live chunks and drops sealed streams — deferred work, not free work",
+    "GC debt shows up as disks filling while logical data size stays flat; provision headroom and compaction bandwidth",
+    "The stream layer stores opaque bytes; namespace, LIST, and ACL decisions stay in the metadata plane",
+  ]}
+/>

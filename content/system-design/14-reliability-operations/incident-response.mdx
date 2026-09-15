@@ -1,32 +1,96 @@
 ---
 title: "Incident Response"
 number: "14.03"
-summary: "Incident Response — notes in progress."
-status: draft
+summary: "How to organize people and actions during a production outage so mitigation comes before root cause, and learning comes after the pager stops."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: intro
+estMinutes: 10
+tags: [incident-response, oncall, ops, reliability]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The outage does not care who is right
 
-What breaks without this, and the situation that forces the decision.
+When checkout is down, the highest-leverage activity is restoring user-visible service — not winning the argument about which commit caused it. Incident response is the practiced workflow that separates **mitigation** from **diagnosis**, assigns clear roles so ten people do not debug the same graph, and captures enough timeline that the post-incident review is evidence rather than memory. Teams without this muscle still recover sometimes; they recover slower, thrash harder, and repeat the same outage six weeks later.
 
-## How it works
+## Roles that keep the room coherent
 
-The mechanism, step by step.
+Even a two-person on-call benefits from naming hats. At larger scale they become mandatory.
 
-## Tradeoffs
+- **Incident commander (IC)** — owns decisions, communication cadence, and priority. Does not disappear into a stack trace.
+- **Operations / technical lead** — drives mitigation and diagnosis hands-on.
+- **Communications** — updates status page, support, and stakeholders on a clock (every 15–30 minutes is a common cadence), even when the update is "still investigating."
+- **Scribe** — records timeline: alert time, actions, hypotheses discarded. This is the skeleton of the postmortem.
+
+Handing off IC when fatigued is a feature. A six-hour incident with one person holding IC and also SSHing into hosts is how bad mitigations ship.
+
+## A response loop
+
+<Steps>
+  <Step title="Detect and declare">
+    Page from SLO burn or symptom alerts (14.02), not from raw CPU. Declare an incident explicitly — severity, IC, channel — so lurkers know the official thread.
+  </Step>
+  <Step title="Assess user impact">
+    What is broken, for whom, since when? Dashboards and synthetic checks first; avoid deep code dives until blast radius is sketched.
+  </Step>
+  <Step title="Mitigate before you explain">
+    Rollback, failover, shed load (02.13), disable a flag, increase capacity, divert traffic. Prefer reversible actions. Parallelize diagnosis only after mitigation is in flight or blocked.
+  </Step>
+  <Step title="Stabilize and monitor">
+    Confirm SLIs recover; watch for rebound (retries, cache stampedes). Keep the incident open until the user-visible symptom is gone, not until the first green deploy.
+  </Step>
+  <Step title="Close into learning">
+    Timeline, contributing factors, action items with owners — blameless in tone, specific in fixes. Track follow-ups or the ritual was theatre.
+  </Step>
+</Steps>
+
+<Callout type="warn">
+"Root cause" singular is usually a lie. Outages are chains: a latent bug, a config change, a traffic spike, a missing alert. The write-up should list contributing factors and what would have shortened detection or mitigation — not a villain.
+</Callout>
+
+## Severity and communication
+
+Predefine severities by user impact (all users / payments down versus minor degradation / single region) and map them to response expectations: who wakes up, whether executives get notified, whether external status updates are required. Under-declaring to avoid "drama" is how SEV-1s become Twitter threads before they become IC channels.
+
+Internal chat stays technical; external status stays honest and non-speculative — symptoms and next update time, not "maybe the database." Support needs a one-paragraph customer-facing summary early so they are not inventing one.
+
+## Afterward
+
+A blameless post-incident review asks what in the system and process allowed the failure, not which human to punish. Action items should be fewer and finished: add an SLO alert, make the rollback one click, fix the footgun in the deploy path (14.04). If every postmortem produces twelve aspirational tickets and zero closures, response culture is broken downstream of the outage.
+
+Game days and failure injection practice the muscle without the revenue loss. Reading runbooks once a year does not.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Declare a formal incident when"
+  againstTitle="Handle as routine on-call when"
+  forItems={[
+    "User-visible impact crosses a predefined severity threshold or SLO burn pages",
+    "Mitigation needs more than one person or crosses team boundaries",
+    "External communication or support coordination is required",
+    "The failure mode is novel and needs a recorded timeline for later learning",
+    "You are about to take a risky mitigation (failover, data repair) that needs an IC deciding",
+  ]}
+  againstItems={[
+    "Impact is below severity bar and one on-call can mitigate with a known runbook in minutes",
+    "The alert is a known noisy symptom already ticketed — fix the alert, do not page the company",
+    "Declaring would create more coordination overhead than the issue warrants",
+    "You are still in canary with auto-rollback handling the blast radius",
+    "The work is purely investigative with no ongoing user impact",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Describe incident response as mitigate-first with named roles: "I declare severity, assign IC, restore service via rollback or failover, then diagnose." Mention error budgets and observability as inputs to detection, and blameless postmortems with tracked actions as the learning loop. Interviewers often ask how you communicate under uncertainty — scheduled updates that admit what you do not know beat silence or speculation.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Incident response optimizes for restoring user-visible service first; deep root-cause analysis follows mitigation",
+    "Named roles — IC, technical lead, communications, scribe — prevent duplicated work and silent stakeholders",
+    "Declare severity from user impact, run a timed communication cadence, and keep a timeline as you go",
+    "Prefer reversible mitigations: rollback, feature flags, load shedding, failover",
+    "Post-incident reviews should be blameless, multi-factor, and produce a small set of finished action items",
+    "Practice with game days; unread runbooks and untracked follow-ups do not improve the next outage",
+  ]}
+/>

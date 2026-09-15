@@ -1,32 +1,84 @@
 ---
 title: "System Design Tradeoffs"
 number: "01.04"
-summary: "System Design Tradeoffs — notes in progress."
-status: draft
+summary: "How to name the cost of a design choice in a specific currency instead of picking a side or refusing to."
+status: published
 free: true
 difficulty: core
 estMinutes: 12
+tags: [tradeoffs, decision-making, architecture]
+updated: "2026-09-15"
 ---
 
-## The problem
+## "It depends" is not an answer, it's a refusal to price two options
 
-What breaks without this, and the situation that forces the decision.
+Nearly every real design question has the shape of a choice between two named things: SQL or NoSQL, synchronous or asynchronous, one big service or several small ones, strong consistency or eventual. There are two ways to answer badly. The first is picking a side ideologically — "microservices scale better" — which is a slogan borrowed from somewhere else, not an answer to the system in front of you. The second is refusing to pick at all: "it depends" is technically true and says nothing, because it correctly notices that a decision exists and then declines to make it. Both fail the same test: neither one names what the other option would have cost.
 
-## How it works
+The actual skill is smaller and more mechanical than either of those. Name what each option costs, in a unit someone could check, and match that cost against a requirement the system actually has. Once you've done that, the "right" answer usually falls out on its own — and when it doesn't, at least you and whoever you're talking to are disagreeing about a number instead of a feeling.
 
-The mechanism, step by step.
+## Every tradeoff spends one of a few currencies
 
-## Tradeoffs
+Almost every system design tradeoff spends latency, throughput, consistency, durability, operational complexity, developer velocity, or money — usually two of these against each other, rarely more. A few concrete ones, because the pattern is easier to see named than described:
+
+- Replicate a write synchronously and you buy durability by spending latency on every write; replicate it asynchronously and you buy the latency back, but you now carry a real, small window in which an acknowledged write can be lost if the primary dies before it replicates. 01.05 Availability Durability Consistency And Cost goes through the shape of exactly this trade.
+- Denormalize a schema and you buy read speed by spending storage and write-time complexity — every write now updates several copies of the same fact instead of one, and they can disagree if one of those writes fails partway through.
+- Put a queue in front of a slow downstream and you buy the ability to absorb a burst without falling over, by spending end-to-end latency and a new piece of the system that has to be watched — a queue that backs up silently is exactly as dangerous as no queue at all, which is what 08.04 Queue Lag is about.
+- Split a monolith into services and you buy independent deployability and fault isolation by spending what used to be a free function call as a network call, with its own timeout, retry, and failure mode. 01.09 Monolith Vs Microservices covers where that line is worth drawing.
+
+None of these trades has a universal winner. Each one has a currency, and the only question worth arguing about is whether your system has a surplus of the thing being spent and a shortage of the thing being bought.
+
+## Naming a tradeoff out loud, in five moves
+
+<Steps>
+  <Step title="State both options honestly">
+    Not a strawman version of the one you're not choosing. "Async is unreliable" is not a fair description of asynchronous replication; "the write can be lost in a window measured in milliseconds if the primary fails at exactly the wrong moment" is.
+  </Step>
+  <Step title="Name what each costs, in units">
+    Milliseconds, dollars, an extra on-call rotation, a class of bug that becomes possible. Not "it's more complex" — say what the complexity is: one more component to monitor, one more failure mode to write a runbook for.
+  </Step>
+  <Step title="Match the cost to an actual requirement">
+    A cost only matters if it presses against something the system needs, from 01.03 Non-Functional Requirements. If nobody has stated a latency target, "this costs 20ms" is not yet a reason to reject anything — go get the number, or state an assumption for it.
+  </Step>
+  <Step title="Name the threshold that flips the decision">
+    Be specific enough that a future version of this conversation could just check a number instead of relitigating a feeling: "if write volume crosses 5,000/s, synchronous replication stops being viable and we'd revisit this."
+  </Step>
+  <Step title="Decide once, out loud, and move on">
+    A tradeoff that gets reopened every few minutes without new information is the stalling pattern from 01.01 Requirements Clarification wearing a different outfit. Deciding does not mean the decision is permanent — it means it stands until the threshold from the step above is actually crossed.
+  </Step>
+</Steps>
+
+<Callout type="warn">
+Watch for the false dichotomy hiding inside a "which one" question. Real systems frequently split the choice by data rather than making one global call — synchronous, strongly consistent writes for the ledger entry that must never be wrong, asynchronous best-effort writes for the activity log next to it, inside the same product. "Both, for different data" is a legitimate answer to a tradeoff question and often the correct one; it is not the same thing as refusing to choose.
+</Callout>
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Keep weighing the tradeoff when"
+  againstTitle="Commit and move on when"
+  forItems={[
+    "The number that would decide it is unknown but cheap to get — going and getting it beats guessing",
+    "The two options lead to genuinely different topologies, not different settings on the same one",
+    "The decision is expensive to reverse later — a partition key, a consistency model, a primary key format — where undoing it later means a migration, not a config change",
+    "Two real requirements are in tension and nobody has said out loud which one wins, so the 'tradeoff' is actually an unresolved disagreement between stakeholders wearing a technical costume",
+  ]}
+  againstItems={[
+    "You can name the currency and the number that decides it, even if that number is an explicit, written assumption",
+    "The decision is cheap to reverse — adding a cache, swapping a queue implementation, tuning a timeout",
+    "Every option on the table satisfies the current requirements equally, and the differences only appear at a scale you have no evidence you'll reach",
+    "Further analysis costs more time than the downside of being wrong is worth, and that downside is bounded and known",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Say the pattern out loud, not just the conclusion: "I'm choosing synchronous replication over asynchronous here because this is the order ledger and losing a write is worse than the extra 15ms it costs on every write — I'd make the opposite call for the activity feed two boxes over." That sentence does three things at once: names both options fairly, prices the one you didn't pick, and shows the decision was made on purpose rather than by default. If new information changes the number — the interviewer tells you write volume is 100x what you assumed — say plainly that it flips your answer, and which way. Reversing a decision because a number changed is not indecision; refusing to reverse it is.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "A tradeoff answered with a slogan or with 'it depends' both fail the same test: neither names what the option not chosen would have cost",
+    "Every system design tradeoff spends one of a small set of currencies — latency, throughput, consistency, durability, operational complexity, developer velocity, or money",
+    "A cost only matters once it presses against a stated requirement; an unpriced cost with no requirement to press against is not yet a reason to decide anything",
+    "Naming the specific threshold that would flip a decision turns a future re-argument into a number check",
+    "Real systems often split a tradeoff by data rather than choosing one global answer, and that split is a legitimate decision, not a dodge",
+    "Deciding once and moving on does not mean the decision is permanent — it means it holds until the threshold that was named up front is actually crossed",
+  ]}
+/>

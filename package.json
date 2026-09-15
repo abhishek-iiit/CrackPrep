@@ -4,6 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "predev": "npm run content:index",
     "prebuild": "npm run content:index",
     "build": "next build",
     "start": "next start",
@@ -13,6 +14,7 @@
     "test:watch": "vitest",
     "test:e2e": "playwright test",
     "content:generate": "tsx scripts/generate-content.ts",
+    "content:planned": "tsx scripts/generate-planned-courses.ts",
     "content:index": "tsx scripts/build-search-index.ts",
     "verify": "npm run lint && npm run typecheck && npm run test && npm run build",
     "verify:all": "npm run lint && npm run typecheck && npm run test && npm run build && npm run test:e2e"

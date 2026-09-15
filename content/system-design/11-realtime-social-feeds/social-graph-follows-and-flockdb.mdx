@@ -1,32 +1,118 @@
 ---
 title: "Social Graph Follows And FlockDB"
 number: "11.06"
-summary: "Social Graph Follows And FlockDB — notes in progress."
-status: draft
+summary: "Follow graphs are huge, shallow, and direction-sensitive — FlockDB-style edge stores optimize adjacency lists and fan-out lookups, not deep multi-hop graph queries."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 16
+tags: [social-graph, flockdb, follows, edges]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Follow is not a generic graph problem
 
-What breaks without this, and the situation that forces the decision.
+Social products talk about "the graph," which tempts a general-purpose graph database and recursive traversal queries. The dominant workload for Twitter-style follows is narrower: **store directed edges**, **list neighbors quickly**, and **intersect or page adjacency lists** for feed generation and "who to follow." Multi-hop "friends of friends" exists, but the hot path is one-hop adjacency at very high QPS with extremely skewed degree distributions — a few accounts have tens of millions of followers; most have dozens.
 
-## How it works
+FlockDB was Twitter's open-source answer to that shape: a distributed store for adjacency lists, backed by MySQL, optimized for rapid edge writes and neighborhood queries rather than arbitrary Cypher-style walks. Whether or not you run FlockDB itself, the design lessons travel — and they explain why 04.04 Graph Database Decision Boundary often says "you may not need a graph database" for follows.
 
-The mechanism, step by step.
+## What the edge must record
 
-## Tradeoffs
+A follow edge is at least:
+
+```text
+(source_id, destination_id, state, created_at, …)
+```
+
+Direction is load-bearing. "Alice follows Bob" is one edge; it does not imply Bob follows Alice. Products also need **outbound** lists (who I follow — fan-in for my home timeline pull) and **inbound** lists (who follows me — fan-out targets when I publish). Dual indexing — or storing two physical rows / two lists per logical follow — is normal because both directions are queried constantly.
+
+States beyond "active" show up early: pending (invite networks), muted, blocked. Block is often a separate edge type with higher precedence in delivery rules (11.05). Soft states beat hard deletes when undo and audit matter; hard deletes still happen for GDPR-style erasure.
+
+### Degree skew is the defining constraint
+
+Average follows per user might be hundreds; p99 celebrities have millions of followers. Any design that "load all followers into memory on publish" without a hybrid strategy fails on the first viral account. Storage layouts must page inbound lists (keyset over follower id or edge id), and feed systems must special-case high-degree nodes (11.07).
+
+## FlockDB's idea: adjacency lists as the product
+
+FlockDB modeled graphs as **keyed lists of edges** with operations like add/remove edge, and query neighborhoods with pagination and simple set operations (intersection for "mutual follows," for example). Persistence sat on sharded MySQL: edges are rows, but the API and clustering were graph-shaped. That combination mattered historically — it reused operational knowledge of MySQL while presenting an edge-centric API to application servers.
+
+Properties to copy even in a greenfield design:
+
+1. **Shard by node id** so one user's outbound (or inbound) list lives mostly on one shard — list queries do not scatter-gather the whole cluster.
+2. **Page everything.** Never assume an inbound list fits in one RPC.
+3. **Optimize the one-hop hot path** — get followers, get followings, does edge exist — over recursive traversals.
+4. **Accept dual-write or dual-index cost** for both directions of a directed edge.
+5. **Keep business logic (feed assembly, ranking) out of the graph store** — the edge store returns ids; other systems hydrate posts.
+
+<Callout type="tip">
+If the interviewer asks "Neo4j or Neptune?", answer with the access pattern: "One-hop adjacency and set ops at millions of QPS with crazy skew — an edge store or sharded adjacency tables. Deep traversal and graph algorithms — then a graph DB or offline analytics. Follow alone rarely needs the second." That sentence is 04.04 applied to social.
+</Callout>
+
+## Lookup patterns that drive the schema
+
+| Query | Used for | Storage implication |
+| --- | --- | --- |
+| List followings(user) | Build pull-timeline inputs | Outbound adjacency, paged by time or id |
+| List followers(user) | Push fan-out targets | Inbound adjacency, must handle celebrity size |
+| Has_edge(a, b) | Follow button state, authz | Point lookup / bloom + exact (optional) |
+| Intersect(followings(a), followings(b)) | Mutuals, social proof | Efficient set intersection on sorted lists |
+| Count(followers) | Profile display | Cached counter; do not COUNT(*) the hot list live |
+
+Sorted adjacency (by edge id or created_at) makes intersection and pagination cheap. Random heaps of unsorted edges make every mutuals query a memory tax.
+
+## Write path and consistency
+
+Follow/unfollow is usually:
+
+1. Authz checks (not blocked, rate limits, spam).
+2. Insert or tombstone the edge in the graph store (both directions).
+3. Update cached counts asynchronously if exact counts are not required on the write ACK.
+4. Enqueue timeline backfill or cleanup jobs (add recent posts to the follower's timeline on new follow; optional).
+
+Strong consistency on the edge matters for "I just followed — why empty timeline?" UX; cross-region immediate consistency matters less than not losing the edge. Idempotent writes (`PUT` semantics on `(src, dst, type)`) save you when clients double-tap.
+
+Secondary indexes for "suggested follow" and graphML-style features belong in offline or nearline pipelines — not on the critical follow write path.
+
+## When a plain SQL edges table is enough
+
+Early and mid-scale systems ship `follows(follower_id, followee_id, created_at)` with indexes on both columns and survive a long time. Move toward a dedicated edge service / FlockDB-like layer when:
+
+- shard boundaries become mandatory and a single primary cannot hold edges plus posts,
+- neighborhood QPS needs its own SLO separate from the post OLTP database,
+- set intersection and paging need first-class APIs rather than ad-hoc SQL,
+- celebrity inbound lists need specialized storage (cold/hot tiering, separate clusters).
+
+Until then, premature graph infrastructure is another system to page.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Use a FlockDB-style edge store when"
+  againstTitle="Keep follows in the primary OLTP when"
+  forItems={[
+    "One-hop list and intersection queries need their own horizontal scale separate from posts and media metadata",
+    "Degree skew forces paged inbound lists and possibly dedicated clusters for mega-nodes",
+    "Application teams need a clear edge API (add, remove, neighbors, intersect) rather than bespoke joins in every service",
+    "Both directions of directed edges are queried at high QPS and dual indexing is worth a purpose-built layout",
+    "You must isolate graph write load from the post write path so a follow storm cannot lock post inserts",
+  ]}
+  againstItems={[
+    "Edge volume and QPS still fit comfortably in the primary relational database with dual indexes",
+    "The product needs deep multi-hop traversals as the primary feature — a general graph DB or analytics engine fits better than an adjacency-list store",
+    "Operational headcount cannot support another sharded datastore beside the main OLTP",
+    "Follow is secondary (e.g. small private communities) and read-time joins already meet latency targets",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Define directed edges and both adjacency directions before naming a product. State skew: "most users small, some enormous — page followers, hybrid fan-out." Propose sharded adjacency or a FlockDB-like service for one-hop ops; reserve general graph databases for deep traversal requirements you have actually been given. Tie edges to feed generation: outbound lists feed pull; inbound lists feed push (11.07). Mention idempotent follow writes and cached counts so you are not doing live `COUNT` on celebrity inbound lists.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Social follow graphs are directed, shallow, and skew-heavy — optimize one-hop adjacency and paging, not recursive traversal by default",
+    "You almost always need both outbound (followings) and inbound (followers) indexes for timeline pull and publish fan-out",
+    "FlockDB exemplified an adjacency-list edge store on sharded MySQL: graph API, relational storage, hot-path neighborhood queries",
+    "Celebrity inbound lists must be paged and often special-cased; loading all followers on publish does not scale",
+    "A plain SQL edges table is enough until edge QPS, sharding, or set-intersection needs force a dedicated edge service",
+    "Choose a general graph database when deep multi-hop queries are the product; choose an edge store when follows and fan-out lists are",
+  ]}
+/>

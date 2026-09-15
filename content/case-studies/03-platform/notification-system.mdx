@@ -1,0 +1,165 @@
+---
+title: "Notification System"
+number: "03.01"
+summary: "Fan-out, channel routing, and delivery guarantees when every product event can become a push to millions of devices."
+status: published
+free: true
+difficulty: deep
+estMinutes: 20
+tags: [notifications, fan-out, queues]
+updated: "2026-09-15"
+---
+
+## Every product event is a potential thundering herd
+
+"Design a notification system" is not asking you to send one email. It is asking whether you can take an arbitrary event — a new follower, a price drop, a live stream starting — and reliably deliver it to the right users on the right channel without melting the database or the mobile push gateway. Interviewers use this prompt to test async architecture, fan-out at scale, idempotency, and the gap between "we accepted the request" and "the phone actually buzzed."
+
+The tension is volume asymmetry. A celebrity posts once; ten million followers might need a push within seconds. The write that creates the event is one row; the work it triggers is millions of lookups, preference checks, and third-party API calls. Get that wrong and you either block the posting path — unacceptable — or you enqueue work you cannot drain — also unacceptable, but it fails quietly until p99 delivery latency is measured in hours.
+
+## Clarify: one event, many channels, many recipients
+
+Batch your questions. A workable script:
+
+> "I'll design multi-channel delivery — push, email, SMS, and in-app — for a consumer app. Producers are internal services emitting events like 'new message' or 'order shipped.' Out of scope: building the mobile apps themselves, content moderation of notification copy, and A/B testing frameworks. Tell me if you want any of those in."
+
+**Functional requirements** — name the API surface:
+
+- A **producer service** submits a notification request: event type, payload, target (single user, user list, or topic like `team:warriors-fans`).
+- The system **routes** to enabled channels per user preference (push on, email off).
+- Users can **read and mark in-app notifications** as seen; push/email/SMS are fire-and-forget from the app's perspective.
+- **Device registration**: mobile clients register FCM/APNs tokens; tokens expire and must be refreshed.
+
+**Non-functional requirements** — ask for thresholds:
+
+- **Delivery latency**: "A direct message should reach push in under 30 seconds at p99; marketing blasts can be minutes." That split changes priority queues.
+- **Durability**: at-least-once is the realistic bar for push — duplicates are handled client-side; email/SMS billing makes duplicates costly, so dedup matters more there.
+- **Availability**: accepting a notification request should succeed even if a push provider is down — queue and retry.
+- **Scale**: daily active users, notifications per user per day, and whether broadcast events exist.
+
+**Out of scope** unless asked: notification templates with i18n, rich media attachments, two-way SMS replies.
+
+### Actors and read/write ratio
+
+| Actor | What they do | Volume |
+|---|---|---|
+| Producer services | Emit notification events | Writes — bursty at peak |
+| Mobile/web client | Register device, fetch in-app inbox | Low write, moderate read |
+| End user | Receives push/email/SMS | Read-only, enormous fan-out |
+| Push/email/SMS providers | External delivery | Outbound API calls at fan-out scale |
+
+This is a **write-path problem that becomes a read-path problem at fan-out time**. One event write fans out to N recipient reads (preferences, tokens, history).
+
+## Capacity: assume the broadcast case exists
+
+State assumptions explicitly — interviewers will correct them.
+
+| Assumption | Value | Why it matters |
+|---|---|---|
+| DAU | 50M | Population for fan-out |
+| Notifications per user per day | 20 average | Mix of social + transactional |
+| Daily notification events (system-wide) | 50M × 20 = **1B/day** | ~**12k events/s** average |
+| Peak factor | 5× | Evening + breaking news | **~60k events/s** at peak |
+| Broadcast events | 5/day, up to **10M recipients** each | One event → 10M fan-out jobs |
+| Payload | 500 bytes JSON + 100-byte title | Queue message size |
+| Device tokens | 1.2 per DAU (phone + tablet) | 60M tokens to manage |
+| Retention (in-app inbox) | 90 days | Storage for notification rows |
+
+**Fan-out arithmetic for one broadcast:** 10M recipients × 4 channels checked (even if only push fires) = 40M preference lookups if done naively. You cannot hit Postgres 40M times per event — this is the number that forces cache and batching.
+
+**Queue throughput:** If each fan-out job takes 5 ms of worker time, draining 10M jobs needs 50,000 worker-seconds — roughly 500 workers running for 100 seconds, which is achievable with a partitioned queue but not with a single consumer.
+
+**Storage (in-app):** 50M users × 20 notifications/day × 500 bytes × 90 days ≈ **45 TB** raw — order-of-magnitude; compression and cold tiering bring it down, but the interviewer wants to see you multiply.
+
+## High-level design
+
+<Steps>
+<Step title="Producer submits a notification event">
+
+A producer calls `POST /v1/notifications` with `{ event_type, actor_id, target: { type: "user"|"users"|"topic", ids }, payload, priority }`. The API **validates, deduplicates on `(producer, idempotency_key)`**, writes a row to a **NotificationEvents** table (audit + replay), and publishes to a **priority-partitioned queue** — high priority for DM/OTP, low for marketing. Response is **202 Accepted** with `notification_id`; delivery is async.
+
+</Step>
+
+<Step title="Fan-out worker expands targets to recipients">
+
+A **Fan-out Service** consumes the queue. For `target.type = user`, one recipient. For `topic`, it reads a **precomputed membership set** from cache (maintained by the social graph service) or streams user IDs from a cold store in batches of 10k. It emits one **DeliveryJob** per `(recipient, channel)` pair onto a **delivery queue**, partitioned by `hash(recipient_id)` so the same user's jobs serialize — useful for dedup and rate limiting per user.
+
+</Step>
+
+<Step title="Channel router applies preferences and rate limits">
+
+Each **Channel Router** worker loads **user preferences** (cache-first: Redis keyed by `user_id`, TTL 15 min, backed by Postgres) and **per-channel rate limits** ("max 3 marketing pushes/day"). Jobs that fail preference or rate checks are dropped with a metric increment — not an error. Surviving jobs go to channel-specific queues: `push-queue`, `email-queue`, `sms-queue`, and a synchronous write path for **in-app** (insert row + WebSocket ping).
+
+</Step>
+
+<Step title="Channel workers call providers">
+
+**Push Worker** loads device tokens from **Device Registry** (NoSQL or Redis — tokens churn), batches up to 500 tokens per FCM/APNs multicast call, handles `410 Gone` by deleting stale tokens. **Email Worker** renders template, calls SendGrid/SES. **SMS Worker** calls Twilio. All workers **retry with exponential backoff** (3 attempts), then **dead-letter** with alert. Success/failure increments counters in a **time-series store** for the ops dashboard.
+
+</Step>
+
+<Step title="Client fetches in-app inbox">
+
+Mobile app calls `GET /v1/notifications?cursor=...` — reads from a **Notifications** table sharded by `user_id`, indexed on `(user_id, created_at DESC)`. Unread count from a cached counter or `COUNT(*)` on a partial index if cheap enough at your scale.
+
+</Step>
+</Steps>
+
+Core stores: **Postgres** for preferences, in-app history, and event audit; **Redis** for hot preferences, rate-limit counters, and device tokens; **Kafka/SQS** for fan-out and delivery queues; **01.08 Distributed Message Queue** patterns apply directly to the partition-and-retry story.
+
+## Deep dive: fan-out without melting Postgres
+
+### Precomputed topic membership
+
+For `topic:warriors-fans` with 10M members, do not query "who follows this team" at notification time. The social graph service maintains **membership snapshots** in object storage or a wide-column store, refreshed incrementally on follow/unfollow. Fan-out streams IDs in 10k chunks. Staleness of a few minutes is acceptable for sports alerts; for financial alerts it is not — ask which side of that line you are on.
+
+### Per-user rate limiting and dedup
+
+Marketing duplicates annoy users; OTP duplicates confuse them. Use a **dedup key** `(user_id, event_type, dedup_window)` in Redis with SETNX and a 24-hour TTL. Rate limits use a sliding window counter per `(user_id, channel)` — same mechanism as **01.02 Rate Limiter**, backed by Redis INCR with TTL.
+
+<Callout type="gotcha">
+Fan-out on write for every follower at post time (push the notification job when the post is created) works for normal users but breaks for celebrities — 50M queue messages from one post. The fix interviewers want: **hybrid fan-out** — write-time fan-out for users with &lt;10k followers, read-time or lazy fan-out for celebrities (notify the most recent/active N, or let clients poll). Name the threshold and say you would tune it from metrics.
+</Callout>
+
+### Push provider batching and token hygiene
+
+FCM multicast caps at 500 tokens per call. At 10M tokens that is 20,000 API calls — parallelize across workers but respect provider rate limits (order-of-magnitude: hundreds of thousands of messages per minute on enterprise tiers). APNs uses HTTP/2 multiplexing but still needs per-token error handling. **410/404 responses delete the token** — otherwise you retry forever and your delivery metrics lie.
+
+## Push-first async versus synchronous in-app
+
+<Tradeoff
+  forTitle="Heavy queue + async fan-out when"
+  againstTitle="Leaner synchronous path when"
+  forItems={[
+    "Broadcast and topic targets exist — one event fans out to more than ~1k recipients",
+    "Producers must never block on delivery — a post API returning in 200 ms cannot wait for push",
+    "Channel providers are flaky — retries, dead-letter queues, and backoff are mandatory",
+    "You need per-channel rate limits and dedup across workers",
+    "Peak is 10–100× average — queues absorb bursts that would overwhelm synchronous workers",
+  ]}
+  againstItems={[
+    "Every notification targets one user — no fan-out, no topic membership",
+    "Total volume is under ~1k/s and delivery latency under 5 s is required end-to-end",
+    "Only in-app notifications matter — a single Postgres insert + WebSocket is enough",
+    "Team size is tiny and ops cost of Kafka + multiple worker pools is unjustified",
+    "Strong ordering per user is required and a single-threaded consumer per partition is acceptable",
+  ]}
+/>
+
+## In an interview
+
+Open with the asymmetry: "One event, potentially millions of deliveries — I'll accept fast and deliver async." Spend three minutes on clarify, five on capacity (especially one broadcast fan-out), ten on the queue + fan-out + channel router diagram, eight on hybrid fan-out for celebrities and push batching.
+
+Follow-ups to expect: "What if the queue falls behind?" (priority lanes, shed marketing, scale consumers), "Exactly-once delivery?" (honest answer: at-least-once + idempotent consumers + client-side dedup), "User disables push mid-flight?" (preferences checked at delivery time, not enqueue time — stale preference is the lesser evil).
+
+Volunteer the failure mode: "The classic outage is fan-out on write for a celebrity post — 50M jobs enqueued in a minute, delivery latency spikes for everyone including OTP messages unless you have priority queues." That sentence shows you have seen this fail in production, even if you have only read about it.
+
+<KeyTakeaways
+  items={[
+    "Accept the notification in milliseconds on a 202 path; fan-out and provider calls happen asynchronously in partitioned queues",
+    "Broadcast fan-out is the scale hinge — precomputed topic membership and batched recipient streaming, not per-recipient SQL at event time",
+    "Hybrid fan-out (write-time for normal accounts, lazy/read-time for celebrities) is the answer when one post targets tens of millions",
+    "Channel routing applies preferences and rate limits at delivery time, with Redis-backed dedup keys to survive at-least-once delivery",
+    "Push delivery batches tokens into provider multicast calls and deletes stale tokens on 410/404 — otherwise retries poison your metrics",
+    "Priority queues separate transactional notifications (OTP, DM) from marketing so a backlog never blocks critical delivery",
+  ]}
+/>

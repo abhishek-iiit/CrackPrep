@@ -1,32 +1,100 @@
 ---
 title: "Long Polling Vs WebSockets"
 number: "11.03"
-summary: "Long Polling Vs WebSockets — notes in progress."
-status: draft
+summary: "Both can feel like push; they diverge on held-request timeouts, proxy idle limits, connection state, and what breaks when a load balancer forgets you were mid-hold."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [long-polling, websockets, proxies, timeouts]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Same product feeling, different failure surface
 
-What breaks without this, and the situation that forces the decision.
+Long polling and WebSockets both aim at "the server tells the client when something happens" without the client guessing on a short timer. In a demo on localhost they look interchangeable. In production they collide with different pieces of the HTTP stack: reverse proxies, cellular NATs, load-balancer idle timeouts, and how much per-client state the server must remember between messages. Choosing between them is less about latency — both can be near event-time — than about which operational hazards you are willing to own.
 
-## How it works
+11.02 Short Poll Vs Long Poll Vs WebSocket places both options in a three-way cost model with short polling. Here the lens is narrower: once short poll is off the table, what actually differs when you run long poll versus WebSockets behind real infrastructure.
 
-The mechanism, step by step.
+## How long poll behaves under the hood
 
-## Tradeoffs
+The client sends a GET (or POST) asking for the next event. The server does not answer until:
+
+- an event is ready, or
+- a **application timeout** fires (commonly 15–60 seconds), returning empty or a "retry" marker so the client opens a new request immediately.
+
+While waiting, that HTTP request occupies a worker, async handle, or thread — depending on the server model — and every hop in the path must allow the connection to sit idle that long. The moment any hop's idle timeout is *shorter* than the application's hold, the client sees a disconnect or a 502, reconnects, and you have accidental short polling with worse error rates.
+
+State during the hold is usually "this request is subscribed to channel X." When the response flushes, that state ends. The next long poll re-authenticates and re-subscribes. There is no durable session on the wire between holds — only whatever cookie or token the client sends again.
+
+## How WebSockets behave under the hood
+
+The client starts with HTTP, then Upgrade. After the handshake, frames move both ways on one TCP connection. The server keeps **connection-scoped state** for the lifetime of the socket: user identity, subscriptions, last ping, maybe a buffer of undelivered frames. Heartbeats (ping/pong) exist because intermediate devices will kill a quiet TCP flow — often on the order of 30–120 seconds of silence on carrier NATs and some corporate firewalls; treat that as an order-of-magnitude reminder to probe, not a universal constant.
+
+Because the channel is sticky to one backend process (unless you terminate TLS at a layer that understands the protocol and rebalances — rare), scaling out means sticky load balancing or an external pub/sub plane so a write on another node can reach this socket. 11.01 Real-Time Database And WebSocket Scaling is the fleet design; the point here is that WebSocket statefulness is continuous, while long-poll statefulness is per request.
+
+## Proxies, timeouts, and the places they disagree
+
+| Hazard | Long poll | WebSocket |
+| --- | --- | --- |
+| Proxy idle timeout | Must exceed hold time on every hop (LB, nginx, API gateway, CDN) | Must allow long-lived upgraded connections; idle TCP still needs app-level pings |
+| Request timeout budgets | Client, LB, and app each have a max duration — the shortest wins | Handshake is short; afterward budgets are connection lifetime and ping interval |
+| Retry semantics | Natural: every response ends the request; client opens another | Must define reconnect, resume, and whether missed events are replayed |
+| Auth refresh | Easy to attach a new token on each poll | Must refresh mid-connection or reconnect when the token expires |
+| Buffering proxies | Some buffers delay the empty "hold" response until timeout — breaks the pattern | Upgrade failure or websocket-unaware middleboxes force fallback |
+| Server resource shape | Many concurrent *in-flight HTTP requests* | Many concurrent *open sockets* with upgrade-specific memory |
+
+<Callout type="warn">
+A load balancer configured with a 60 s idle timeout and an app that holds long polls for 55 s looks fine in staging — until p99 event wait is 50 s and a slightly slower auth check pushes the hold past 60 s. Clients get cut, hammer the LB with reconnects, and the on-call dashboard shows a spike in 5xx with no application error. Align hold timeout to something comfortably below the strictest hop (for example hold 25 s if the LB idles at 60 s), and monitor disconnect reasons separately from application empty timeouts.
+</Callout>
+
+### Connection state and fan-out
+
+Long poll: fan-out is "complete every held request subscribed to this key." If two polls from the same user race (slow network, double tab), you can deliver twice or have one waiter starve unless you key waiters carefully. WebSocket: fan-out is "write frames to a connection object," and duplicate tabs are duplicate sockets — usually what you want, but presence accounting must count sockets or sessions explicitly.
+
+When a gateway process dies:
+
+- **Long poll** — in-flight holds fail; clients retry within seconds and land on healthy nodes. No sticky map required for correctness, only for warmth of caches.
+- **WebSocket** — all sockets on that process drop at once. Clients reconnect with jitter; a thundering herd can overload auth and subscription rebuild. Sticky maps and registries go stale until TTLs expire.
+
+That asymmetry is why some teams keep long poll as a fallback path even after WebSockets ship: same event API, worse efficiency, better behavior through hostile proxies and during partial fleet failures.
+
+## When the latency story is not the differentiator
+
+Both can deliver an event in well under a second after it is published. WebSockets win on overhead when many events arrive per minute per client — no new HTTP headers, no repeated auth middleware, no LB request logs per event. Long poll wins on operational simplicity when events are rare: you do not maintain heartbeat traffic or upgrade-aware infrastructure, and every hop already knows how to reverse-proxy HTTP.
+
+If the client must upload frequently (chat send, cursor moves), WebSockets avoid a second channel of POSTs. If the client mostly receives, long poll is enough until request volume or proxy pain forces the upgrade — or until SSE is a better unidirectional fit (11.04).
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Stay on long polling when"
+  againstTitle="Move to WebSockets when"
+  forItems={[
+    "You can set every proxy idle timeout strictly above your hold duration and prove it in production, not just in a unit test",
+    "Events per waiting client are infrequent (well under one per hold window), so HTTP completion cost stays acceptable",
+    "Clients sit behind websocket-hostile intermediaries and you need a path that is still plain HTTP request/response",
+    "Token rotation and per-request auth are simpler for your security model than mid-connection reauth",
+    "Failover should be 'drop the hold and retry' without managing sticky connection registries",
+  ]}
+  againstItems={[
+    "Event rates make one HTTP transaction per message dominate CPU and log volume",
+    "You need bidirectional low-latency messaging on one channel",
+    "You already run sticky gateways and pub/sub for other realtime features (11.01), so socket state is a solved cost",
+    "Hold timeouts cannot be aligned across CDN, LB, and app — long poll would be silently truncated",
+    "You want server-initiated close/control frames and multiplexed subchannels without new HTTP requests",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Frame it as operations, not fashion: "Both give near-push freshness. Long poll is repeated held HTTP — every proxy timeout must exceed the hold, and each event costs a request. WebSockets are sticky connection state — heartbeats for NATs, sticky LB or a bus for multi-node, reconnect storms on process death." Then pick based on event rate and proxy constraints. Naming idle-timeout mismatch as a failure mode — clients reconnect-looping with 502s — reads as production experience.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Long poll and WebSockets can both approximate push; they differ in timeouts, proxy behavior, and where connection state lives",
+    "Long poll correctness depends on every hop's idle timeout exceeding the application hold — the shortest hop wins and fails loudly",
+    "WebSockets need heartbeats because quiet TCP flows are killed by NATs and firewalls on the order of tens of seconds to a couple of minutes",
+    "Long-poll state ends when the response flushes; WebSocket state lasts for the socket and implies sticky routing or a fan-out bus at scale",
+    "Process death drops many sockets at once for WebSockets, while long poll failures are per held request and retry naturally",
+    "Prefer long poll when events are rare and HTTP is the only reliable path; prefer WebSockets when event rate or bidirectionality makes per-request HTTP the bottleneck",
+  ]}
+/>

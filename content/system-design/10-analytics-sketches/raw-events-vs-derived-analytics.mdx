@@ -1,32 +1,77 @@
 ---
 title: "Raw Events Vs Derived Analytics"
 number: "10.07"
-summary: "Raw Events Vs Derived Analytics — notes in progress."
-status: draft
+summary: "Keep append-only events as the system of record and treat counters, rollups, and sketches as disposable speed layers you can rebuild when definitions change."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: intro
+estMinutes: 9
+tags: [events, analytics, derived-data, pipelines]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Two kinds of data that get confused for one
 
-What breaks without this, and the situation that forces the decision.
+An analytics stack that only stores "the number on the dashboard" is fragile in a specific way: the moment the product redefines a view, an impression, or an active user, the historical series cannot be recomputed. An analytics stack that only stores raw events and re-scans them for every chart is fragile the other way: interactive queries die under volume.
 
-## How it works
+The durable pattern is boring and correct. **Raw events** are facts that happened — append-only, immutable after write (or versioned, not overwritten). **Derived analytics** are anything computed from those facts — minute counters, HyperLogLogs, Count-Min Sketches, materialized dashboard tables. Derived data is allowed to be lossy, approximate, and deleted; raw events (within retention) are what you replay to regenerate derived data when the definition changes.
 
-The mechanism, step by step.
+10.06 Bucketed Time Window Aggregation is one derived form. 10.05 Mergeable Sketches For Analytics are another. Neither replaces the event log if you still need to answer a question you did not anticipate at ingest time.
 
-## Tradeoffs
+## What belongs in each layer
+
+| Layer | Stores | Mutability | Answers |
+| --- | --- | --- | --- |
+| Raw events | Who/what/when, ids, request ids, enough fields to re-filter | Append-only | Audits, replays, new metrics, dispute evidence |
+| Soft-derived (stream) | Running counters, open-bucket sketches | Frequently updated | Live pacing, "right now" dashboards |
+| Hard-derived (batch) | Sealed buckets, daily settlement tables | Rewritable by job | Billing, weekly reports, backfills |
+| Serving cache | Precomputed chart payloads | Evictable | User-facing latency |
+
+Loss happens on purpose in the derived layers: sampling, sketch approximation, dropping debug fields. Loss in the raw layer is an incident — unless retention policy explicitly expires old events, which is a governed delete, not silent overwrite of a counter.
+
+<Callout type="warn">
+Updating a single "source of truth" counter in place and discarding the event is how teams discover, months later, that they cannot explain a spike or restate revenue after a fraud-rule change. If money or trust depends on the metric, the event (or a filtered billable event) must survive long enough to rebuild settlement — see 10.03 Impression Counting System Design.
+</Callout>
+
+## Practical rules that keep the split honest
+
+- **Ingest once, fan out many.** Producers write an event; consumers build views, search indexes, and sketches. Do not make each product feature invent its own write path into a private counter database with no shared log.
+- **Name definitions in code and in data.** `view_total` versus `view_unique_hll` versus `impression_billable` should not share a column that silently changes meaning.
+- **Backfill is a first-class operation.** When a derived job changes, you re-read raw events for the affected range and overwrite derived outputs. If that is impossible, you did not keep raw — you kept a cache.
+- **Sampling belongs on raw or early derived, and must be labeled.** A 1% event sample can feed exploratory sketches; it cannot silently feed a metric labeled as complete.
+
+Approximate structures fit naturally as derived artifacts: HLL unique counts (10.04), CMS frequencies (10.08), t-digest latencies (10.11). They are small and mergeable precisely because they threw information away — which is fine next to a raw log, and dangerous as the only copy.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Invest in raw + derived when"
+  againstTitle="Store only derived counters when"
+  forItems={[
+    "Metric definitions change and historical restatement or backfill will be required",
+    "Audits, disputes, or debugging need event-level evidence",
+    "Multiple consumers need different aggregates from the same facts",
+    "You use sketches or rollups for speed but still need a path to rebuild them",
+    "Retention cost of events for a bounded window is acceptable next to engineering risk of irreproducible numbers",
+  ]}
+  againstItems={[
+    "The metric is ephemeral display-only and nobody will ever restate history",
+    "Event volume and retention make raw storage cost exceed the value of replay",
+    "A single consumer and a frozen definition make a counter sufficient for the lifetime of the product",
+    "Compliance requires minimizing stored personal data and derived aggregates are the only allowed form",
+    "You are prototyping and have explicitly accepted that yesterday's numbers are disposable",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+State the split in one sentence: "Raw events are the system of record; counters and sketches are derived speed layers I can rebuild." Then place the interview prompt's metrics into those buckets — for example, live view badges as derived, billable impressions as derived-from-filtered-events with retained logs. The follow-up is usually cost: answer with retention windows, sampling for non-critical streams, and coarse rollups for cold history rather than pretending raw is free forever.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Raw events are append-only facts; derived analytics are computed views that may be approximate, deleted, or rebuilt",
+    "If you only store the dashboard number, you cannot restate history when definitions or fraud rules change",
+    "If you only scan raw events for every chart, interactive analytics will not meet latency or cost goals at volume",
+    "Sketches, time buckets, and settlement tables all belong in the derived layer — useful because they discard detail",
+    "Backfill from raw into derived is how metric changes ship safely; without raw, 'backfill' is fiction",
+    "Label sampling and approximation explicitly so a partial stream is never mistaken for a complete ledger",
+  ]}
+/>

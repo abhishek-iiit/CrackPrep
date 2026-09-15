@@ -1,32 +1,99 @@
 ---
 title: "Distributed Hash Tables"
 number: "06.13"
-summary: "Distributed Hash Tables — notes in progress."
-status: draft
+summary: "A DHT maps keys to nodes over a virtual ring or keyspace so lookups find owners in logarithmic hops — the membership and routing layer behind many peer-to-peer and cluster designs."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 14
+tags: [dht, consistent-hashing, routing, partitioning]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Keys need owners without a global phone book in every packet
 
-What breaks without this, and the situation that forces the decision.
+You have millions of keys and hundreds of nodes. Each key must land on one (or a few) owners. A central directory that answers every lookup works until it becomes the hottest shard in the system. Broadcasting "where is key K?" to everyone works until the network resigns. A **distributed hash table** spreads both the data and the routing information: nodes own contiguous regions of a keyspace, know a handful of neighbors, and forward lookups until they reach the owner — typically in `O(log n)` hops for classic designs like Chord, with simpler one-hop variants when every node can hold a full membership table.
 
-## How it works
+"DHT" in interviews often means two related ideas that should stay distinct: **consistent hashing** as the key→node assignment function (04.07 Consistent Hashing, 02.07 Consistent Hashing Load Balancing), and the **overlay routing** protocol that finds the node responsible for a key when you do not already have the full map. Cassandra's token ring is consistent hashing with gossip-disseminated membership (often effectively one-hop once the ring is known). BitTorrent's Mainline DHT is closer to the classical multi-hop peer-to-peer lookup. Both answer "who owns this key?"; they differ in how much membership each node must store and how many network hops a lookup takes cold.
 
-The mechanism, step by step.
+## The ring picture
 
-## Tradeoffs
+Most teaching DHTs use a circular identifier space — say 0 .. 2¹⁶⁰−1 for SHA-1-shaped ids (the exact width is an implementation choice).
+
+1. Each node hashes its identity to a point on the ring and owns the key range back to its predecessor (or forward to its successor — conventions vary; pick one and stay consistent).
+2. Each key hashes into the same space; the owner is the first node clockwise from the key (the successor).
+3. Replication places additional copies on the next N successors so a single node death does not erase the key.
+
+Consistent hashing's selling point versus `hash(key) % n` is rebalancing: adding or removing a node moves only the keys in neighboring ranges, not a reshuffle of the entire keyspace. Virtual nodes (many ids per physical machine) smooth load so one beefy host can own more arcs than a small one.
+
+| Design | Membership knowledge | Lookup cost (typical) | Failure handling |
+| --- | --- | --- | --- |
+| `hash % n` | Full list + stable n | One hop if map known | Reshard storm on n change |
+| Consistent hash ring, full map | Full ring (gossip/metadata) | One hop | Move neighboring ranges |
+| Chord-style DHT | Finger table ~log n | ~log n hops | Successor lists + fix_fingers |
+| Central metadata map | Quorum store | One hop after read | Metadata service path (06.12) |
+
+## Routing without knowing everyone
+
+Chord-style finger tables keep pointers at exponentially increasing distances around the ring — roughly at offsets 2⁰, 2¹, … — so each hop halves (in identifier space) the remaining distance to the target. A node that joins asks an existing member to find its successor, announces itself, and steals the key range it now owns; leave and failure are handled by successor lists and periodic stabilization. Kademlia uses XOR distance and parallel α-lookups instead of a ring, which is what Mainline DHT and many discovery systems actually ship.
+
+In datacenter products you often **collapse the multi-hop path**: gossip or a metadata service gives every node (or every client) the full token map, and "DHT" reduces to consistent hashing plus replication. Multi-hop overlays earn their keep in open peer-to-peer networks where full membership is huge, churn is high, and no consensus metadata plane exists.
+
+<Callout type="gotcha">
+Hashing keys uniformly does not guarantee uniform load. A hot key — one celebrity user id, one viral object — still lands on one primary owner. DHTs solve balanced *range* assignment, not hot-key skew; that needs salting, key splitting, or caches (04.06 Hot Partitions).
+</Callout>
+
+## What a DHT does not give you
+
+A DHT routes to an owner; it does not by itself provide linearizable reads, transactions, or conflict-free concurrent writes. Those sit above: quorum requests to the preference list (Dynamo), consensus groups per range (TiKV), or CRDTs. Discovery of the first contact node still needs seeds (06.11 Gossip Protocol, 06.12 Metadata Service And Node Discovery). Security in open DHTs — Sybil identities, malicious routing — is a research and operational nightmare; closed datacenter clusters dodge most of it with authenticated membership.
+
+Compared with a range-partitioned metadata map (07.15 Range Partitioning vs Consistent Hashing for Storage), hash rings excel at write scatter and simple ownership; range scans and ordered iteration are awkward because adjacent keys in the application sense are not adjacent on the ring unless you deliberately choose order-preserving hashing (which reintroduces hotspots).
+
+<Steps>
+  <Step title="Hash the key into the identifier space">
+    Same hash family for keys and node ids so both share one ring. Treat the hash as opaque routing material, not as a security boundary.
+  </Step>
+  <Step title="Find a node closer to the owner">
+    With a full map, pick the successor directly. With fingers/k-buckets, query the peer whose id is closest to the key among those you know; repeat until the successor answers "mine."
+  </Step>
+  <Step title="Read or write the preference list">
+    Primary plus replicas on the next successors (or a separately stored replica set). Apply the consistency policy — W/R quorums, leader, etc. — at this layer, not inside the hash function.
+  </Step>
+  <Step title="On membership change, move only affected ranges">
+    Join/leave triggers handoff of keys between neighbors. Until handoff completes, reads may need to consult old and new owners; versioning or generation numbers prevent silent divergence.
+  </Step>
+</Steps>
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Use a hash-ring / DHT-style assignment when"
+  againstTitle="Prefer another assignment when"
+  forItems={[
+    "Point lookups by opaque key dominate and you want even scatter across nodes",
+    "Nodes join and leave and you cannot afford remapping nearly all keys (`hash % n`)",
+    "You can disseminate membership (gossip or metadata) so clients or nodes resolve owners in one hop",
+    "Open or large-scale peer discovery needs logarithmic routing without a full global directory",
+    "Replication on successive ring neighbors is a simple default placement story",
+  ]}
+  againstItems={[
+    "Workload needs efficient range scans or order-preserving keys — use range partitions with a metadata map",
+    "A small, stable cluster with a consensus metadata service already answers ownership in one lookup",
+    "Hot keys would pin load to one successor regardless of how pretty the ring is",
+    "Multi-hop peer-to-peer routing would blow the latency budget inside a datacenter where full maps fit in memory",
+    "Strong per-key consistency already requires per-range Raft groups — the ring is optional veneer over that map",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Start from the assignment problem: "keys hash onto a ring; node owns the arc to its predecessor; replicas on next successors; consistent hashing limits move on join." If they ask Chord, add finger tables and log n hops; if they ask Cassandra, say the ring plus gossip often means one-hop once membership is known. Name hot keys and range-scan weakness before being prompted. Separate routing (who owns it) from quorum/consensus (how we read/write it safely). Point at 04.07 Consistent Hashing for the math of virtual nodes and at 06.12 for when the ring map itself is stored in a metadata quorum.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "A DHT assigns keys to nodes in a shared identifier space and routes lookups to the owner — often via a ring and successor lists.",
+    "Consistent hashing limits remapping on membership change; virtual nodes smooth load across heterogeneous hardware.",
+    "Classical multi-hop DHTs (Chord, Kademlia) find owners in roughly logarithmic hops with partial membership; datacenter systems often keep a full map and do one-hop resolution.",
+    "Replication typically follows the ring (next successors); consistency policy is a separate layer above routing.",
+    "Hash rings scatter point keys well but struggle with range scans and do not fix hot-key skew.",
+    "Seeds, gossip, or a metadata service still bootstrap membership — the hash function alone does not find the first peer.",
+  ]}
+/>

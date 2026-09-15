@@ -1,32 +1,82 @@
 ---
 title: "SLOs And Error Budgets"
 number: "14.02"
-summary: "SLOs And Error Budgets — notes in progress."
-status: draft
+summary: "How a quantitative reliability target and a burnable error budget turn 'make it more available' into a negotiation between shipping and stabilizing."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [slo, error-budget, reliability, sre]
+updated: "2026-09-15"
 ---
 
-## The problem
+## "Five nines" is not a strategy until someone owns the other 0.001%
 
-What breaks without this, and the situation that forces the decision.
+Availability slogans without a measurement window, a success definition, and a consequence are theatre. An SLO (service level objective) is a target on a *service level indicator* — a metric that stands in for user happiness — over a time window: for example, 99.9% of authenticated API requests in 30 days return non-5xx within 300 ms. The gap between 100% and the SLO is the **error budget**: the amount of unreliability you have explicitly agreed to tolerate so that change can continue.
 
-## How it works
+Without a budget, every incident argues for a freeze and every product asks for a feature. With a budget, burning it too fast is an automatic signal to slow releases; leaving it unspent is a signal you may be underinvesting in delivery. That is the point of the mechanism — not the decimal places on the poster.
 
-The mechanism, step by step.
+## Pick indicators users would recognize
 
-## Tradeoffs
+Good SLIs are close to user experience: availability of a read path, latency at a high percentile, freshness of a feed, success of a checkout commit. Bad SLIs are convenient for the system and invisible to the user: CPU idle, "process is up", disk free. A green CPU graph beside a broken checkout is how trust in ops dies.
+
+| SLI type | Example | Watch out for |
+| --- | --- | --- |
+| Availability | Fraction of requests not 5xx / not timeout | Counting `4xx` as failures punishes clients; usually exclude them |
+| Latency | Fraction of requests faster than threshold at a percentile | Average latency is a vanity metric; use histograms and a threshold |
+| Quality / correctness | Fraction of results matching a checker | Harder to measure; worth it when silent wrong is worse than down |
+| Freshness | Fraction of reads within N seconds of write | Critical for feeds, inventory, pricing |
+
+Multi-endpoint services need care: one global SLO can be green while the payment route is on fire. Either weight by traffic carefully or define separate SLOs for critical journeys. 14.01 Observability For Distributed Systems is what feeds the indicators; the SLO is the policy on top.
+
+## Windows, burn, and alerting
+
+A 30-day rolling window is common for product SLOs; shorter windows detect acute burn. **Burn rate** asks how fast you are consuming budget relative to the pace that would exhaust it exactly at window end. Alerting on burn rate (multi-window, multi-burn-rate pages) beats alerting on every blip: a five-minute outage at high QPS can burn a month's 99.9% budget; a slow drip of errors can burn it quietly overnight.
+
+<Formula label="Allowed failure fraction">error budget = 1 − SLO target</Formula>
+
+At 99.9% over 30 days you may "spend" roughly 0.1% of requests as failures — on the order of 43 minutes of full outage if traffic were flat, which it never is; treat that conversion as intuition, not accounting. Real budgets are computed from the same request stream as the SLI.
+
+<Callout type="note">
+SLOs are not SLAs. An SLA is a contractual promise with credits and lawyers. An SLO is an internal engineering target. Publishing an ambitious SLA without an internal SLO and budget process is how you buy pager pain and refunds simultaneously.
+</Callout>
+
+## What the budget buys you
+
+When budget remains, ship: features, refactors, experiments. When budget is exhausted (or burn alerts fire), prioritize reliability work — rollbacks, capacity, defect fixes — and raise the bar on risky deploys (14.04 Deployment And Migration Safety). The budget does not care whether the burn came from a bad release, an upstream dependency, or a load test left on; accounting may, but the user-facing SLI does not.
+
+Dependencies complicate ownership: if your SLO includes a managed database's outage, you either absorb that risk in the budget, exclude that class of failure explicitly, or add dependency SLOs and composite targets. Pretending a dependency is 100% is writing a fiction into the objective.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Run product decisions off an error budget when"
+  againstTitle="Avoid or defer formal budgets when"
+  forItems={[
+    "Release velocity and reliability are in recurring conflict and need a shared number",
+    "You can measure a user-centric SLI continuously with trustworthy telemetry",
+    "Leadership will honor a freeze or slowdown when budget is spent — policy has teeth",
+    "Multiple teams share a critical path and need an objective arbiter for risk",
+    "You are ready to alert on burn rate, not only on raw error spikes",
+  ]}
+  againstItems={[
+    "You still lack basic RED metrics — inventing a 99.99% target on bad data creates false confidence",
+    "The service is experimental and intentional breakage is the point of the week",
+    "Political reality will ignore the budget, making the process pure overhead",
+    "Traffic is too low for percentages to stabilize (a handful of errors swing the month)",
+    "Correctness bugs dominate and you have no quality SLI yet — availability SLOs alone mislead",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Introduce SLOs as a product reliability contract with a measurable SLI, then define error budget as "the unreliability we can afford in exchange for change." Give one concrete example with a percentile latency or availability target and a window. Expect "what do you do when the budget is burned?" — answer: slow feature launch, focus on reliability work, tighten deploy controls — and "how do you alert?" — burn rate, not single failed requests. Distinguish SLO from SLA without being asked if you can.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "An SLO is a target on a user-centric indicator over a window; an error budget is 1 minus that target, spent by real failures",
+    "Pick SLIs users feel — availability, latency thresholds, freshness — not internal resource gauges that can be green while the product is broken",
+    "Error budgets turn reliability into a negotiable resource: spend to ship, halt feature risk when burned",
+    "Alert on budget burn rate over multiple windows so pages track customer impact, not every transient blip",
+    "SLOs are internal engineering policy; SLAs are contractual — do not confuse the two",
+    "Dependencies and critical journeys need explicit treatment or a single fleet-wide green SLO will hide the outage that matters",
+  ]}
+/>

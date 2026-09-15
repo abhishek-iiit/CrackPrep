@@ -1,0 +1,104 @@
+---
+title: "Minimum Cost For Tickets"
+number: "03.37"
+summary: "Each travel day picks the cheapest pass covering today — 1D DP where dp[d] is min cost through day d, jumping back 1, 7, or 30 days."
+status: published
+free: true
+difficulty: core
+estMinutes: 13
+tags: [dynamic-programming, array]
+updated: "2026-09-15"
+---
+
+## Passes overlap — buy the cheapest cover for each day
+
+You travel on sorted distinct days `days`. Three pass prices `costs[0]`, `costs[1]`, `costs[2]` cover the next 1, 7, or 30 calendar days from purchase day (including purchase day). Minimize total spend to cover every travel day.
+
+Greedy fails: a cheap 30-day pass might waste coverage, but a 1-day pass every time might beat a 7-day bundle on sparse weeks. Example: days `[1,4,6,7,8,20]` with costs `[2,7,15]` — optimal mix uses 1-day and 7-day passes, not obvious without trying alternatives.
+
+State: **`dp[d]` = minimum cost to cover all travel days in `[1..d]`**. On a travel day, try buying each pass type today and inherit cost from before the pass window starts.
+
+## 1D DP over calendar days
+
+Let `last = days[days.length - 1]`. Build `dp[0..last]`. Use a set of travel days for O(1) lookup.
+
+- Non-travel day `d`: `dp[d] = dp[d-1]` — no new ticket needed.
+- Travel day `d`: `dp[d] = min(dp[d-1]+costs[0], dp[d-7]+costs[1], dp[d-30]+costs[2])` with indices clamped at 0.
+
+Answer: `dp[last]`.
+
+<Steps>
+<Step title="Put travel days in a Set, set dp[0] = 0">
+  Day 0 is a sentinel with zero cost.
+</Step>
+<Step title="For d = 1..last, skip ticket logic on non-travel days">
+  Cost carries forward unchanged.
+</Step>
+<Step title="On travel days, try 1/7/30-day pass purchases">
+  Each option jumps to dp at d-1, d-7, or d-30 plus pass price.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function mincostTickets(days: number[], costs: number[]): number {
+  const travel = new Set(days);
+  const last = days[days.length - 1];
+  const dp = new Array(last + 1).fill(0);
+
+  for (let d = 1; d <= last; d++) {
+    if (!travel.has(d)) {
+      dp[d] = dp[d - 1];
+      continue;
+    }
+    dp[d] = Math.min(
+      dp[d - 1] + costs[0],
+      dp[Math.max(0, d - 7)] + costs[1],
+      dp[Math.max(0, d - 30)] + costs[2]
+    );
+  }
+
+  return dp[last];
+}
+```
+
+Time **O(lastDay)** — at most ~365 in examples, up to 10⁴ in constraints. Space **O(lastDay)**.
+
+<Tradeoff
+  forTitle="Calendar-day 1D DP when"
+  againstTitle="DP indexed by travel-day only when"
+  forItems={[
+    "last day is at most a few thousand — iterating every calendar day is cheap",
+    "Pass windows are defined in calendar days (1/7/30), not trip count — day index matches problem statement",
+    "Non-travel days trivially inherit dp[d-1] — easy to explain in interview",
+    "Same recurrence extends if pass durations or costs change",
+    "01.17 Coin Change intuition applies — here 'coins' have calendar span side effects",
+  ]}
+  againstItems={[
+    "Travel days are sparse over a huge horizon — compress to travel-day indices only",
+    "You only have one pass type — reduces to counting days times price",
+    "Days array is unsorted — sort first or the recurrence breaks",
+    "03.42 Best Time to Buy and Sell Stock III is unrelated state machine — do not overfit",
+    "Memory cap is tight with lastDay near 10⁵ — travel-indexed DP uses O(|days|) space",
+  ]}
+/>
+
+## In an interview
+
+Example: days `[1,4,6,7,8,20]`, costs `[2,7,15]`. Clarify passes cover calendar days forward, travel days sorted unique.
+
+Define `dp[d]` before coding. Mention non-travel carry-forward.
+
+Follow-ups: arbitrary pass durations, unlimited pass types, print chosen passes. Bug: using `dp[d-7]` without `max(0, d-7)` on early days.
+
+<KeyTakeaways
+  items={[
+    "Minimum Cost For Tickets defines dp[d] as min cost to cover all travel through calendar day d",
+    "Non-travel days copy dp[d-1]; travel days min over buying 1-, 7-, or 30-day pass ending today",
+    "Use Math.max(0, d-k) when jumping back k days from early calendar dates",
+    "O(lastDay) time and space; travel-day-only indexing is an equivalent sparse optimization",
+    "Greedy by cheapest pass per day fails — overlapping coverage requires DP",
+    "01.17 Coin Change is the unweighted-day cousin; here each 'coin' covers a calendar interval",
+  ]}
+/>

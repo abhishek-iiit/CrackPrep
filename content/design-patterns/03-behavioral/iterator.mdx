@@ -1,0 +1,95 @@
+---
+title: "Iterator"
+number: "03.03"
+summary: "Traversing a collection without exposing its internal layout — array, tree, or database cursor — keeps callers stable when storage changes."
+status: published
+free: true
+difficulty: intro
+estMinutes: 9
+tags: [behavioral, collections, traversal]
+updated: "2026-09-15"
+---
+
+## Callers that know too much about your data structure
+
+A dashboard lists products from an in-memory array today. Next quarter the catalog moves to a paginated API, then a lazy database cursor, then a composite tree of categories and SKUs. Every screen that wrote `for (let i = 0; i < products.length; i++)` breaks — not because the data changed, but because the **traversal contract** was never separated from the **storage shape**.
+
+Iterator fixes that by giving clients a narrow interface: start, next, done, current item. The collection hides whether it is a linked list, a B-tree, or a remote page fetcher. The loop code stays the same; only the factory that hands out iterators changes.
+
+## Iterator, iterable, and the traversal protocol
+
+Two sides of the same idea:
+
+- **Iterator** — object with `next()` returning `{ value, done }` (ECMAScript) or equivalent (`hasNext`/`next` in Java).
+- **Iterable** — collection that can produce a fresh iterator via `Symbol.iterator` or `iterator()`.
+- **Client** — consumes via `for...of`, `foreach`, or manual `while (!done)`.
+
+<Steps>
+<Step title="Collection implements iterable">
+`[Symbol.iterator]()` returns a new iterator instance. Each traversal gets its own cursor — two simultaneous loops do not share state.
+</Step>
+<Step title="Iterator holds traversal state">
+Index, stack of tree nodes, or HTTP page token — whatever the structure needs. The client never sees it.
+</Step>
+<Step title="Client walks until done">
+Standard loop constructs compile down to iterator calls. Filter and map become iterator adapters wrapping the source.
+</Step>
+</Steps>
+
+```typescript
+class PageCursor<T> implements Iterable<T> {
+  constructor(private fetchPage: (token?: string) => Promise<{ items: T[]; next?: string }>) {}
+  async *[Symbol.asyncIterator]() {
+    let token: string | undefined;
+    do {
+      const page = await this.fetchPage(token);
+      for (const item of page.items) yield item;
+      token = page.next;
+    } while (token);
+  }
+}
+```
+
+Language runtimes ship this pattern built in — Java `Iterable`, C# `IEnumerable`, Rust `IntoIterator`. Custom iterators matter when you wrap legacy structures, lazy streams, or graph walks that do not fit a bare array.
+
+<Callout type="note">
+Removing an element through an iterator while traversing invalidates the cursor in most implementations — ConcurrentModificationException in Java, undefined behaviour in hand-rolled lists. Fail fast or document copy-on-iterate semantics explicitly.
+</Callout>
+
+## External vs internal iteration
+
+**External** — the client drives the loop (`for (const x of coll)`). **Internal** — the collection drives it (`coll.forEach(fn)`). Internal iteration is simpler but cannot easily `break` mid-stream or compose lazy pipelines without language support. Generators in modern JavaScript and Python blur the line — lazy `map` over an iterator is external iteration with sugar.
+
+When traversal order matters (sorted, depth-first, breadth-first), encode it in the iterator implementation, not in every caller.
+
+<Tradeoff
+  forTitle="Reach for a custom iterator when"
+  againstTitle="Skip custom iterators when"
+  forItems={[
+    "Multiple traversal orders over the same structure — preorder vs postorder, forward vs reverse — without duplicating the structure",
+    "The backing store is lazy, paginated, or streaming and you want uniform consumer code",
+    "You must hide a legacy internal representation from new modules during a migration",
+    "Several algorithms share the same walk and centralising cursor logic prevents drift",
+    "Language builtins already expect iterable — implementing the protocol is the cheapest integration"
+  ]}
+  againstItems={[
+    "The collection is a plain array or list and `for...of` over native types is enough",
+    "Only one traversal ever exists and will never change — indirection adds nothing",
+    "You need random access by index — iterators are sequential; expose get(i) or use an array",
+    "Concurrent structural modification during iteration is common and copy-on-read is too expensive",
+    "A higher-level abstraction (LINQ, RxJS streams) already expresses the transforms you need"
+  ]}
+/>
+
+## In an interview
+
+This pattern rarely needs the GoF name — say "I would expose an iterator so UI code does not depend on whether products live in an array or a paginated API." Expect "Iterator vs Visitor" (03.10 Visitor operates on typed nodes with double dispatch; Iterator simply yields elements). Mention fail-fast on concurrent modification if the structure is mutable. The misuse is wrapping an array in six classes when `for...of` already works.
+
+<KeyTakeaways items={[
+  "Iterator separates how you walk a collection from how it is stored, keeping client loops stable across representation changes.",
+  "Each traversal should get a fresh iterator with its own cursor — shared iterators cause subtle cross-loop bugs.",
+  "Lazy and paginated sources become iterable by fetching the next chunk inside next() or an async generator.",
+  "Traversal order belongs in the iterator implementation, not duplicated at every call site.",
+  "Mutating a collection during iteration without a defined policy produces fail-fast errors or silent skips — pick one and document it.",
+  "Modern language iterators and generators are this pattern built in; custom ones earn their keep for legacy or composite structures."
+]} />

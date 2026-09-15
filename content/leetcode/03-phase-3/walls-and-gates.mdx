@@ -1,0 +1,113 @@
+---
+title: "Walls and Gates"
+number: "03.19"
+summary: "Distance to nearest gate — multi-source BFS from every INF-adjacent room beats restarting BFS from each cell."
+status: published
+free: true
+difficulty: core
+estMinutes: 13
+tags: [bfs, matrix, multi-source]
+updated: "2026-09-15"
+---
+
+## INF rooms want the nearest gate — per-room BFS explodes
+
+A grid uses `-1` (wall), `0` (gate), `INF` (231 − 1, empty room). Fill each empty room with its **Manhattan distance to the nearest gate**. Unreachable stays `INF`.
+
+```
+INF  -1   0  INF
+INF INF INF  -1
+INF  -1 INF  -1
+  0  -1 INF INF
+```
+becomes distances 3, -, 0, 1, etc., radiating from gates.
+
+Running BFS from every `INF` cell finds the nearest gate each time — **O((mn)²)** on a open grid. Gates are few and fixed; empty rooms all ask the same question relative to the **same sources**.
+
+## Multi-source BFS from all gates
+
+Seed the queue with every `0` cell at distance 0. Standard BFS: dequeue, try four neighbors; if neighbor is `INF`, set `grid[nr][nc] = dist + 1` and enqueue. Walls and already-labeled cells are skipped.
+
+The invariant: BFS layers expand uniformly — the first time a room is reached is via a shortest path from some gate. One pass fills the whole grid.
+
+<Steps>
+<Step title="Enqueue all gates">
+Scan grid; push `[r, c]` where `grid[r][c] === 0`.
+</Step>
+<Step title="Layered BFS">
+Pop front, for each 4-neighbor that is `INF`, write `grid[n] = grid[current] + 1` and push.
+</Step>
+<Step title="Leave walls and unreachable">
+`-1` never entered; `INF` with no gate path stays `INF`.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function wallsAndGates(rooms: number[][]): void {
+  if (!rooms.length || !rooms[0].length) return;
+  const m = rooms.length, n = rooms[0].length;
+  const INF = 2147483647;
+  const dirs = [0, 1, 0, -1, 0];
+  const q: [number, number][] = [];
+
+  for (let r = 0; r < m; r++) {
+    for (let c = 0; c < n; c++) {
+      if (rooms[r][c] === 0) q.push([r, c]);
+    }
+  }
+
+  while (q.length) {
+    const [r, c] = q.shift()!;
+    for (let d = 0; d < 4; d++) {
+      const nr = r + dirs[d], nc = c + dirs[d + 1];
+      if (nr < 0 || nr >= m || nc < 0 || nc >= n || rooms[nr][nc] !== INF) continue;
+      rooms[nr][nc] = rooms[r][c] + 1;
+      q.push([nr, nc]);
+    }
+  }
+}
+```
+
+Time **O(m × n)** — each cell enqueued at most once. Space **O(m × n)** for the queue in the worst case (all gates first, then wave fills).
+
+<Callout type="tip">
+03.20 Rotting Oranges is the same multi-source BFS template with a time counter per layer — learn this file and the next one as a pair.
+</Callout>
+
+<Tradeoff
+  forTitle="Multi-source BFS when"
+  againstTitle="BFS from each empty room when"
+  forItems={[
+    "Many targets (gates) and many queries (all INF cells) — one wave suffices",
+    "Grid is unweighted — BFS gives exact shortest Manhattan paths",
+    "You will reuse the pattern for Rotting Oranges and 01.29 Pacific Atlantic",
+    "In-place distance write on INF cells avoids a separate dist matrix",
+    "Gates are static for the problem duration"
+  ]}
+  againstItems={[
+    "Only one gate — single-source BFS is identical, multi-source just adds one loop",
+    "Weights vary by cell — Dijkstra replaces BFS",
+    "Gates move between queries — re-seed each time or preprocess differently",
+    "You need paths, not distances — store parent pointers during BFS",
+    "Grid is huge and sparse in memory — coordinate compression first"
+  ]}
+/>
+
+## In an interview
+
+Restate: walls block, gates are 0, fill empty rooms with distance to nearest gate. Confirm `INF` constant and in-place mutation.
+
+Say multi-source BFS: enqueue all gates at once, expand layer by layer. Contrast with per-cell BFS — O(mn) vs O(m²n²).
+
+Expect: Rotting Oranges follow-up, DFS (works but BFS is natural for unweighted shortest path), what if diagonal moves allowed (still BFS, 8 dirs). Bug to name first: enqueueing `INF` cells before they are reached — only enqueue when you assign a finite distance.
+
+<KeyTakeaways items={[
+  "Walls and Gates is multi-source BFS — seed the queue with every gate (0) and expand to INF neighbors.",
+  "First visit to an INF cell is the shortest distance; overwrite INF in place with dist + 1.",
+  "Walls (-1) are never entered; unreachable INF cells stay INF.",
+  "One BFS pass is O(mn); per-room BFS is O(m²n²) on dense empty grids.",
+  "Same template as 03.20 Rotting Oranges (time layers) and reverse flood as 03.18 Surrounded Regions.",
+  "Unweighted grid shortest path always means BFS, not DFS."
+]} />

@@ -1,32 +1,113 @@
 ---
 title: "Retries Timeouts And Idempotency"
 number: "02.09"
-summary: "Retries Timeouts And Idempotency — notes in progress."
-status: draft
+summary: "Why an unbounded wait, a blind retry, and a non-idempotent write are three different bugs that fail together, and the budget, backoff, and key that fix each one."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 15
+tags: [retries, timeouts, idempotency, reliability]
+updated: "2026-09-15"
 ---
 
-## The problem
+## A retry is a bet that the failure was transient
 
-What breaks without this, and the situation that forces the decision.
+Every retry is a wager: the thing that just failed was a blip, and trying again costs less than giving up. Most of the time the wager is fine — a packet dropped, a connection reset, a load balancer routed you to an instance mid-restart. But three failures show up together so often that treating them as one problem is a mistake. A call with no timeout can hang forever, holding a thread, a connection, and everything waiting behind them. A retry issued blindly, with no sense of whether the failure was transient or whether the downstream is actually falling over, turns a blip into more load exactly when there is the least capacity to absorb it. And a retried write that was not idempotent does not fail safely — it succeeds twice, and now there are two charges, two emails, two rows.
 
-## How it works
+None of the three is optional once a system has more than one hop. Skip timeouts and one hung dependency exhausts your thread pool. Skip a retry budget and one bad minute downstream becomes a self-inflicted denial-of-service. Skip idempotency and the "safe" retry you added to improve reliability is the reason a customer got billed twice.
 
-The mechanism, step by step.
+## Timeouts: a budget you decompose, not a number you guess
 
-## Tradeoffs
+A timeout is not "how long this call usually takes, plus a margin." It is a slice of a total latency budget divided among every hop that consumes it. If a user-facing request has a 300 ms budget and it fans out through an API gateway, an order service, and an inventory service in sequence, the inventory call cannot reasonably be given 300 ms of its own — by the time it starts, some of the budget is already spent on the hops before it, and whatever it returns still has to travel back through them.
+
+A workable rule: each hop's outbound timeout should be shorter than the time its caller has left, with enough margin for the hop's own processing and for one retry if the budget allows it. A gateway with a 300 ms budget might reserve 20 ms of overhead and give the order service 250 ms; the order service, needing 30 ms of its own work, gives its call to inventory 180 ms, leaving room to retry once at 80 ms if the first attempt fails fast. These specific numbers are illustrative, not a formula to memorize — the shape that matters is that budgets shrink monotonically deeper into the call chain, and a leaf service with a timeout longer than what its caller has left is a timeout that can never actually be honored; the caller will have already given up and moved on.
+
+<Callout type="gotcha">
+A timeout set too generously does not look wrong in a load test — it only shows its cost during an incident, when a downstream dependency is slow rather than down. A 30-second timeout on a call that normally takes 20 ms means a single degraded dependency can hold a thread for 30 seconds per request, and if the thread pool is sized for 20 ms calls, it empties out in seconds. The failure looks like the calling service is broken; the actual cause is a timeout that was never tuned to the budget it sits inside.
+</Callout>
+
+## Retries: backoff, jitter, and a budget of their own
+
+A bare retry loop — fail, wait a fixed interval, try again — synchronizes every caller that failed at the same moment, so they all retry at the same moment too, and the resulting spike looks a lot like the outage that caused it. Two fixes are standard practice: exponential backoff, so each successive attempt waits longer, and jitter, a randomized offset so failed callers do not retry in lockstep.
+
+<Formula label="Backoff with full jitter">delay = random(0, min(cap, base · 2^attempt))</Formula>
+
+With a 100 ms base and a 20-second cap, attempt 0 waits up to 100 ms, attempt 3 waits up to 800 ms, attempt 6 waits up to 6.4 seconds, and every attempt beyond the point where the exponential passes the cap waits a random amount up to that cap rather than growing further. The randomization is what actually prevents the synchronized retry spike; backoff alone only spreads it out in time, it does not break the correlation between callers who all failed together.
+
+The other half of the fix is a retry budget: a cap on the fraction of total traffic allowed to be a retry, tracked continuously, not per request. Without one, a downstream service returning errors under load gets hit with the original traffic plus retries of the failures, which are disproportionately likely to fail too, which generates more retries — a feedback loop known as a retry storm, and it is a well-documented way for a service that could have recovered on its own to be kept down by the exact mechanism meant to paper over its blips. A retry budget breaks that loop by refusing to retry once retries already make up, say, 10% of outbound traffic — better to fail some calls immediately than let the retry volume become the outage. 06.10 Circuit Breakers And Timeouts covers the related mechanism of tripping a breaker on a dependency entirely rather than metering retries against it.
+
+Not every failure is worth retrying. A `400 Bad Request` will be a `400` again; retrying it wastes a slot in the budget a genuinely transient failure could have used.
+
+| Response | Retry? | Why |
+| --- | --- | --- |
+| Connection timeout, connection reset | Yes | Classic transient network failure |
+| `503 Service Unavailable`, `429 Too Many Requests` | Yes, with backoff | The server is explicitly saying "not now"; retrying immediately defeats the point of the signal |
+| `500 Internal Server Error` | Usually, cautiously | Sometimes transient, sometimes a bug that reproduces every time — capped retries limit the damage of the latter |
+| `400 Bad Request`, `404 Not Found` | No | The request itself is wrong; nothing changes on a second attempt |
+| `403 Forbidden`, `401 Unauthorized` | No | Retrying without fixing the credential or permission just repeats the failure |
+
+## Idempotency: making a repeat attempt safe to make
+
+Retries only work if repeating the operation is safe. Whether that is true depends on the HTTP method, but the method alone is not the whole answer.
+
+| Method | Naturally idempotent? | Why |
+| --- | --- | --- |
+| `GET` | Yes | No side effect to repeat |
+| `PUT` | Yes | Replaces the resource with the same full value each time |
+| `DELETE` | Usually | Deleting an already-deleted resource is a no-op in intent, though some APIs return a `404` on the second call, which is a design choice worth being deliberate about |
+| `POST` | No | Typically creates a new resource on every call unless guarded explicitly |
+| `PATCH` | Depends on the payload | `{"balance": 110}` applied twice leaves the same result; `{"balance": "+10"}` applied twice does not — the method says nothing about which one you wrote |
+
+For operations that are not naturally safe to repeat — almost always the ones that create something or move money — the fix is an idempotency key: a unique identifier the client generates once per logical operation and sends with every attempt, including retries.
+
+<Steps>
+  <Step title="Client generates the key once, before the first attempt">
+    The key identifies the operation, not the HTTP request — a retry of the same logical "charge this card" reuses the same key rather than minting a new one.
+  </Step>
+  <Step title="Server checks a dedupe store before doing any work">
+    A lookup by key, backed by something durable enough to survive the process that first saw it — a database row or a fast key-value store, not local memory.
+  </Step>
+  <Step title="Key not found: execute, then record the result under the key">
+    The write and the dedupe record ideally commit together, so a crash between "did the work" and "recorded the key" cannot happen — that gap is exactly where a duplicate charge sneaks through.
+  </Step>
+  <Step title="Key found and completed: return the stored result without re-executing">
+    The caller gets the same response it would have gotten the first time, and no side effect happens twice.
+  </Step>
+  <Step title="Key found and still in flight: reject or make the caller wait">
+    A concurrent duplicate — the same key arriving before the first attempt finished — is a race, not a retry, and returning a `409 Conflict` or briefly blocking is safer than racing two executions of the same operation.
+  </Step>
+</Steps>
+
+Keys need a retention window, not permanent storage — long enough to cover realistic retry delays and client-side timeouts, short enough not to grow the dedupe store forever. A 24-hour window is a common choice in production payment APIs, Stripe's among them, and it is a reasonable default to start from rather than a rule.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Retry the call when"
+  againstTitle="Fail fast instead when"
+  forItems={[
+    "The failure is transient by nature — a timeout, a connection reset, a 503 — rather than a property of the request itself",
+    "The operation is naturally idempotent or is guarded by an idempotency key",
+    "A retry budget or circuit breaker caps how much extra load the retry can add if the downstream is actually struggling",
+    "The caller still has enough of its own latency budget left to afford another attempt",
+  ]}
+  againstItems={[
+    "The response is a 4xx that describes the request, not the moment — retrying a malformed or unauthorized request just repeats the failure",
+    "The downstream is already shedding load or tripping a circuit breaker — adding retries now is adding load at the worst possible time",
+    "The operation has an external side effect with no dedupe mechanism, like an SMS or push notification sent through a provider that offers no idempotency key of its own",
+    "The caller's remaining timeout budget cannot fit another attempt plus backoff",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Introduce the three together, because they are one problem in practice: "I will set the timeout as a slice of the end-to-end budget, retry only the failures that are actually transient with backoff and jitter, and make the write idempotent so a retry cannot double it." Expect a follow-up on what happens if the downstream is genuinely down rather than blipping — that is where naming the retry storm matters, and where a retry budget or a circuit breaker is the honest answer rather than "retry harder." If asked how you would debug a duplicate side effect in production, say you would look first at whether the idempotency key was actually being reused across attempts of the same logical operation, since a client that mints a new key per HTTP attempt has built a retry-safe API and then defeated it.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "A timeout should be a slice of the end-to-end latency budget, shrinking at every hop deeper into the call chain, not a number chosen from how long the call usually takes",
+    "Exponential backoff spreads retries out over time, but only jitter breaks the correlation between callers who failed at the same moment and would otherwise retry in lockstep",
+    "A retry budget that caps retries as a fraction of total traffic prevents a retry storm, where retries of a struggling downstream's failures become the reason it stays down",
+    "Not every failure deserves a retry — a 4xx describes the request and will fail identically on the next attempt",
+    "Idempotency depends on the payload as much as the HTTP method: an absolute update like a full balance replacement is safe to repeat, a relative one like an increment is not",
+    "An idempotency key identifies the logical operation, generated once by the client and reused across every retry, checked against a durable dedupe store before any work runs",
+  ]}
+/>

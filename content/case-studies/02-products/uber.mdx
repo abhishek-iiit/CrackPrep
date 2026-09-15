@@ -1,0 +1,163 @@
+---
+title: "Uber"
+number: "02.05"
+summary: "Driver-rider matching, geospatial indexing, ETA via cached routes, and supply-demand rebalancing for the ride-hailing interview prompt."
+status: published
+free: true
+difficulty: deep
+estMinutes: 21
+tags: [geo, matching, marketplace]
+updated: "2026-09-15"
+---
+
+## "Design Uber" is a geo-indexed matching problem with a latency budget
+
+The app shows cars on a map, quotes a price and an ETA, matches you with a driver, and tracks the ride. Interviewers use it to test geospatial indexing (how do you find drivers within 2 km fast?), the request lifecycle from ride request to assignment, ETA estimation without calling a routing API on every search, and the supply-demand tension when everyone requests a ride at bar-close. The failure mode they want you to name: treating driver location as a SQL `WHERE lat BETWEEN` query at 100k location updates per second.
+
+## Clarify: riders, drivers, and the happy path only
+
+> "I'll design the core loop: rider requests a ride, system matches a nearby available driver, tracks the trip to completion. Out of scope: surge pricing formulas, payments, driver onboarding, and multi-stop rides. One city region to start, then mention multi-region."
+
+**Functional requirements:**
+
+- Driver updates location periodically (every 3–4 s while online)
+- Rider requests a ride (pickup lat/lng, dropoff lat/lng)
+- System matches nearest available driver and notifies both parties
+- Track trip state: requested → matched → in-progress → completed
+- Show ETA to pickup and ETA to destination
+
+**Non-functional requirements:**
+
+- Match latency: under 5 s from request to driver assigned (p99)
+- Location freshness: driver position no older than 5 s for matching
+- Availability: 99.9% during peak hours
+- Consistency: strong for trip state (no double-assign); eventual for location is fine
+
+**Actors:**
+
+- **Driver** — frequent location writes, low read volume
+- **Rider** — rare writes (request), frequent reads (map, ETA)
+- **Matching service** — read-heavy geo queries at request time
+- **Dispatch** — assigns driver, manages trip state machine
+
+## Capacity: location writes dominate, match reads spike
+
+Assume one metro: **San Francisco Bay Area** as the worked example, then scale verbally.
+
+| Assumption | Value |
+|---|---|
+| Active drivers in region | 50k peak |
+| Location update interval | 4 s |
+| Ride requests peak | 500/min (≈ 8/s) — bar-close spike: 50/s |
+| Avg trip duration | 15 min |
+| Concurrent active trips peak | 50k drivers × 60% utilization ≈ 30k trips |
+| Search radius for match | 3 km initial, expand to 5 km if no match |
+
+**Location write rate:** 50k drivers / 4 s ≈ **12.5k location updates/s** in one region. Global scale: 50 regions × 12.5k ≈ **625k writes/s** — all upserts into a geo index.
+
+**Match query rate:** 8/s normal, **50/s spike**. Each match query is one geo-radius search + filter available drivers + rank by ETA. Not huge QPS, but each query must complete in under 100 ms to leave room for notification and driver accept timeout.
+
+**Trip state writes:** 30k concurrent trips, state changes every few minutes ≈ **100 state transitions/s** — small, but must be strongly consistent (no two riders assigned the same driver).
+
+**Storage:** driver profiles and trip records in a relational DB sharded by region. Location data is ephemeral — TTL 30 s in the geo index; no long-term location history unless the interviewer asks.
+
+## High-level design
+
+<Steps>
+<Step title="Driver goes online">
+Driver app opens WebSocket to location gateway. Begins sending `{driver_id, lat, lng, heading, ts}` every 4 s. Gateway writes to geo index: upsert driver position in spatial structure, set status `available`.
+</Step>
+<Step title="Rider requests ride">
+`POST /rides` with pickup and dropoff coordinates. Trip service creates ride record (`requested`), enqueues match job. Returns `ride_id` immediately; rider sees "finding driver" spinner.
+</Step>
+<Step title="Geo search and rank">
+Matching worker queries geo index: all `available` drivers within 3 km of pickup. For each candidate (cap at 20), compute ETA to pickup using cached route estimates. Rank by ETA ascending. Pick top driver.
+</Step>
+<Step title="Dispatch and lock">
+Trip service attempts atomic assign: `UPDATE driver SET status='en_route' WHERE driver_id=X AND status='available'`. If zero rows updated, driver was taken — try next candidate. On success, push notification to driver app; start 15 s accept timer.
+</Step>
+<Step title="Trip in progress">
+Driver accepts → state `matched`. Location updates continue; rider app reads driver position from 01.03 Distributed Cache (updated by gateway). On arrival and dropoff, state transitions to `completed`; driver returns to `available`.
+</Step>
+</Steps>
+
+| Component | Role |
+|---|---|
+| Location gateway | Ingest driver GPS, fan-out to geo index + cache |
+| Geo index | Spatial lookup: drivers within radius |
+| Trip service | Ride state machine, strong consistency |
+| Matching worker | Geo query + ETA rank + dispatch |
+| ETA / routing cache | Precomputed or cached travel times between grid cells |
+| Notification | Push to driver on match offer |
+
+## Deep dive: geospatial index and ETA without melting the routing API
+
+### Geo index options — pick one and defend
+
+**Geohash / grid buckets:** divide the map into cells (Geohash precision 6 ≈ 1.2 km × 0.6 km). Each cell is a key in Redis or a row in a KV store; value is a set of `driver_id`s currently in that cell. To search 3 km: compute the 9–25 cells overlapping the circle, union the driver sets, filter by exact haversine distance. Updates are O(1): remove driver from old cell, add to new cell.
+
+**Quadtree / R-tree:** tree structure for radius and nearest-neighbor queries. Better for irregular queries; harder to shard and replicate at 625k updates/s globally. Most interview answers use geohash grids for simplicity.
+
+At 12.5k upserts/s per region, a Redis cluster sharded by geohash prefix handles it. Store `{driver_id, lat, lng, status, ts}` — reject stale entries older than 5 s at query time.
+
+### ETA estimation
+
+Calling Google Maps Directions API for 20 candidates × 50 requests/s spike = 1k routing API calls/s — slow, expensive, and rate-limited. Production approach:
+
+1. **Grid-to-grid travel time matrix** — precompute average travel time between adjacent geohash cells using historical trip data. ETA from driver cell to pickup cell = sum of hop times. Accuracy within 20–30% is enough for ranking; refine after match with one live route call.
+
+2. **Cache recent routes** — key `(from_cell, to_cell, time_of_day_bucket)` in 01.03 Distributed Cache. Rush hour and midnight differ.
+
+3. **Straight-line distance fallback** — if cache miss, rank by haversine distance × road factor (1.3×). Good enough for ordering; bad ETAs get corrected post-match.
+
+Say which layer you use for what: grid matrix for candidate ranking, one live route for the assigned driver's displayed ETA.
+
+### Matching retries and expanding radius
+
+No driver in 3 km? Expand to 5 km, re-query. Still none? Notify rider "no drivers available" after 30 s. Driver reject or timeout? Release lock, mark driver available, try next ranked candidate without re-running full geo search if the list is cached for 10 s.
+
+<Callout type="tip">
+Double-assign prevention is a compare-and-swap on driver status, not a distributed lock service. One conditional UPDATE in the trip DB is enough for the interview — if it fails, the driver was already taken and you move on.
+</Callout>
+
+### Surge and supply (mention, do not deep-dive)
+
+If requests exceed available drivers in a geohash cell, wait times rise. Surge pricing is the product lever; technically you expose `supply_count / demand_count` per cell from the same geo index. Out of scope unless the interviewer pulls it in.
+
+<Tradeoff
+  forTitle="Geohash grid index when"
+  againstTitle="Brute-force or SQL spatial query when"
+  forItems={[
+    "Location updates arrive every few seconds from tens of thousands of drivers per region",
+    "Matching needs sub-100 ms radius search at request time",
+    "Cells map cleanly to Redis/KV shards — horizontal scale by geohash prefix",
+    "Stale driver cleanup is TTL on cell membership plus timestamp filter at query",
+    "Uber-scale (625k global location writes/s) makes O(n) table scans impossible",
+  ]}
+  againstItems={[
+    "Fleet size is hundreds, not tens of thousands — Postgres PostGIS `ST_DWithin` is fast enough",
+    "Matching is batch (scheduled pickups) not real-time — query latency of 500 ms is acceptable",
+    "The interviewer scoped to a campus shuttle with 20 vehicles",
+    "Drivers are fixed at stands (airport taxi queue) — no roaming geo search needed",
+    "Prototype phase where correctness matters more than update throughput",
+  ]}
+/>
+
+## In an interview
+
+Open: "I'll ingest driver locations into a geohash grid index, match riders by radius search plus cached grid ETA ranking, and assign with a conditional status update to prevent double-booking." Draw location gateway → geo index → matching worker → trip service as the request path.
+
+Follow-ups: "Multi-region?" (shard everything by city; rider only matches local drivers). "Driver rejects?" (timeout + try next candidate from ranked list). "Rider cancels mid-match?" (release driver lock immediately). "How accurate is ETA?" (grid matrix for rank, one live route for display after match).
+
+Volunteer the failure mode before asked: **stale driver ghosts** — driver closes app without going offline, cell still lists them.available. Solve with heartbeat: no location update for 15 s → auto-offline. Also: **thundering herd at bar-close** — 50 match requests/s in one geohash cell compete for 200 drivers; queue match jobs and expand radius progressively rather than retrying blindly.
+
+<KeyTakeaways
+  items={[
+    "Uber matching is a geo-radius search problem — geohash grid cells in a KV store beat SQL BETWEEN at 12k location updates/s per region",
+    "Driver location is ephemeral with a 5 s freshness window; long-term storage is not the default design",
+    "ETA for ranking uses a precomputed grid travel-time matrix; one live route call refines the displayed ETA after match",
+    "Double-assign is prevented by conditional UPDATE on driver status, not a separate distributed lock",
+    "Match flow: geo search → rank top 20 by ETA → atomic assign → 15 s accept timeout → retry next candidate",
+    "Stale driver entries and bar-close demand spikes are the operational failure modes to volunteer unprompted",
+  ]}
+/>

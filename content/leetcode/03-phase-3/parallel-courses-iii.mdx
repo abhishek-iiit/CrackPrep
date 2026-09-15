@@ -1,0 +1,123 @@
+---
+title: "Parallel Courses III"
+number: "03.26"
+summary: "Prerequisites form a DAG and courses run in parallel when unlocked — the answer is longest path in a weighted DAG, computed in topo order."
+status: published
+free: true
+difficulty: deep
+estMinutes: 18
+tags: [topological-sort, dp, graph]
+updated: "2026-09-15"
+---
+
+## Critical path on a semester graph
+
+You have `n` courses, each taking `time[i]` months. Relations `[prev, next]` mean `next` cannot start until `prev` finishes. Unlimited parallel courses when allowed. Return the minimum months to finish **all** courses.
+
+This is not 03.25 Course Schedule II's ordering question — you need the **makespan**. If course 1 takes 3 months and courses 2 and 3 each take 4 months but both depend on 1, you finish in `3 + 4 = 7`, not `3 + 4 + 4`. Each course's finish time is the max finish time among its prerequisites plus its own duration. That is **longest path in a DAG** with node weights.
+
+DFS with memo works; **topological sort + relaxation** is the interview-friendly version and extends 03.25 directly.
+
+## Topo order + DP relaxation
+
+Build graph and in-degrees. `dist[c]` = earliest finish month for course `c`. Seed queue with courses having no prerequisites: `dist[c] = time[c-1]`. Process in topo order; for edge `u → v`, update `dist[v] = max(dist[v], dist[u] + time[v-1])`. Answer is `max(dist)`.
+
+The invariant: when `u` is processed, `dist[u]` is final because all predecessors were processed earlier in topo order.
+
+<Steps>
+<Step title="Build adjacency and in-degree (1-indexed courses)">
+Relations are `[prev, next]` with labels 1…n.
+</Step>
+<Step title="Initialize dist for zero in-degree courses">
+`dist[c] = time[c-1]` — course duration only, no wait.
+</Step>
+<Step title="Kahn process, relax each outgoing edge">
+`dist[v] = max(dist[v], dist[u] + time[v-1])`.
+</Step>
+<Step title="Return max of dist[1…n]">
+The global finish time is the slowest chain, not sum of all courses.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function minimumTime(
+  n: number,
+  relations: number[][],
+  time: number[]
+): number {
+  const indeg = new Array(n + 1).fill(0);
+  const adj: number[][] = Array.from({ length: n + 1 }, () => []);
+
+  for (const [prev, next] of relations) {
+    adj[prev].push(next);
+    indeg[next]++;
+  }
+
+  const dist = new Array(n + 1).fill(0);
+  const queue: number[] = [];
+
+  for (let c = 1; c <= n; c++) {
+    if (indeg[c] === 0) {
+      dist[c] = time[c - 1];
+      queue.push(c);
+    }
+  }
+
+  while (queue.length) {
+    const u = queue.shift()!;
+    for (const v of adj[u]) {
+      dist[v] = Math.max(dist[v], dist[u] + time[v - 1]);
+      indeg[v]--;
+      if (indeg[v] === 0) queue.push(v);
+    }
+  }
+
+  return Math.max(...dist.slice(1));
+}
+```
+
+Time **O(V + E)**. Space **O(V + E)**. Same asymptotics as 03.25 with O(1) extra per edge for relaxation.
+
+<Callout type="note">
+Courses are 1-indexed in the input but `time` is 0-indexed — `time[c - 1]` for course `c` is the off-by-one trap that shows up in tests, not in reasoning.
+</Callout>
+
+<Tradeoff
+  forTitle="Topo sort + dist relaxation when"
+  againstTitle="DFS memo / brute simulation when"
+  forItems={[
+    "Graph is a DAG with explicit prerequisites — longest path on DAG is well-defined",
+    "Parallelism means you take max over predecessor finish times, not sum",
+    "Extends 03.25 Course Schedule II naturally — same Kahn skeleton, one extra array",
+    "n up to 5×10⁴ — O(V+E) required; simulating month-by-month is prohibitive",
+    "Interview narrative maps to real project scheduling (critical path method)",
+  ]}
+  againstItems={[
+    "Only need feasibility, not time — 01.28 Course Schedule boolean suffices",
+    "Need explicit schedule of which courses run each month — output construction is harder",
+    "Graph may have cycles — this problem assumes DAG; cycle check comes first",
+    "n is tiny — brute layer-by-layer BFS on time axis is acceptable for demonstration",
+    "Weights on edges instead of nodes — shift duration to edges with same topo DP",
+  ]}
+/>
+
+## In an interview
+
+Example: courses 1 (3 mo) → 2 (4 mo) and 1 → 3 (2 mo) running in parallel after 1 finishes → total 7. Clarify unlimited parallelism, each course runs continuously once started, relations are 1-indexed.
+
+Say: critical path on weighted DAG; topo order ensures predecessors finalized before relax; answer is max finish time.
+
+Follow-ups: minimum semesters with at most k parallel courses, cycle detection, tie to 03.25 ordering. Bug: summing all course times instead of longest chain; 0-index vs 1-index on `time`.
+
+<KeyTakeaways
+  items={[
+    "Parallel Courses III is longest path in a weighted DAG — finish time at v is max over preds plus time[v]",
+    "Unlimited parallelism means independent branches overlap — never sum durations on parallel tracks",
+    "Kahn topological sort plus dist relaxation is O(V+E) and reuses 03.25 Course Schedule II structure",
+    "Return max(dist) across all courses — the makespan equals the critical path length",
+    "Courses are 1-indexed; time array is 0-indexed — adjust when reading duration",
+    "01.28 Course Schedule checks cycle existence; 03.25 returns order; this problem adds timing on the same DAG model",
+  ]}
+/>

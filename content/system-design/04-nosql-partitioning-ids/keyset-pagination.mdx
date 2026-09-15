@@ -1,32 +1,107 @@
 ---
 title: "Keyset Pagination"
 number: "04.12"
-summary: "Keyset Pagination — notes in progress."
-status: draft
+summary: "Cursor pagination that seeks to the next row by the last seen key instead of OFFSET, so deep pages stay O(1) index work instead of scanning discarded rows."
+status: published
 free: true
 difficulty: core
 estMinutes: 12
+tags: [pagination, cursors, databases]
+updated: "2026-09-15"
 ---
 
-## The problem
+## OFFSET is a full-price skip
 
-What breaks without this, and the situation that forces the decision.
+`LIMIT 20 OFFSET 100000` does not jump to row 100,001. In most relational engines it walks the ordered index (or sorts), discards the first 100,000 rows that matched, and returns the next 20. Page one is cheap. Page 5,000 is a linear scan of everything you threw away, paid on every request. Feeds, admin tables, and infinite scroll that "just use offset" get slower the further users go — which is exactly when they are still engaged enough to notice.
 
-## How it works
+**Keyset pagination** (also called seek or cursor pagination) replaces the offset with a WHERE clause on the sort key: give me rows *after* the last row I already showed. The engine seeks to that position in the index and reads the next page. Work per page stays roughly constant regardless of depth. The API returns an opaque cursor — usually the last sort-key values — instead of a page number.
 
-The mechanism, step by step.
+That is the whole trade: you give up random access to "page 47" and stable numbering under concurrent inserts, and you gain a pagination path that does not get more expensive as users scroll.
 
-## Tradeoffs
+## How the seek works
+
+Sort by something monotonic and indexed — typically `(created_at DESC, id DESC)` so ties break on a unique column. After returning a page ending at `(t, i)`, the next page is:
+
+```sql
+SELECT *
+FROM events
+WHERE (created_at, id) < (:t, :i)   -- for DESC order; flip for ASC
+ORDER BY created_at DESC, id DESC
+LIMIT 20;
+```
+
+Tuple comparison is the readable form; some engines prefer the expanded OR/AND shape. Either way the predicate is **sargable** against a matching composite index — the planner can seek, not scan-and-discard.
+
+<Steps>
+  <Step title="Pick a total order">
+    Include a unique tie-breaker (`id`) beside the business sort column. Without it, rows that share a timestamp can be skipped or repeated when a page boundary lands inside the tie.
+  </Step>
+  <Step title="Return a cursor with the page">
+    Encode the last row's sort key — often base64 JSON or a signed token — so clients echo it back without inventing their own. Opaque cursors let you change encoding later.
+  </Step>
+  <Step title="Seek, do not offset">
+    Next request applies `WHERE` relative to the cursor and `LIMIT` only. No `OFFSET`. No `COUNT(*)` on the hot path unless the product truly needs a total.
+  </Step>
+  <Step title="Define empty-cursor behaviour">
+    Missing cursor means "first page". Cursor for a deleted row should still seek past that key — comparisons work on values, not on row presence — so deletes rarely break scrolling the way offset pages do.
+  </Step>
+</Steps>
+
+| Approach | Deep page cost | Jump to page N | Behaviour under inserts above the cursor |
+| --- | --- | --- | --- |
+| `OFFSET` / page number | Grows with offset | Natural | Rows shift; duplicates and skips common |
+| Keyset / cursor | ~Constant seek + page | Not supported directly | Stable relative to the cursor; new rows appear on refresh of earlier pages |
+| Continuation tokens in APIs (DynamoDB, etc.) | Engine-native seek | Same limitation | Same idea, opaque token owned by the store |
+
+## What you lose
+
+Keyset pagination is not a drop-in for every UI.
+
+- **No page numbers.** "Go to page 20" requires either offset (with its cost), a separate estimated count plus a different access path, or accepting that infinite scroll is the interface.
+- **Filtering must stay aligned with the cursor.** If the user changes a filter mid-scroll, discard the cursor and start over — old cursors encode a position in a different result set.
+- **Multi-column sort needs a matching index.** Seek on `(score DESC, id DESC)` without that index falls back to expensive plans; design the index for the pagination order you ship.
+- **Global id order can be the wrong cursor.** If ids are only roughly time-ordered across writers, cursors inherit that fiction — 04.11 Clock Skew And ID Ordering. Prefer a sort key that matches the product order (per-timeline sequence, accept time on one writer).
+
+<Callout type="tip">
+Total counts are a separate feature from pagination. `SELECT COUNT(*)` over the same filter can be as expensive as the deep offset you avoided. Ship "load more" without a total, cache approximate counts, or compute totals asynchronously when the UI insists on "142,033 results".
+</Callout>
+
+## Concurrent writes
+
+Offset pagination shuffles: an insert at the top pushes every later row down one, so page 2 both repeats and skips depending on timing. Keyset pagination is stable *relative to the cursor* — you will not re-see rows older than the cursor because of an insert above you. You also will not see that new insert until you refresh from the start (or maintain a bidirectional cursor). Say that trade out loud in interviews; it is usually the desired feed behaviour.
+
+Deletes of the cursor row are mostly harmless if the cursor stores values: the next seek still finds the next key below those values. Deletes of rows *inside* a page the client already rendered are a UI concern, not a pagination-correctness concern.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Use keyset pagination when"
+  againstTitle="Use offset (or page numbers) when"
+  forItems={[
+    "Clients scroll or 'load more' through large result sets and deep offsets would dominate query time",
+    "A composite index matches the sort order, so seeks stay index-only work",
+    "The product can live without jumping to arbitrary page numbers",
+    "You want stable forward iteration under concurrent inserts above the current position",
+    "APIs are consumed by mobile or infinite-scroll UIs that already think in cursors",
+  ]}
+  againstItems={[
+    "The UI must show page numbers and 'jump to page N' as a hard requirement",
+    "Result sets are tiny — a few pages — and OFFSET cost is noise next to everything else",
+    "Sort order is user-defined ad hoc and you cannot index every permutation",
+    "You need a cheap exact total count tied to the same query (neither approach makes that free)",
+    "Legacy clients speak only page indexes and rewriting them is out of scope for now",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Replace "we'll paginate" with the mechanism: "Feed pages use keyset on `(created_at, id)` with an opaque cursor; no OFFSET, so deep scroll stays a seek." Mention the unique tie-breaker and the matching composite index. Expect follow-ups on page numbers (decline or isolate to admin tools), concurrent inserts (stable forward cursor), and whether Snowflake ids are a safe sort key (only if you accept approximate time order — otherwise per-entity sequences). If the store is DynamoDB-style, say "exclusive start key / continuation token" — same idea, engine-native.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "OFFSET pagination pays for every skipped row; cost grows with page depth",
+    "Keyset pagination seeks to the last seen sort key and reads the next LIMIT rows at roughly constant cost",
+    "Include a unique tie-breaker in the order and cursor so equal timestamps do not skip or repeat rows",
+    "You trade away arbitrary page numbers; infinite scroll and 'load more' are the natural fit",
+    "Cursors are stable under inserts above the position; they do not replace a correct product sort key",
+    "Index the pagination order — without a matching composite index the seek plan disappears",
+  ]}
+/>

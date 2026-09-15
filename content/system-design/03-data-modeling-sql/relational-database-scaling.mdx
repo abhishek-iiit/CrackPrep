@@ -1,32 +1,91 @@
 ---
 title: "Relational Database Scaling"
 number: "03.10"
-summary: "Relational Database Scaling — notes in progress."
-status: draft
+summary: "The ladder of levers between one Postgres instance and a sharded fleet, and why every rung but the last leaves writes on a single machine."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [scaling, replication, sharding, connection-pooling]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The write is still going to one machine, no matter how many read replicas you add
 
-What breaks without this, and the situation that forces the decision.
+Most of what gets called "scaling the database" is scaling reads. That is not a criticism — reads usually are the bulk of the traffic, and every lever in this lesson except the last one leaves writes exactly where they started, on a single primary. The reason is structural: a relational database gives you strong consistency by serializing writes through one place that can see all of them. Add a second place that also accepts writes to the same rows and you need a way to reconcile conflicting versions of the truth — a different, harder system than the one you started with.
 
-## How it works
+So the practical question is not "how do I scale the database" but "how far can I get without touching the write path," because every rung on this ladder is cheaper and more reversible than the one after it:
 
-The mechanism, step by step.
+| Lever | What it buys | What limits it |
+| --- | --- | --- |
+| Vertical scaling | More CPU, RAM, and IOPS on the same box; nothing else changes | Bounded by the largest instance class that exists, and cost grows worse than linearly near the top of the range |
+| Connection pooling | Lets far more application processes share a fixed, small number of real database connections | Doesn't add capacity — it stops you from running out of capacity you already had |
+| Read replicas | Read throughput scales with the number of replicas, independent of the primary | Writes still go through one primary; replicas lag, so reads can be stale |
+| Caching in front | Absorbs read traffic before it reaches the database at all | Only helps the read/write ratio described in 01.01 Requirements Clarification; a write-heavy workload gets little from it |
+| Query and index work | Often removes 10-100x the load a hardware upgrade would, for free | Bounded by the schema and access patterns you already have — no lever left once queries are already efficient |
+| Functional partitioning | Splits one database's write load across several, by moving whole tables or domains to their own instance | Cross-domain joins and transactions now cross a network boundary |
+| Sharding | The only lever that scales writes horizontally | Everything about the schema, queries, and identifiers changes — see 04.05 Sharding And Partitioning |
 
-## Tradeoffs
+## Vertical scaling and connection pooling: the levers you pull before you touch architecture
+
+A bigger instance is the first move because it changes nothing about the application. More CPU, more memory for the buffer pool, faster storage — the same queries just run faster or stop contending for I/O. It works until you hit the cloud provider's largest instance class, at which point the lever is simply gone, and the cost curve near that ceiling is usually much steeper than linear: the jump to the largest instance available often costs several times more for well under several times the throughput.
+
+Connection pooling gets reached for around the same time, for a different reason: it isn't capacity at all, it's overhead. Each open connection to a relational database usually costs real memory on the server — a dedicated process or thread, several megabytes of working memory — so a database caps how many connections it will hold open, typically in the hundreds to low thousands. A fleet of application instances, each holding a pool of a few dozen connections open "just in case," can exhaust that cap while the database's actual CPU sits idle. A pooler between the application and the database — PgBouncer and ProxySQL are the common examples — multiplexes thousands of short-lived client requests onto a much smaller number of real backend connections, and this alone often turns "we need a bigger database" into "we need to stop holding connections open for no reason."
+
+## Read replicas move load, but they also move a consistency guarantee
+
+A read replica applies the primary's write-ahead log asynchronously and serves reads locally, so read capacity scales with the number of replicas you run rather than with the primary's own hardware (06.03 Replication covers the mechanics of applying that log). What it costs is not obvious from the architecture diagram: replication is asynchronous, which means a replica is always some distance behind the primary, usually milliseconds, sometimes much more under load.
+
+That lag is where "scaled the database" turns into a bug report. A user posts a comment, the write commits on the primary, the page reloads and reads from a replica that hasn't caught up yet, and the comment is missing. Not corruption, not a race condition — exactly what asynchronous replication promises. The fix is routing, not more replicas: route a user's read of their own recent write back to the primary, or to a replica known to have caught up, for a short window after the write, and let everything else read from whichever replica is convenient.
+
+<Callout type="note">
+Replica lag is usually reported in bytes or seconds behind the primary, and it is worth alerting on directly rather than inferring it from user complaints. A replica that silently falls further and further behind under sustained write load is heading toward the same failure LSM compaction debt produces in 07.09 LSM Tree Storage Engine: a gradually growing gap that looks fine until something forces you to notice it all at once — a failover that promotes a replica missing the last several minutes of writes.
+</Callout>
+
+## Caching and query work usually beat a hardware upgrade
+
+Caching in front of the database (05.01 Caching Layers, and 05.06 Cache Availability And Database Fallback for what happens when the cache itself is unavailable) removes read traffic entirely rather than spreading it across more instances. It is highest-leverage exactly when the read/write ratio is lopsided toward reads — the same number from 01.01 Requirements Clarification that decides almost everything else about a design. A workload near 1:1 gets little from a cache, because nothing is read often enough to be worth keeping warm.
+
+The other move easy to skip past on the way to buying more hardware is fixing the queries and indexes running against what you already have. 03.03 Database Indexing and 03.05 Query Planning cover this in depth; the point worth stating plainly here is one of ordering — a missing index can cost a table scan on every request, and adding the right one can turn that into a handful of page reads. That is routinely a 10-100x improvement, for free, and worth ruling out before concluding the database needs to be bigger, replicated further, or split apart.
+
+## When none of that is enough: splitting the database itself
+
+Functional partitioning — moving whole tables or domains onto their own instance, orders and inventory on one, user profiles on another — is the step before sharding proper. It scales write capacity, because now there are two primaries instead of one, each handling a narrower slice of the load. The cost is that a join or transaction spanning two domains, once one query against one database, is now two round trips with no shared transaction boundary, and the application has to own the consistency story the database used to give for free.
+
+Sharding — splitting a single logical table's rows across many databases by some partition key — is the lever that actually scales a table's writes horizontally, and the one that changes the most. 04.05 Sharding And Partitioning covers the mechanics; what belongs here is why it comes last: every earlier lever is closer to reversible. You can resize an instance back down, remove a cache, drop a replica. Sharding rewrites how every query addresses data, and un-sharding later is a migration on the same order of difficulty as sharding was in the first place. It is also where the auto-increment problem from 03.09 Database Ticket Servers shows up directly — a scheme that worked fine on one database stops meaning anything once there is more than one.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Climb the ladder — replicas, caching, query work, vertical scale — when"
+  againstTitle="Shard (or split functionally) when"
+  forItems={[
+    "The workload is read-heavy enough that replicas and caching absorb most of the growth",
+    "The current schema and queries have real headroom left — an unindexed hot query is cheaper to fix than a hardware upgrade",
+    "You are not yet at the ceiling of the largest available instance class",
+    "The team can tolerate replica lag with routing rules rather than needing every read to be immediately consistent",
+    "Reversibility matters more than raw ceiling — every rung below sharding can be undone without a migration",
+  ]}
+  againstItems={[
+    "Write throughput itself, not read throughput, is the bottleneck, and no single bigger box exists to buy your way out of it",
+    "The dataset no longer fits comfortably in one instance's storage or memory even after archiving cold data (04.14 Hot And Cold Storage Archival)",
+    "Write hot spots are concentrated enough on one table that no amount of caching or indexing elsewhere touches them",
+    "You are prepared to redesign identifiers, cross-shard queries, and transactional boundaries — sharding is not additive, it changes the schema's contract",
+    "The organization can own the operational cost of many database instances instead of one, including a migration that is hard to reverse",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Present it as a ladder, not a single decision: "I'd reach for read replicas and caching first, since this is read-heavy, and only shard if the write rate itself is the bottleneck — sharding is the one lever here I can't easily undo." Naming the ladder in order signals that you know sharding is expensive before you're asked, which is exactly the question interviewers hold in reserve for anyone who jumps straight to it.
 
-<KeyTakeaways items={["", "", ""]} />
+Be ready to name what replica lag actually looks like in the product — a user not seeing their own write — because that is the detail that separates knowing replication exists from having reasoned about what asynchronous means for a real request path.
+
+<KeyTakeaways
+  items={[
+    "A relational database scales reads far more easily than writes, because writes are serialized through one place that can see all of them",
+    "Vertical scaling and connection pooling are the cheapest, most reversible levers, and pooling often removes a bottleneck that isn't capacity at all",
+    "Read replicas scale read throughput but introduce replication lag, which shows up as a user not seeing their own just-completed write",
+    "Caching and query or index optimization frequently beat a hardware upgrade outright, and cost nothing extra to run",
+    "Functional partitioning and sharding scale writes, but they are the least reversible levers and the only ones that change the schema's contract",
+    "Reach for sharding specifically when write throughput, not read throughput or storage, is the bottleneck no other lever touches",
+  ]}
+/>

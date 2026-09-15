@@ -1,32 +1,81 @@
 ---
 title: "Monolith Vs Microservices"
 number: "01.09"
-summary: "Monolith Vs Microservices — notes in progress."
-status: draft
+summary: "Splitting a codebase into services trades one deploy pipeline for many, and the split only pays off if it buys teams independent deploys, not just more boxes."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 14
+tags: [architecture, microservices, deployment]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The seam that pays off is organizational, not technical
 
-What breaks without this, and the situation that forces the decision.
+A monolith is one codebase, one build, one deploy, one process boundary (even if it runs on many machines behind a load balancer). Every function call between "modules" is an in-process call — fast, transactional, and type-checked at compile time if the language has one. A microservice architecture cuts that codebase along seams and puts a network between the pieces. The same call that used to be a function invocation is now a request that can time out, arrive twice, or never arrive at all.
 
-## How it works
+Nobody splits a monolith because the CPU asked for it. A single process can serve enormous throughput before compute is the reason to split — 01.08 Horizontal Vs Vertical Scaling and 03.10 Relational Database Scaling cover how far a monolith's compute and data tiers can stretch behind a load balancer without touching the service boundary at all. The actual trigger is almost always organizational: enough engineers are working in one codebase that they are blocked on each other's changes, one team's slow test suite delays every other team's deploy, and a change three teams didn't ask for breaks a fourth team's feature the night before a release. That is Conway's Law showing up as an incident: the software's structure ends up mirroring the communication structure of the org that built it, whether or not anyone designed it that way. Microservices are, first, a way to let teams deploy independently. Everything else attributed to them — independent scaling, technology choice per service, fault isolation — is a real benefit, but a second-order one, and it is not usually the reason the split is forced.
 
-The mechanism, step by step.
+## What splitting actually costs
 
-## Tradeoffs
+Every one of the in-process calls that used to be free now has to be re-earned:
+
+- **Partial failure becomes routine, not exceptional.** A function call either returns or the process crashes. A network call can also hang, time out, or succeed on the server while the response is lost in transit — the caller cannot tell "it never happened" from "it happened and I didn't hear back." 02.09 Retries Timeouts And Idempotency exists because of this exact ambiguity, and every service boundary needs an answer to it.
+- **Transactions stop being free.** A single database transaction across two tables in a monolith is one commit. The same operation split across two services with two databases has no single commit — it needs a saga, compensating actions, or an acceptance of eventual consistency, and someone has to write and test the rollback path by hand.
+- **The API between services becomes a durable contract.** 02.01 API Design Contracts covers this directly: once another team's service calls yours in production, that shape is load-bearing, and changing it without a version negotiation breaks a caller that is not in your codebase and might not even be in your organization's on-call rotation.
+- **Operational cost multiplies by service count.** Every service is a deploy pipeline, a set of dashboards, an alerting policy, and a place an on-call engineer has to know how to debug at 3am. Ten services is not ten times the code; it is ten times the operational surface, and most of that cost is fixed per service regardless of how small the service is.
+- **Debugging a single request means tracing it across process boundaries.** A stack trace stops at the network call. Understanding why a request was slow now requires distributed tracing correlated across services that may be owned by different teams, running different versions, deployed at different times.
+
+None of this means the split is wrong. It means the split has to be paying for something the monolith could not give you — usually independent deploys for independently-owned pieces — and the price above is what it costs to buy that.
+
+<Callout type="gotcha">
+The failure mode worth naming before anyone asks about it: a "distributed monolith". Services are split into separate deployables, but they call each other synchronously in long chains, share one database, or must ship together because their contracts changed in lockstep. You now pay every cost of microservices — network hops, partial failure, operational multiplication — while keeping the monolith's actual problem, coupled deploys, because nobody can ship one service without the others. The split only pays for itself if the services end up independently deployable, and that has to be verified, not assumed from the org chart having separate repos.
+</Callout>
+
+## Comparing the two
+
+| | Monolith | Microservices |
+| --- | --- | --- |
+| Deploy | One pipeline, one release; a bug anywhere can block everyone's release | Independent per service, if the split is real |
+| Data ownership | One database, joins are free | Each service should own its data; cross-service joins become API calls or duplicated data |
+| Scaling granularity | The whole process scales together, even if only one part is hot | Each service scales to its own load — costly if uniform, valuable if uneven |
+| Failure isolation | A crash takes down the whole process | A failing service degrades a feature, not the whole system — if callers handle it |
+| Cross-cutting change | One PR, one deploy | Coordinated rollout across however many services touch it |
+| Local reasoning | High — one codebase, one debugger, one stack trace | Lower — a request's path is spread across services and logs |
+| Team model | Works with one team, strains past several | Fits multiple teams that need to ship independently |
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Split into microservices when"
+  againstTitle="Stay a monolith when"
+  forItems={[
+    "Multiple teams are blocked on each other's deploys inside one codebase, and the blocking is measured, not anticipated",
+    "Components genuinely have different scaling profiles — a video transcoding path and an auth path do not want to scale together",
+    "A component needs a different technology or runtime than the rest — a specific language, GPU access, a different consistency model",
+    "You can name the data ownership boundary cleanly enough that each service can own its own store without constant cross-service joins",
+    "Fault isolation is worth the cost — one feature failing should not be allowed to take the whole product down",
+  ]}
+  againstItems={[
+    "The team is small enough that one codebase and one deploy pipeline is not yet the bottleneck",
+    "The data model is deeply relational and hard to cut along service lines without cross-service transactions everywhere",
+    "You cannot yet draw the service boundaries with confidence — a wrong cut made permanent is more expensive to undo than a monolith is to split later",
+    "Latency budgets are tight and cannot absorb the network hops a split would introduce between components that talk constantly",
+    "The operational maturity for distributed tracing, per-service on-call, and contract versioning does not exist yet",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Say what forces the split before drawing it: "I would start as a monolith unless the prompt tells me multiple teams need to ship independently, or one component has a scaling or technology need the rest doesn't share." If the prompt does call for services, name the contract and the failure mode in the same breath as the boundary — "the recommendation service calls the catalog service over gRPC; if it times out, the API layer falls back to a cached list rather than failing the whole page." That sentence answers the two follow-ups an interviewer is about to ask anyway: what's the contract, and what happens when a callee is down.
 
-<KeyTakeaways items={["", "", ""]} />
+Naming the "distributed monolith" trap unprompted is a strong signal — it shows you know microservices are not a synonym for scalable, and that the actual return on the split is independent deployability, not the diagram having more boxes.
+
+<KeyTakeaways
+  items={[
+    "The usual trigger for splitting a monolith is organizational — multiple teams blocked on one deploy pipeline — not raw compute load",
+    "Every in-process call that becomes a network call inherits partial failure: timeouts, lost responses, and retries that need to be idempotent",
+    "A transaction spanning two services has no single commit; it needs a saga or compensating actions, and someone has to write the rollback by hand",
+    "Operational cost scales with service count more than with code size — each service is its own pipeline, dashboards, and on-call burden",
+    "A 'distributed monolith' pays every cost of microservices while keeping the monolith's coupling, because services that must ship together were never really split",
+    "The split only pays off if it buys independent deployability for teams that actually need it — verify that, don't assume it from separate repos",
+  ]}
+/>

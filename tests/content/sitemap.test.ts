@@ -1,14 +1,16 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import sitemap from "@/app/sitemap";
-import { courseSlug, getCourseStats, getModules } from "@/lib/content";
+import { courseSlug, getCourseStats, getLiveCourseSlugs, getModules } from "@/lib/content";
 
 describe("sitemap", () => {
   const entries = sitemap();
 
-  it("includes every static page plus all modules and lessons", () => {
-    const stats = getCourseStats(courseSlug);
-    // 4 static (/, /courses, /syllabus, /system-design) + 14 modules + 179 lessons
-    expect(entries).toHaveLength(4 + stats.moduleCount + stats.topicCount);
+  it("includes every static page plus all live modules and lessons", () => {
+    const live = getLiveCourseSlugs();
+    const moduleCount = live.reduce((n, s) => n + getCourseStats(s).moduleCount, 0);
+    const topicCount = live.reduce((n, s) => n + getCourseStats(s).topicCount, 0);
+    // /, /courses, /syllabus + one entry per live course home + modules + lessons
+    expect(entries).toHaveLength(3 + live.length + moduleCount + topicCount);
   });
 
   it("emits absolute urls", () => {
@@ -22,9 +24,21 @@ describe("sitemap", () => {
     expect(new Set(urls).size).toBe(urls.length);
   });
 
-  it("includes a known lesson url", () => {
+  it("includes a known system-design lesson url", () => {
     const first = getModules(courseSlug)[0].lessons[0];
     expect(entries.some((e) => e.url.endsWith(first.url))).toBe(true);
+  });
+
+  it("includes the leetcode course home", () => {
+    expect(entries.some((e) => e.url.endsWith("/leetcode"))).toBe(true);
+  });
+
+  it("includes the design-patterns course home", () => {
+    expect(entries.some((e) => e.url.endsWith("/design-patterns"))).toBe(true);
+  });
+
+  it("includes the case-studies course home", () => {
+    expect(entries.some((e) => e.url.endsWith("/case-studies"))).toBe(true);
   });
 });
 

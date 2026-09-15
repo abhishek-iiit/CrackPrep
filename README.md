@@ -10,10 +10,9 @@ command palette backed by a build-time JSON index. Everything ships
 statically — there is no server, no database, and no accounts; the only
 optional runtime configuration is where the email-capture form posts to.
 
-The site is built so a second course (the roadmap in `content/courses.ts`
-lists `ai-research`, `ml-maths`, `inference-engineering` as placeholders) can
-be added later as a content directory plus one registry entry, without new
-page components.
+Three courses are live today: `system-design`, `leetcode`, and
+`design-patterns`. Additional courses can be added as a content directory plus
+registry entry in `content/courses.ts` and routes under `app/<slug>/`.
 
 Full design rationale: `docs/superpowers/specs/2026-09-08-cineshek-system-design-site-design.md`.
 The task-by-task implementation plan that built this repo:
@@ -51,7 +50,7 @@ See `.env.example`. Both are optional in development:
 |---|---|
 | `npm run dev` | Next.js dev server. |
 | `npm run build` | Production build. `prebuild` (below) runs first automatically. |
-| `npm run prebuild` | Regenerates `public/search-index.json` from published lessons. Runs automatically before `build`; you should not need to call it directly. |
+| `npm run prebuild` / `npm run predev` | Regenerates `public/search-index.json` from published lessons. Runs automatically before `build` and `dev`. |
 | `npm start` | Serves the production build from `.next/`. Run `build` first. |
 | `npm run lint` | ESLint, zero errors and zero warnings required. |
 | `npm run typecheck` | `tsc --noEmit`. |
@@ -153,14 +152,14 @@ A few rules are structural, not stylistic, and are enforced by
   or `lib/`. Everything else reads content through `lib/content/index.ts`.
 - **`gray-matter` may not be imported from `app/` or `components/`.**
   Frontmatter parsing happens once, in `lib/content/source.ts`.
-- **Client components are limited to seven named leaves:** `ThemeToggle`,
-  `AnnouncementBar`, `SidebarTree`, `TableOfContents`, `ProgressTracker`,
-  `SearchPalette`, and `app/error.tsx` (Next.js requires error boundaries to
-  be Client Components, so it's an allowed exception rather than an eighth
-  interactive leaf). No layout, page, or content component may declare
-  `"use client"`. This keeps the site server-rendered by default; adding a
-  new interactive widget means either making it a leaf like the ones above
-  or updating the allow-list in `boundaries.test.ts` deliberately, not by
+- **Client components are limited to eight named leaves:** `ThemeToggle`,
+  `ThemeProvider`, `AnnouncementBar`, `SidebarTree`, `TableOfContents`,
+  `ProgressTracker`, `SearchPalette`, and `app/error.tsx` (Next.js requires
+  error boundaries to be Client Components). No layout, page, or content
+  component may declare `"use client"`. This keeps the site server-rendered
+  by default; adding a new interactive widget means either making it a leaf
+  like the ones above or updating the allow-list in `boundaries.test.ts`
+  deliberately, not by
   accident.
 
 ## Keyboard and screen-reader affordances

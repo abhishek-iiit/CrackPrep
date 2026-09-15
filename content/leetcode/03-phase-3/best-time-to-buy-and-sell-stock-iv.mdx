@@ -1,0 +1,119 @@
+---
+title: "Best Time to Buy and Sell Stock IV"
+number: "03.43"
+summary: "General k transactions: buy[j] and sell[j] arrays updated backward each day — when k ≥ n/2, greedy capture every uphill."
+status: published
+free: true
+difficulty: deep
+estMinutes: 20
+tags: [dp, array, greedy]
+updated: "2026-09-15"
+---
+
+## k is the knob — and sometimes it does not matter
+
+Given an integer `k` and daily prices, maximize profit with **at most k** complete transactions. Same rules as 03.42: no overlapping holds, sell before the next buy.
+
+03.42's four scalars are the k = 2 special case. For general k, maintain two arrays of length `k + 1`:
+
+- `buy[j]` — minimum cost to enter the j-th transaction (best effective buy price so far)
+- `sell[j]` — maximum profit after completing j transactions
+
+For each price, update transactions **from k down to 1** so same-day sells do not fund same-day buys incorrectly:
+
+```
+sell[j] = max(sell[j], buy[j] + price)
+buy[j]  = min(buy[j], sell[j-1] - price)
+```
+
+`sell[0] = 0` — zero transactions yield zero profit. `buy[j]` starts at `Infinity`.
+
+## The k ≥ n/2 shortcut
+
+You cannot complete more than one transaction per two days in the worst case — at most `⌊n/2⌋` meaningful transactions exist. When `k >= n/2`, the cap is irrelevant: capture **every upward slope** greedily (same as unlimited transactions).
+
+```text
+profit += max(0, prices[i] - prices[i-1])  for i = 1..n-1
+```
+
+For `[1,2,3,4,5]` with k = 2, greedy uphill gives 4 — same as one long hold. For k = 100 on a length-5 array, skip the DP entirely.
+
+<Steps>
+<Step title="Check k against n/2">
+  If k >= floor(n/2), run uphill greedy and return.
+</Step>
+<Step title="Initialize buy[1..k] = Infinity, sell[0..k] = 0">
+  sell[0] is the base for the first buy.
+</Step>
+<Step title="For each price, j from k down to 1">
+  Relax sell[j] then buy[j] using sell[j-1] as prior profit.
+</Step>
+<Step title="Return sell[k]">
+  Best profit with at most k completed round trips.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function maxProfit(k: number, prices: number[]): number {
+  const n = prices.length;
+  if (k >= Math.floor(n / 2)) {
+    let profit = 0;
+    for (let i = 1; i < n; i++) {
+      if (prices[i] > prices[i - 1]) profit += prices[i] - prices[i - 1];
+    }
+    return profit;
+  }
+
+  const buy = new Array<number>(k + 1).fill(Infinity);
+  const sell = new Array<number>(k + 1).fill(0);
+
+  for (const price of prices) {
+    for (let j = k; j >= 1; j--) {
+      sell[j] = Math.max(sell[j], buy[j] + price);
+      buy[j] = Math.min(buy[j], sell[j - 1] - price);
+    }
+  }
+
+  return sell[k];
+}
+```
+
+Time **O(n × k)**. Space **O(k)**.
+
+<Tradeoff
+  forTitle="buy/sell DP arrays when"
+  againstTitle="Uphill greedy when"
+  forItems={[
+    "k is small (typically ≤ 100) and n is large — O(nk) fits",
+    "You need the general template that also handles fees and cooldown with extra states",
+    "03.42 two-transaction problem is the k = 2 degenerate case of this structure",
+    "Interviewer explicitly caps transactions below the theoretical maximum",
+    "Prices oscillate — greedy every-uphill over-trades relative to a small k cap",
+  ]}
+  againstItems={[
+    "k ≥ n/2 — transaction limit never binds; greedy O(n) is optimal and simpler",
+    "k = 1 — revert to 01.02 one-pass min-price scan",
+    "Unlimited transactions with no k — pure uphill sum, no DP table",
+    "n and k both tiny — O(n²) split array remains readable for derivation",
+    "Problem adds cooldown — extend state machine rather than pure buy/sell arrays",
+  ]}
+/>
+
+## In an interview
+
+State the recurrence aloud: completing transaction j requires either keeping the best prior sell[j] or selling a position bought at buy[j]. Funding buy[j] uses sell[j-1] profit.
+
+Name the k ≥ n/2 optimization before coding — it signals you understand when the constraint is vacuous.
+
+Bug: iterating j from 1 to k instead of k down to 1, allowing same-day buy funded by same-day sell. Follow-ups: transaction fee per trade, mandatory cooldown day, return actual trade list.
+
+<KeyTakeaways items={[
+  "k transactions: buy[j] and sell[j] arrays updated per day, inner loop j from k down to 1.",
+  "buy[j] = min(buy[j], sell[j-1] - price) — prior completed profit subsidizes the next purchase.",
+  "When k >= n/2, the cap never binds — greedy sum of every positive day-to-day delta wins.",
+  "O(n × k) time, O(k) space; 03.42 is the k = 2 scalar compression of this template.",
+  "01.02 is k = 1; unlimited-transaction variant is the k → ∞ greedy uphill.",
+  "Reverse iteration order on j prevents same-day sell proceeds from funding same-day second buy.",
+]} />

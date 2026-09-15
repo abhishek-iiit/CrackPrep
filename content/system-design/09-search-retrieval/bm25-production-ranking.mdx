@@ -1,32 +1,138 @@
 ---
 title: "BM25 Production Ranking"
 number: "09.05"
-summary: "BM25 Production Ranking — notes in progress."
-status: draft
+summary: "The saturated TF and length-normalized scoring function most production search engines actually run — and how its knobs behave."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: deep
+estMinutes: 20
+tags: [search, ranking, bm25, lucene]
+updated: "2026-09-15"
 ---
 
-## The problem
+## TF-IDF's two production bugs
 
-What breaks without this, and the situation that forces the decision.
+09.04 TF-IDF Relevance Scoring gets the big idea right — rare terms matter more; frequency inside a document matters some — and then fails in the ways that show up the week you index real web pages or user-generated catalog copy.
 
-## How it works
+**TF does not saturate.** Under raw or gently logged TF, a document that mentions `shoes` forty times keeps gaining on one that mentions it four times. Past a point, extra occurrences are boilerplate, keyword stuffing, or a size chart repeating the product type. Relevance does not grow linearly with repetition.
 
-The mechanism, step by step.
+**Length is handled clumsily.** Long documents accumulate more term occurrences by chance. A short, exact product title can lose to a 5,000-word dump that happened to include the query words. Cosine normalization helps in the vector model but is awkward to combine with the rest of a modern multi-field scoring pipeline.
 
-## Tradeoffs
+BM25 (Best Match 25) is the family of ranking functions that fixes both with two explicit ideas: a TF component that approaches a horizontal asymptote, and a length normalization relative to the corpus average document length. It is the default scorer in Lucene-descended engines (Elasticsearch, OpenSearch, Solr) for a reason — not because it is trendy, but because it is robust on messy text with almost no training data.
+
+## The scoring function
+
+For query `Q` and document `d`, BM25 sums a contribution per query term `t`:
+
+<Formula label="BM25">score(Q, d) = Σ_{t ∈ Q} idf(t) · (f(t,d) · (k1 + 1)) / (f(t,d) + k1 · (1 − b + b · |d|/avgdl))</Formula>
+
+Where:
+
+- `f(t,d)` — term frequency of `t` in `d`
+- `|d|` — length of `d` (usually in tokens)
+- `avgdl` — average document length in the corpus (index statistic)
+- `k1` — TF saturation knob (typical default ≈ 1.2)
+- `b` — length-normalization knob (typical default ≈ 0.75)
+- `idf(t)` — an IDF-like term weight; Lucene's variant is roughly `log(1 + (N - df + 0.5) / (df + 0.5))`
+
+You do not need to memorize every `+0.5`. You do need to explain the fraction in the middle: as `f` grows, the fraction approaches `(k1+1)` / something that still depends on length — **additional occurrences help less and less**. When `|d|` is much larger than `avgdl`, the denominator grows (for `b > 0`), so the same raw `f` scores lower — **long docs are penalized relative to the average**.
+
+### How the knobs move rankings
+
+| Knob | Turn it up | Turn it down |
+| --- | --- | --- |
+| `k1` | More benefit from higher TF before saturation | TF saturates faster; 2 occurrences ≈ 20 |
+| `b` | Stronger penalty/reward vs `avgdl` | Closer to ignoring document length (`b = 0` disables length norm) |
+| IDF | (corpus-driven) rare terms dominate | Common terms contribute more — usually undesirable |
+
+Defaults of `k1 ≈ 1.2`, `b ≈ 0.75` are a starting point measured across many IR collections historically — a ballpark that works surprisingly often, not magic for your corpus. Product search with tiny title fields and huge description fields often wants per-field BM25 (see below) more than heroic global `k1` tuning.
+
+## Worked sketch: saturation in numbers
+
+Fix `k1 = 1.2`, `b = 0.75`, `|d| = avgdl` (so length factor = 1). The TF part simplifies to:
+
+`(f · 2.2) / (f + 1.2)`
+
+| f | TF component |
+| --- | --- |
+| 1 | 2.2 / 2.2 = 1.00 |
+| 2 | 4.4 / 3.2 ≈ 1.38 |
+| 5 | 11 / 6.2 ≈ 1.77 |
+| 10 | 22 / 11.2 ≈ 1.96 |
+| 100 | 220 / 101.2 ≈ 2.17 |
+
+Going from 1 → 2 occurrences is a big jump. Going from 10 → 100 barely moves the needle (toward the asymptote 2.2). That is the anti-spam property TF-IDF lacked. Multiply by IDF and sum over terms — same structure as TF-IDF, different TF and length behavior.
+
+## Implementation against an inverted index
+
+BM25 does not replace 09.02 Inverted Index And Posting Lists; it rides on them.
+
+<Steps>
+  <Step title="Index statistics">
+    Maintain N, avgdl, and per-term df (for IDF). Per document, know |d| — often stored in a norms table keyed by doc id. Per posting, store f(t,d) (term frequency).
+  </Step>
+  <Step title="Retrieve candidates">
+    Boolean / tiered retrieval (09.03) produces a candidate set — or, in document-at-a-time scorers, you score while traversing postings with top-k heaps so you never materialize huge candidate arrays.
+  </Step>
+  <Step title="Accumulate per-term contributions">
+    For each query term, for each candidate doc on its list, add idf(t) × saturated_tf(f, |d|, avgdl, k1, b). Skip terms with df so high they were stopped or are handled via champion lists (09.06).
+  </Step>
+  <Step title="Select top k">
+    Keep a min-heap of size k (10, 20, 100 — whatever the UI or the next ranking stage needs). Return ids for the forward index / stored fields lookup.
+  </Step>
+</Steps>
+
+**Multi-field BM25.** Title, body, brand, anchors are separate inverted fields, each with its own avgdl and often its own boost. Final score is a weighted sum of per-field BM25 scores. A hit in `title` should beat the same TF buried in `body`; that is a boost (or separate field weight), not a different theory of ranking.
+
+**BM25F** and similar extensions formalize multi-field term frequencies more carefully than naive summing; for interviews, saying "per-field BM25 with title boosted" is usually enough unless someone asks for the F variant by name.
+
+<Callout type="gotcha">
+BM25 assumes bag-of-words matching on the retrieval set it is given. It will not magically find synonyms you never indexed or expanded (09.07 Query Understanding Pipeline), and it will happily rank a document that matches every term in a junk order. Phrase boosts, proximity, and learning-to-rank features sit *on top of* or *beside* BM25 — they are not reasons to skip a solid lexical baseline.
+</Callout>
+
+## BM25 versus what comes after
+
+| Layer | Role |
+| --- | --- |
+| BM25 (lexical) | Strong unsupervised baseline; explains text match |
+| Static quality | Page authority, spam score, business rules — query-independent |
+| Behavioral signals | Clicks, add-to-cart, dwell — 09.08 Search Feedback And Relevance Signals |
+| Learning to rank | Model combining the above features; needs labels and eval (09.09) |
+
+Shipping BM25 alone is a complete product for many internal and mid-size search surfaces. Skipping BM25 and jumping to a neural ranker without a lexical baseline makes debugging painful: you cannot tell whether a miss is retrieval, lexical mismatch, or model failure.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Ship BM25 as the primary ranker when"
+  againstTitle="Invest beyond BM25 when"
+  forItems={[
+    "You need a robust default that handles length skew and term repetition without training data",
+    "The query language is mostly keyword / short product search where bag-of-words is a good model",
+    "Debuggability matters — you can explain a score from df, tf, and field boosts",
+    "Latency budget favors a few posting-list traversals over a heavyweight model on every candidate",
+    "You want a baseline against which to measure any fancier ranker in 09.09-style evaluation",
+  ]}
+  againstItems={[
+    "Relevance is dominated by behavior, personalization, or business ranking rules BM25 cannot see",
+    "Queries are natural-language questions needing semantic match beyond term overlap (see also 09.13 Vector Search And Hybrid Retrieval)",
+    "You already have reliable labels and a feature pipeline, and offline metrics show BM25 plateaued",
+    "Cross-language or synonym-heavy domains where lexical overlap is systematically insufficient",
+    "Legal/compliance ranking constraints require hand-authored rules that override statistical match",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Upgrade TF-IDF explicitly: "I use BM25 — same IDF idea, but TF saturates with k1 and length is normalized against average document length with b, so keyword stuffing and long pages don't automatically win." Write the TF fraction or at least sketch the asymptote. Name default-ish `k1` and `b` as starting points you would tune offline.
 
-<KeyTakeaways items={["", "", ""]} />
+Follow-ups: multi-field boosts, what stats live in the index, and how this sits under a learning-to-rank layer. Mention that Lucene defaults to BM25 so your design matches what operators already know how to tune. If they ask what breaks, say "synonyms and vocabulary mismatch" — retrieval/analysis problems — not BM25 arithmetic.
+
+<KeyTakeaways
+  items={[
+    "BM25 keeps IDF-style rarity weighting but saturates term frequency and normalizes length against avgdl",
+    "k1 controls how quickly additional occurrences stop helping; b controls how strongly document length vs average matters",
+    "With |d| = avgdl and k1 = 1.2, the TF component is (f·2.2)/(f+1.2) — huge gains from 1→2 occurrences, almost none from 10→100",
+    "Implementation stores tf on postings, |d| and avgdl as index norms/stats, and scores candidates from boolean retrieval or Doc-at-a-time heaps",
+    "Per-field BM25 with title/body boosts is how product search expresses structure without abandoning the lexical model",
+    "BM25 is the production lexical baseline; behavioral features and LTR build on it rather than replacing the need for a debuggable text score",
+  ]}
+/>

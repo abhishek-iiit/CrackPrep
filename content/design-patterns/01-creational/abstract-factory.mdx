@@ -1,0 +1,122 @@
+---
+title: "Abstract Factory"
+number: "01.03"
+summary: "Swap entire families of related products together so a Mac UI never accidentally pairs a Windows scrollbar with a Mac button."
+status: published
+free: true
+difficulty: core
+estMinutes: 15
+tags: [abstract-factory, product-families, creational]
+updated: "2026-09-15"
+---
+
+## Mixed widgets on the same screen
+
+You shipped a cross-platform UI toolkit. Buttons come from the Mac factory, scrollbars from the Windows port someone copied early, text fields from the web renderer experiment. Each control works in isolation. Together they disagree on padding, focus rings, font metrics, and accessibility roles. QA files bugs that reproduce only on the Mac-Windows hybrid theme nobody intended to ship.
+
+Abstract Factory addresses **consistency across a family of related objects**. You do not choose `MacButton` and then separately choose `WinScrollbar`. You choose `MacUIFactory` once, and every product it emits belongs to the same family. The constraint is explicit: products created by one factory are designed to work together; products from different factories are not interchangeable mid-session.
+
+Where 01.02 Factory Method answers "which single product class," Abstract Factory answers "which **bundle** of product classes, all at once."
+
+## One factory interface, many coordinated products
+
+The structure layers two abstractions:
+
+- **Abstract Factory** — declares creation methods for each product in the family (`createButton()`, `createCheckbox()`, `createScrollBar()`)
+- **Concrete Factory** — implements all of those methods for one family (`MacFactory`, `WinFactory`, `MaterialFactory`)
+- **Abstract Product** — interface per product kind (`Button`, `Checkbox`)
+- **Concrete Product** — family-specific implementations (`MacButton`, `WinButton`)
+
+The client holds a reference to `UIFactory` and calls creation methods without naming concrete classes. Switching the entire look-and-feel means swapping the factory instance — one line at the composition root, zero changes in widget-using code.
+
+<Steps>
+  <Step title="Identify the product family">
+    List objects that must stay visually or semantically consistent — not every class in the app, only the set that varies together as a theme or platform bundle.
+  </Step>
+  <Step title="Define Abstract Product interfaces">
+    One interface per product role. Keep them minimal — what the client actually invokes after construction.
+  </Step>
+  <Step title="Declare the Abstract Factory">
+    One method per product role, each returning the corresponding Abstract Product type.
+  </Step>
+  <Step title="Implement Concrete Factories">
+    `MacFactory.createButton()` returns `MacButton` and `MacFactory.createCheckbox()` returns `MacCheckbox`. Every method in a Concrete Factory pulls from the same family.
+  </Step>
+  <Step title="Inject the factory into clients">
+    `ApplicationUI` receives `UIFactory` in its constructor and creates widgets only through that interface. Theme or platform selection happens once upstream.
+  </Step>
+</Steps>
+
+```typescript
+interface UIFactory {
+  createButton(): Button;
+  createCheckbox(): Checkbox;
+}
+
+class MacFactory implements UIFactory {
+  createButton() { return new MacButton(); }
+  createCheckbox() { return new MacCheckbox(); }
+}
+
+class ApplicationUI {
+  constructor(private readonly factory: UIFactory) {}
+
+  renderSettingsPanel() {
+    const save = this.factory.createButton();
+    const newsletter = this.factory.createCheckbox();
+    return save.render() + newsletter.render();
+  }
+}
+```
+
+The client never imports `MacButton`. It imports `Button` and trusts the factory to keep the family coherent.
+
+## The cost of every new product kind
+
+Adding a new product **role** — say, `createTooltip()` — is expensive. You touch the Abstract Factory interface and **every** Concrete Factory implementation. That is the pattern's hinge: it optimizes for adding new families (a Dark Mode factory alongside Mac and Win) at the cost of adding new product types.
+
+If families are stable but product roles churn, Abstract Factory fights you. If product roles are stable — buttons, inputs, dialogs in a toolkit — and new themes or platforms arrive often, it pays off.
+
+Abstract Factory often composes with 01.02 Factory Method internally: each `createButton()` on `MacFactory` might delegate to a Factory Method that handles Mac-specific construction details. The outer pattern coordinates families; the inner hook constructs one product. 01.04 Builder is the alternative when a **single** product has many optional assembly steps rather than when many related products must match.
+
+<Callout type="gotcha">
+Do not use Abstract Factory when you only have one product type with multiple implementations — that is Factory Method with extra interfaces. The family constraint must be real: at least two product roles that must not be mixed across families.
+</Callout>
+
+<Tradeoff
+  forTitle="Reach for it when"
+  againstTitle="Avoid it when"
+  forItems={[
+    "Multiple related product types must stay consistent — UI themes, database driver + connection + dialect, cloud provider SDK bundles",
+    "Switching the entire bundle at runtime or config time is a first-class requirement — dark mode, platform pack, tenant branding tier",
+    "Clients should create widgets or services without importing any concrete family members",
+    "New families (themes, platforms) arrive more often than new product roles within a family",
+    "Cross-family mixing would be a user-visible bug or a runtime incompatibility, not merely a style inconsistency",
+  ]}
+  againstItems={[
+    "Only one product type varies — Factory Method or a simple factory function is enough",
+    "Product roles change frequently — every new role edits the Abstract Factory and all Concrete Factories",
+    "Families share most implementation and differ only slightly — inheritance or composition inside one factory may be simpler",
+    "Construction of a single object has many optional fields — Builder addresses that shape of problem better",
+    "You need clone-and-tweak of existing configured objects — 01.05 Prototype fits when families are not the constraint",
+  ]}
+/>
+
+## In an interview
+
+Frame it as a **consistency guarantee**: "We inject a `UIFactory` so the settings screen cannot accidentally mix Material buttons with Mac checkboxes — one factory, one family." That is clearer than defining Abstract Factory as "factory of factories."
+
+Expect **Abstract Factory vs Factory Method** — families vs single product — and **vs Builder** — many fields on one object vs many related objects. Ask yourself aloud whether adding a new product role would touch five classes; if yes, confirm that new families are the expected change vector.
+
+Name the overuse case: wrapping three unrelated singletons behind one interface because the pattern name sounded enterprise-grade.
+
+<KeyTakeaways
+  items={[
+    "Abstract Factory ensures a client creates a coherent family of related products by sourcing all of them from one factory implementation",
+    "Switching look-and-feel or platform means swapping the Concrete Factory at the composition root, not changing product call sites",
+    "Adding a new family is cheap; adding a new product role to the interface is expensive because every Concrete Factory must implement it",
+    "Use it when cross-family mixing would be a real bug — not when only one product type varies, which is 01.02 Factory Method's territory",
+    "Concrete Factories often use Factory Method internally for individual product construction while the Abstract Factory coordinates the set",
+    "Avoid it when product roles churn often or when a single complex object with many options is better served by 01.04 Builder",
+  ]}
+/>

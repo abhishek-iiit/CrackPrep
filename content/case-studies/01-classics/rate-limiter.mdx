@@ -1,0 +1,157 @@
+---
+title: "Rate Limiter"
+number: "01.02"
+summary: "A distributed counter problem where placement, algorithm choice, and failure behavior matter as much as the limit itself."
+status: published
+free: true
+difficulty: deep
+estMinutes: 20
+tags: [rate-limiting, redis, middleware]
+updated: "2026-09-15"
+---
+
+## Why interviewers ask for a rate limiter
+
+Every API eventually needs a gate — protect downstream services, enforce fair use, stop abuse. The prompt is deceptively narrow: it looks like one algorithm in one box. In practice it tests whether you can place a stateful component in a stateless request path, pick an algorithm with explainable burst behavior, and say what happens when the limiter itself is slow or down. It also pairs naturally with 01.03 Distributed Cache — most production limiters are a specialized use of a fast in-memory store with TTL semantics.
+
+## Clarify: who gets limited, on what dimension
+
+**Functional:**
+
+- Limit by what key — user ID, API key, IP address, endpoint, or a combination?
+- What rules — e.g. 100 requests/minute per user, 1000/minute per IP, different tiers per plan?
+- Response on exceed — HTTP 429, custom error body, `Retry-After` header?
+- Should excess requests be queued, rejected immediately, or silently dropped?
+- Global limit vs per-endpoint limit — both?
+
+**Non-functional:**
+
+- Accuracy — must we never exceed the limit, or is approximate OK (e.g. ±5%)?
+- Latency overhead budget on the hot path — 1 ms? 5 ms?
+- Availability — if the limiter is unreachable, fail open (allow) or fail closed (reject)?
+- Single-region vs multi-region — must limits be global across datacenters?
+
+**Out of scope:** billing integration, dynamic limit adjustment UI, ML-based anomaly detection.
+
+Spoken boundary:
+
+> "I'll design a per-API-key token bucket enforced at the API gateway, returning 429 with Retry-After, failing closed if Redis is down, single-region first."
+
+### Algorithm choice depends on the product story
+
+| Algorithm | Burst behavior | Memory | Best when |
+| --- | --- | --- | --- |
+| Fixed window | Allows 2× burst at window boundary | O(1) per key | Rough fairness, dashboards by minute |
+| Sliding window log | Exact, no boundary burst | O(window × rate) per key | Strict caps, small limits |
+| Sliding window counter | Approximate, smooth | O(1) per key | High QPS, good enough accuracy |
+| Token bucket | Controlled burst up to bucket size | O(1) per key | APIs that advertise burst capacity |
+| Leaky bucket | Smooth output rate | O(1) per key | Downstream can only absorb steady rate |
+
+Ask which story fits. "100 req/min with bursts up to 20" → token bucket. "Never more than 100 in any rolling 60-second window" → sliding window log or counter.
+
+## Capacity: how many keys and how hot
+
+Assumptions — label them.
+
+| Assumption | Value |
+| --- | --- |
+| API traffic at peak | 50,000 requests/s |
+| Distinct API keys active at peak | 500,000 |
+| Rules per key | 1–3 (e.g. global + endpoint) |
+| Limiter check latency target | &lt; 2 ms p99 |
+| Redis memory per counter | ~100 bytes (key + metadata + TTL) |
+| Counter TTL | 2× window size (auto-expire idle keys) |
+
+**Memory:** 500k keys × 100 bytes ≈ **50 MB** for active keys — one Redis cluster shard is plenty. Idle keys expire.
+
+**Write rate to Redis:** Each request is at least one read-modify-write (INCR or GET+SET). 50k ops/s is well within a single Redis primary; at 200k+ you'd shard by hash of the limit key.
+
+**Network:** Colocate limiter with gateway — same AZ, sub-millisecond RTT. A cross-region limiter check on every request doubles your latency budget.
+
+## High-level design: gateway middleware + centralized store
+
+| Component | Role |
+| --- | --- |
+| API gateway / sidecar | Extracts limit key, calls limiter, short-circuits 429 |
+| Rate limiter service | Lua script or atomic Redis commands per rule |
+| Redis cluster | Stores counters / token state, keyed by rule + identity |
+| Config service | Publishes limits per tier; gateway caches locally |
+
+<Steps>
+<Step title="Request arrives at gateway">
+
+Extract API key from header. Look up tier limits from local cache (refreshed every 30 s from config). Build Redis key: `rl:{rule_id}:{api_key}`.
+
+</Step>
+<Step title="Token bucket check (Redis Lua)">
+
+Atomically: read tokens and last_refill timestamp; compute tokens to add based on elapsed time; deduct 1 if available; write back. Return allowed/denied + tokens remaining + retry_after. One round trip — no read-then-write race.
+
+</Step>
+<Step title="Allow or reject">
+
+If allowed, forward to backend and attach `X-RateLimit-Remaining` headers. If denied, return 429 with `Retry-After` seconds derived from time until next token. Do not hit the backend on deny — the whole point is saving downstream capacity.
+
+</Step>
+</Steps>
+
+## Deep dive: correctness under concurrency and failure
+
+### Why Lua (or equivalent atomicity)
+
+Two concurrent requests both reading "1 token left" and both proceeding is the classic race. Redis `INCR` alone works for fixed windows; token bucket needs read-modify-write in one atomic step. Redis Lua scripts run atomically on the server. Alternative: Redis Cell module, or a dedicated limiter sidecar with local locks — more moving parts for interview purposes.
+
+### Sliding window counter — the practical middle ground
+
+Split the window into two buckets — current minute and previous minute. Weight the previous bucket by how much of the window remains. Example for 100/min limit at second 40 of the minute: count = current_minute_count + previous_minute_count × (20/60). One INCR on the current bucket key, one GET on the previous — still O(1), smooths the fixed-window cliff, ~1% error vs a true sliding log.
+
+### Fail open vs fail closed
+
+| Policy | When | Risk |
+| --- | --- | --- |
+| Fail open | Internal tools, non-critical APIs | Abuse during outage; downstream overload |
+| Fail closed | Payment, auth, public APIs | Legitimate traffic blocked; support tickets |
+
+State your choice and why. Interviewers often push: "Redis is down." Fail closed with a short local fallback (per-gateway in-memory counter at 2× limit) is a credible compromise — degraded accuracy, not zero protection.
+
+### Multi-region
+
+Global limits across regions require either a single Redis (adds cross-region latency on every request) or regional budgets (each region gets 1/N of the global cap) with accepted overshoot. Most designs pick regional limits and document that global abuse detection is a separate batch system.
+
+## Tradeoffs
+
+<Tradeoff
+  forTitle="Centralized Redis limiter when"
+  againstTitle="Local in-memory limiter when"
+  forItems={[
+    "Limits must be accurate across all gateway instances — 50 pods each allowing 100/min means 5000/min without centralization",
+    "Rules change per API key and tier — shared store is the source of truth",
+    "You need audit-grade counts for billing or abuse review",
+    "Traffic fits one Redis shard (~100k ops/s with headroom)",
+    "Colocated in the same AZ — 1–2 ms overhead is acceptable",
+  ]}
+  againstItems={[
+    "Ultra-low latency budget (&lt; 0.5 ms) and approximate per-node limits are OK",
+    "Protecting a single downstream from one service's own instances — no cross-client fairness needed",
+    "Redis outage must not block traffic — local token bucket with generous cap as fallback",
+    "Global QPS is low enough that per-process counters rarely drift",
+    "You accept uneven distribution when one pod gets more traffic than others",
+  ]}
+/>
+
+## In an interview
+
+Open with placement: "I'll put the limiter in the API gateway before any backend work — rejected requests should cost almost nothing." Name the algorithm tied to the requirement: token bucket for burst, sliding window for strict rolling caps. Draw gateway → Redis with one Lua round trip.
+
+Expect follow-ups: fixed-window boundary burst (draw the doubling at the seam), how to rate-limit a distributed crawler by IP behind NAT (add API key tier, soften IP limits), and hot-key problem when one celebrity API key gets millions of checks (local cache of "already denied" with short TTL). Volunteer: "Two gateways racing without atomic increment double-counts — that's why the check is a Lua script, not GET then SET."
+
+<KeyTakeaways
+  items={[
+    "Clarify the limit dimension (user, IP, key), the algorithm's burst story, and fail-open vs fail-closed before picking Redis",
+    "Token bucket allows controlled burst; sliding window log is exact but memory-heavy; sliding window counter is the usual production compromise",
+    "Every check must be atomic — Lua on Redis or equivalent — or concurrent requests will exceed the limit at window edges",
+    "Colocate the limiter with the gateway; 50k checks/s at 2 ms each is a full Redis shard worth of attention",
+    "Multi-region global limits add cross-region latency or accepted overshoot — regional budgets are the pragmatic default",
+    "Return 429 with Retry-After and rate-limit headers; never forward denied traffic to the backend",
+  ]}
+/>

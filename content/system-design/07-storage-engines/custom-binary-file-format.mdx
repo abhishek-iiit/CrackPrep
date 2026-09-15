@@ -1,32 +1,96 @@
 ---
 title: "Custom Binary File Format"
 number: "07.04"
-summary: "Custom Binary File Format — notes in progress."
-status: draft
+summary: "Length-prefixed binary framing and checksums turn an append-only file into something a reader can parse back without ambiguity or trusting a torn write."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [storage-engines, binary-format, serialization, checksums]
+updated: "2026-09-15"
 ---
 
-## The problem
+## A delimiter is a bet that your data will never contain it
 
-What breaks without this, and the situation that forces the decision.
+07.03 File-Backed Dictionary Storage Engine left the record format loose — "some encoding a reader can parse back" — and that looseness is the first thing that breaks in practice. The obvious naive format, something like `key,value\n`, works exactly until a value contains a comma or a newline, and a real system cannot promise that will never happen: values are arbitrary bytes as far as the engine is concerned — serialized objects, compressed blobs, user-supplied text in an unknown encoding. Restricting what callers are allowed to store, just so a delimiter stays safe, is solving the format problem by pushing it onto every future caller instead.
 
-## How it works
+The fix is to stop relying on what is inside a field to tell you where it ends, and instead say how long each field is before you write it. A reader that knows the length up front never has to scan for a boundary; it just consumes exactly that many bytes, whatever they contain.
 
-The mechanism, step by step.
+## Length-prefixed framing, once
 
-## Tradeoffs
+Every record gets a small fixed-size header, written first, that states the size of everything variable-length that follows. Because the header's own size never changes, a reader always knows exactly how many bytes to read before it knows anything about the record's actual content — that is the property that makes the format immune to what the payload contains.
+
+```text
+Record
+  [ crc32       4 bytes ]  checksum over everything below, including the header fields
+  [ timestamp   8 bytes ]  writer's clock — ordering hint and diagnostics, not authoritative
+  [ key size    4 bytes ]  length of the key in bytes
+  [ value size  4 bytes ]  length of the value in bytes, or a sentinel for a tombstone
+  [ key bytes   key_size ]
+  [ value bytes value_size ]
+```
+
+This is close to the record layout Bitcask actually uses on disk — crc, timestamp, key size, value size, key, value — which 07.08 Bitcask Storage Engine covers as a concrete, shipped design built on exactly this idea.
+
+<Steps>
+  <Step title="Read the fixed-size header">
+    Its length is constant and known in advance, so this read never depends on anything about this particular record's content.
+  </Step>
+  <Step title="Read the two size fields out of the header">
+    Now you know exactly how many more bytes make up this record — no scanning, no guessing.
+  </Step>
+  <Step title="Read exactly that many bytes for the key and the value">
+    A single read of a known length, straight from the file at the current position.
+  </Step>
+  <Step title="Recompute the checksum and compare">
+    Hash the bytes you just read the same way the writer did and compare against the stored crc32. A mismatch means corruption, a bit flip, or — the common case in practice — a torn write, where the process crashed partway through appending this record. Either way, the reader stops and discards the record rather than trusting it.
+  </Step>
+</Steps>
+
+That last step is what turns "detect a torn write" from a hard problem into a cheap one: the checksum was always going to be recomputed for integrity anyway, and a torn record almost never happens to produce a byte sequence that checksums correctly by accident.
+
+A few decisions in this format are arbitrary but have to be made and then never revisited without a plan: byte order (little-endian is what nearly every mainstream CPU architecture uses natively, so writing it avoids a conversion on both ends), and a small magic number or version byte at the very start of the file, so a future format change can be recognized and handled deliberately instead of being silently misparsed as garbage by an older reader. Skipping the version byte is cheap now and expensive the day the format needs to change under data that already exists.
+
+The fixed-size length fields are also a real limit, not an implementation detail to gloss over. A 4-byte unsigned length field caps a single key or value at 2³² − 1 bytes, a little under 4 GiB — generous for nearly any key and most values, but worth stating as a number rather than assuming "big enough" covers it, since the one workload that stores large blobs directly is exactly the one that finds the ceiling.
+
+<Callout type="tip">
+Putting the checksum first in the header, before the fields it protects, means a reader that only wants to skip past a record it does not care about — during a scan, or while looking for the start of the next record after a corruption — never has to touch the payload at all to know the record's total length. Order the header so the fields a skip operation needs come before the fields only a full read needs.
+</Callout>
+
+## Rolling your own versus reusing one that exists
+
+Nothing above is exotic — length-prefixed framing with a checksum is the shape of most binary log formats, custom or not. The real decision is whether to build exactly this, minimal and specific, or adopt an existing serialization framework (Protocol Buffers, Avro, MessagePack) that already solves framing, versioning, and cross-language compatibility.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Roll a custom binary format when"
+  againstTitle="Reuse an existing serialization framework when"
+  forItems={[
+    "You control both the writer and every reader, so there is no cross-team or cross-language wire-compatibility contract to maintain",
+    "You need to skip a record's payload — during a scan, or past a corrupted region — without paging a general deserializer in to do it",
+    "Every byte on disk needs to be accounted for, including framing and checksums, for a storage engine whose job is exactly this kind of layout control",
+    "The record shape is simple and stable — key, value, a handful of fixed metadata fields — and unlikely to need the kind of schema evolution a general framework is built for",
+  ]}
+  againstItems={[
+    "The schema will evolve and multiple independent services, possibly in different languages, need to read files written by different versions of the writer",
+    "You do not want to own hand-rolled checksums, versioning, and endianness decisions as a maintenance surface with its own edge cases",
+    "The record's actual structure is complex enough — nested fields, optional fields, unions — that reinventing that machinery is a worse use of time than adopting a library that already has it",
+    "The performance overhead of a general-purpose framework has not been shown to matter at your actual scale",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+State the specific failure the format avoids, not just that you have "a binary format": "values are arbitrary bytes, so a delimiter-based format breaks the day a value contains the delimiter — I length-prefix every field instead, with a checksum so a torn write from a crash gets detected and discarded rather than silently corrupting the read." That sentence answers the two follow-ups before they are asked: why not something simpler, and what happens on a crash mid-write.
 
-<KeyTakeaways items={["", "", ""]} />
+If pushed on scale, know the size ceiling your header imposes — a 4-byte length field caps a field at just under 4 GiB — and be ready to say what changes if that is not enough: a wider length field, or splitting a large value across multiple records, both of which cost you something (a bigger header per record, or reassembly logic on read) worth naming rather than hand-waving past.
+
+<KeyTakeaways
+  items={[
+    "A delimiter-based format breaks the moment a value contains the delimiter, which cannot be ruled out when values are arbitrary bytes",
+    "Length-prefixing each field lets a reader always know how many bytes to consume next, independent of what those bytes contain",
+    "A fixed-size header read first, followed by exactly key_size and value_size bytes, means parsing never requires scanning for a boundary",
+    "A checksum recomputed on read serves two purposes at once: detecting real corruption and detecting a torn write left by a crash mid-append, both of which must cause the reader to discard the record rather than trust it",
+    "A version byte and a chosen, fixed byte order are cheap to add up front and expensive to retrofit once real data already exists in the old format",
+    "Rolling a custom format trades cross-language compatibility and battle-tested edge-case handling for total control over layout — worth it when you own both ends of the file, less so the moment another team or language needs to read it",
+  ]}
+/>

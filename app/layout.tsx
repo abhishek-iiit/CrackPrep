@@ -1,8 +1,8 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono, Geist_Pixel } from "next/font/google";
-import { ThemeProvider } from "next-themes";
 import { announcementDismissScript } from "@/lib/announcement";
 import { courseSlug, getCourseStats } from "@/lib/content";
+import { ThemeProvider } from "@/components/theme/ThemeProvider";
 import "./globals.css";
 
 const geist = Geist({
@@ -59,8 +59,9 @@ export default function RootLayout({
             first paint instead of being removed after hydration, which
             painted it and then shifted the page by its height. Mirrors the
             no-flash script next-themes' ThemeProvider emits just below.
+            React 19 wants inline scripts as children, not dangerouslySetInnerHTML.
             See lib/announcement.ts. */}
-        <script dangerouslySetInnerHTML={{ __html: announcementDismissScript }} />
+        <script>{announcementDismissScript}</script>
         <ThemeProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
           {children}
         </ThemeProvider>

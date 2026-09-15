@@ -1,32 +1,84 @@
 ---
 title: "Queue Lag"
 number: "08.04"
-summary: "Queue Lag — notes in progress."
-status: draft
+summary: "The gap between how much work has arrived and how much a consumer has actually finished — and why its rate of change matters more than its size."
+status: published
 free: true
 difficulty: core
 estMinutes: 12
+tags: [queues, streams, monitoring, lag]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The number that tells you the queue is lying
 
-What breaks without this, and the situation that forces the decision.
+A queue can report zero errors, accept every write, and still be failing at its actual job — getting work into the hands of whoever needs it in time. "The queue is up" and "the queue is caught up" are different claims, and only one of them shows up on a basic health check. Lag is the metric that closes that gap: it measures not whether the system is working, but whether it's keeping up.
 
-## How it works
+## What lag actually measures
 
-The mechanism, step by step.
+For an event stream, lag is the difference between the producer's latest written position in a partition — often called the log end offset, the point up to which data has been durably appended — and a specific consumer group's last committed offset, the point up to which that consumer has finished processing and checkpointed its progress. If the producer is at offset 500,000 and a consumer group has committed offset 487,300, that consumer is 12,700 messages behind.
 
-## Tradeoffs
+A task queue has the analogous number under a different name — queue depth, or backlog: the count of messages that have been enqueued but not yet acknowledged. The concept is identical even though the delivery model differs (08.02 Task Queue Vs Event Stream): both numbers answer "how much accepted work is still waiting."
+
+<Formula label="Lag in time, not just count">lag_seconds ≈ lag_count / consumer_throughput</Formula>
+
+Raw lag count is close to meaningless without a rate to divide it by. "12,700 messages behind" tells you nothing on its own — behind a consumer processing 50 messages a second, that's four minutes of staleness; behind one processing 5,000 a second, it's under three seconds. Translating lag into an estimated time-to-catch-up, using the consumer's own recent throughput, is what turns the number into something you can put in an alert and a runbook: "the notification pipeline is currently 6 minutes behind" is actionable in a way "lag: 41,000" is not.
+
+## Why it's the number that pages someone
+
+Lag is where a backend problem becomes visible to a person. A user who taps "post" and doesn't see their notification arrive for forty minutes does not know or care that ingestion is fine and the broker has zero errors — they experience a feature that appears broken. Freshness is usually a product commitment even when nobody wrote it down as one, and lag is the only number that measures whether that commitment is being met. 14.02 SLOs And Error Budgets is where that commitment gets made explicit as a target rather than a vibe; lag against that target is what actually triggers the page.
+
+The reason it deserves its own alert, separate from error rate, is that a consumer can be lagging badly while reporting zero errors — every message it processes succeeds, it's just processing them more slowly than they arrive. Nothing about that shows up as a failure in the conventional sense, which is exactly why a dashboard that only tracks error rate can look calm while users are experiencing a forty-minute delay.
+
+## What makes it grow
+
+Four distinct causes, and they call for different fixes:
+
+- **Producer rate exceeds consumer throughput.** A traffic spike — a promotion, a viral post, a batch job dumping a day's backlog in at once — raises the arrival rate faster than the consumer side scales to match. This is a capacity problem, not a bug, and the fix is more consumers or more throughput per consumer.
+- **Consumer processing gets slower, not more numerous.** The message rate hasn't changed, but each message now takes longer because a downstream dependency — a database, an external API — is degraded. This looks identical to a rate spike on a lag graph, and it's the case people most often misdiagnose, because the instinct is to add consumers when the real problem is a slow call inside each one. 02.12 Tail Latency is the same shape at a smaller scale — a slow dependency degrading everything downstream of it.
+- **A consumer stops making forward progress.** A crash loop on a poison message, a bad deploy, or a consumer stuck retrying the same failing call — the arrival rate is unchanged and processing throughput drops to near zero. 02.09 Retries Timeouts And Idempotency covers bounding retries and dead-lettering a message that can never succeed, which is exactly what prevents one bad message from stalling everything behind it.
+- **Uneven partitioning creates a hot partition.** If messages are keyed so unevenly that one partition gets far more traffic than the others, that partition's consumer falls behind while its siblings sit idle — the aggregate lag number can look fine while one partition is badly behind. 04.06 Hot Partitions covers the same skew problem in storage; the fix here is the same idea, a better partition key.
+
+<Callout type="gotcha">
+A lag number that is high but flat is a very different situation from one that is low but climbing. A steady backlog of 50,000 messages that a consumer chews through and refills at the same rate every hour is a capacity choice made on purpose. A backlog climbing by 500 a minute with no sign of leveling off means the consumer will never catch up on its own, no matter how long you wait — and waiting is the wrong response. Alert on the trend, not just the threshold; a flat high number and a rising low number can trip the same static alert and mean opposite things.
+</Callout>
+
+## What to do about it
+
+Once lag is rising and confirmed as a real backlog rather than a blip, the response depends on which of the four causes it is: add consumers if there's genuine spare partition capacity to add them to — a stream caps useful parallelism at one consumer per partition within a group, so adding a fifth consumer to a four-partition topic does nothing; fix or bypass the slow downstream call if processing time per message is the problem; dead-letter the poison message if a consumer is stuck; or shed low-priority work — process a cheaper, smaller version of the job, or drop the lowest-priority tier of messages — per 02.13 Load Shedding, if the honest answer is that capacity cannot be added fast enough to matter before the SLO breaches anyway.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Treat rising lag as an incident when"
+  againstTitle="Let lag ride when"
+  forItems={[
+    "The consumer feeds a user-facing feature with a real freshness expectation — chat delivery, fraud holds, live notifications",
+    "Lag is climbing without leveling off, which means it will not resolve itself no matter how long you wait",
+    "The cause is a stuck or crash-looping consumer rather than a temporary rate spike the system is built to absorb",
+    "Downstream systems assume near-real-time delivery and will misbehave, not just look stale, if the assumption breaks",
+    "Lag is concentrated on one partition, which points at a design flaw — a hot key — rather than a capacity limit",
+  ]}
+  againstItems={[
+    "The consumer is a nightly or hourly batch job where staleness inside the batch window was already the plan",
+    "Lag is high but flat, and known headroom exists to burn it down during an off-peak window",
+    "The spike coincides with a known, bounded traffic event and the consumer is already catching up",
+    "The data feeding an analytics pipeline is not needed until a report runs hours later anyway",
+    "Adding capacity right now costs more than the staleness does, and the SLO explicitly allows for it",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Bring up lag the moment you introduce a queue or stream as part of a design, rather than waiting to be asked how you'd monitor it: "I'd track consumer lag translated into seconds behind, not just message count, because that's the number that maps to what the user actually experiences." If asked what causes it to grow, give the four-way breakdown — rate spike, slow consumer, stuck consumer, hot partition — because naming which one you're diagnosing is more convincing than reaching for "scale up the consumers" as a reflex answer that only fixes one of the four.
 
-<KeyTakeaways items={["", "", ""]} />
+Be ready to say what the alert should fire on: the trend, not a static threshold, since a flat backlog and a climbing one look identical to a threshold check and mean very different things.
+
+<KeyTakeaways
+  items={[
+    "Lag is the gap between the latest position a producer has written and the last position a specific consumer has committed — in a task queue the same idea is called queue depth or backlog",
+    "Raw lag count is not actionable on its own; dividing it by consumer throughput turns it into an estimated time-to-catch-up, which is what belongs in an alert",
+    "Lag can grow for four different reasons — a rate spike, a slower consumer, a stuck consumer, or a hot partition — and each has a different fix",
+    "A consumer can report zero errors while lagging badly, which is why lag needs its own alert separate from error rate",
+    "The trend matters more than the absolute number: a flat high backlog is a capacity choice, a climbing one will not resolve itself",
+    "Lag is the metric that connects an invisible backend backlog to a visible, user-facing freshness problem, which is why it is usually the thing tied to an SLO and paged on",
+  ]}
+/>

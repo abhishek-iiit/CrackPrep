@@ -1,0 +1,103 @@
+---
+title: "Decorator"
+number: "02.04"
+summary: "Stack optional behaviors around an object at runtime without subclassing every combination of features."
+status: published
+free: true
+difficulty: core
+estMinutes: 14
+tags: [structural, composition, behavior]
+updated: "2026-09-15"
+---
+
+## Subclass explosion from optional features
+
+Your `InputStream` needs plain reads, then buffering, then gzip decompression, then checksum verification. Subclassing every combination gives `BufferedInputStream`, `GzipInputStream`, `BufferedGzipInputStream`, `ChecksumBufferedGzipInputStream` — four features and you are already at sixteen classes if order matters. Add encryption and the matrix is unmaintainable before the first release ships.
+
+Decorator solves this by wrapping: every feature is a thin object that implements the same interface as the core and forwards calls to an inner instance, adding behavior before or after the delegate. At runtime you nest them: `new Checksum(new Gzip(new Buffered(fileStream)))`. Each decorator is one class; combinations are composition, not inheritance. New feature? One new decorator class, zero changes to existing ones.
+
+The critical constraint: Decorator and the wrapped object share an interface. The client cannot tell — and should not need to tell — whether it holds the raw component or a stack of five wrappers. That transparency is what separates Decorator from Adapter, which deliberately changes the interface shape.
+
+## Component, concrete component, and decorators
+
+- **Component** — the shared interface (`read(): Buffer`).
+- **Concrete Component** — the bare object (`FileInputStream`).
+- **Decorator** — abstract or concrete base that holds a Component reference and implements Component by delegating.
+- **Concrete Decorators** — `Buffered`, `Gzip`, `Checksum`; each overrides `read()` to add its layer.
+
+<Steps>
+<Step title="Client constructs a stack">
+`stream = new Gzip(new Buffered(new FileStream(path)))` — order encodes "buffer first, then decompress."
+</Step>
+<Step title="Outermost decorator receives the call">
+Client calls `stream.read()`. The Gzip decorator's method runs.
+</Step>
+<Step title="Delegation inward">
+Gzip calls `this.wrapped.read()`, gets compressed bytes, decompresses, returns plaintext chunk.
+</Step>
+<Step title="Each layer adds its concern">
+Buffered batches small reads; Checksum updates a running hash after each chunk. The FileStream at the core actually hits the disk.
+</Step>
+</Steps>
+
+```typescript
+class BufferedStream implements DataStream {
+  constructor(private inner: DataStream) {}
+  read() {
+    if (!this.cache) this.cache = this.inner.read();
+    return this.cache.slice(/* ... */);
+  }
+}
+```
+
+Decorators can override only some methods — a logging decorator wraps `write()` and passes `read()` through untouched. That partial override is normal; the interface contract still holds.
+
+<Callout type="tip">
+In many codebases the "decorator stack" is just functions wrapping functions, or middleware in Express/Fastify — same idea, less ceremony. Reach for explicit Decorator classes when the stack is configured at runtime from user options (compression on/off, encryption on/off) and you need each layer testable in isolation.
+</Callout>
+
+## Decorator versus its neighbors
+
+**02.01 Adapter** changes the interface so incompatible types can talk. Decorator keeps the interface identical and adds behavior.
+
+**02.07 Proxy** also wraps and delegates on the same interface, but Proxy controls *access* — lazy initialization, permission checks, remote stub — not optional feature stacking. A virtual proxy that loads an image on first `draw()` is Proxy; a border drawn around every `draw()` is Decorator.
+
+**02.05 Facade** hides multiple objects behind one simpler interface. Decorator never hides — it exposes the full interface, just with extra behavior layered on.
+
+**03.08 Strategy** replaces the core algorithm. Decorator wraps the core and leaves it in place; you can peel layers off.
+
+<Tradeoff
+  forTitle="Reach for Decorator when"
+  againstTitle="Skip Decorator when"
+  forItems={[
+    "Optional behaviors combine in many orders and subclassing every combination is exploding",
+    "Features must be added or removed at runtime based on configuration — compression, logging, metrics, retries",
+    "Each feature is a single responsibility you want to test independently of the others",
+    "All wrappers must remain substitutable for the core Component — callers depend on the interface, not the concrete stack",
+    "You are extending behavior without modifying the Concrete Component's source (Open/Closed Principle)",
+  ]}
+  againstItems={[
+    "There is one fixed pipeline — a single function or class with three explicit steps is easier to read than five wrapper objects",
+    "The 'decorations' change the object's essential type or interface — that is Adapter, not Decorator",
+    "Order of wrappers does not matter and there is only one optional feature — a boolean flag is fine",
+    "You need to control object lifetime or remote access, not add features — that is 02.07 Proxy",
+    "Debugging a ten-layer stack becomes opaque; stack traces through decorators frustrate operators unless you invest in naming and logging",
+  ]}
+/>
+
+## In an interview
+
+Say: "I need buffering and gzip on a stream without `BufferedGzipInputStream` subclasses — I'd wrap the core in decorators that share the same interface." Draw Component at the center, decorators as nested boxes, arrows delegating inward. Follow-ups: "Decorator vs Proxy?" Proxy controls access and often manages one concern; Decorator stacks optional features. "Can you remove a layer?" Yes — unlike subclassing, unwrap by keeping a reference to the inner object. "vs Adapter?" Interface stays the same in Decorator.
+
+Name the failure mode: decorators that change method semantics silently — a caching decorator that returns stale data without documenting TTL, and callers assume they always get fresh reads.
+
+<KeyTakeaways
+  items={[
+    "Decorator stacks optional behaviors as wrappers sharing the Component interface — combinations are runtime composition, not a subclass matrix",
+    "Each decorator holds a reference to an inner Component, delegates calls, and adds behavior before or after the delegate",
+    "Order matters when layers transform data — buffer-then-decompress is not the same as decompress-then-buffer",
+    "Decorator keeps the same interface; Adapter changes it; Proxy controls access on the same interface without feature stacking",
+    "One new feature equals one new decorator class, with no edits to existing decorators or the concrete component",
+    "Skip the pattern when the pipeline is fixed and small — explicit steps beat a stack you cannot read from the outside",
+  ]}
+/>

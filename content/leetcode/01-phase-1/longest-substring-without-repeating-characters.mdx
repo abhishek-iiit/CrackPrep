@@ -1,0 +1,92 @@
+---
+title: "Longest Substring Without Repeating Characters"
+number: "01.50"
+summary: "Expand the window right; on duplicate, jump left past the last index of the repeated char — O(n) with a map."
+status: published
+free: true
+difficulty: core
+estMinutes: 13
+tags: [sliding-window, hash-map, string]
+updated: "2026-09-15"
+---
+
+## Longest contiguous run with all distinct characters
+
+Given a string `s`, return the length of the longest substring without repeating characters. `"abcabcbb"` → `3` (`"abc"`). `"bbbbb"` → `1`. `"pwwkew"` → `3` (`"wke"` — not `"pwke"` because substrings must be contiguous).
+
+Checking every substring is O(n³) or O(n²) with a set per window — fine for n ≤ 20, not for n up to 5×10⁴. The sliding window keeps a **valid contiguous range** `[left, right]` and expands `right` one char at a time, shrinking `left` only when the new char would duplicate something already inside the window.
+
+## Window invariant: all chars inside are unique
+
+Maintain `lastSeen: Map<char, index>`. When `s[right]` was seen at index `prev` and `prev >= left`, move `left` to `prev + 1` — not `left + 1` one step at a time. That jump preserves O(n) total movement of `left`.
+
+<Steps>
+<Step title="Expand right">
+  Record `s[right]` in the map at `right`.
+</Step>
+<Step title="Shrink left on duplicate">
+  If char was seen inside the window, set `left = max(left, lastIndex + 1)`.
+</Step>
+<Step title="Track best">
+  `best = max(best, right - left + 1)` after each expansion.
+</Step>
+</Steps>
+
+Using a fixed-size array of 128 or 256 entries instead of a Map is faster when the alphabet is ASCII — same logic.
+
+## Solution
+
+```ts
+function lengthOfLongestSubstring(s: string): number {
+  const lastSeen = new Map<string, number>();
+  let left = 0;
+  let best = 0;
+
+  for (let right = 0; right < s.length; right++) {
+    const ch = s[right];
+    if (lastSeen.has(ch) && lastSeen.get(ch)! >= left) {
+      left = lastSeen.get(ch)! + 1;
+    }
+    lastSeen.set(ch, right);
+    best = Math.max(best, right - left + 1);
+  }
+
+  return best;
+}
+```
+
+Time **O(n)**, space **O(min(n, alphabet))** for the map.
+
+<Tradeoff
+  forTitle="Sliding window + last-index map when"
+  againstTitle="Set + shrink left one step when"
+  forItems={[
+    "Need O(n) time on strings up to 10⁵ characters",
+    "Jumping left via last index avoids redundant single-step shrinks",
+    "Same template extends to 02.02 Minimum Window Substring and 02.01 Longest Repeating Character Replacement",
+    "Alphabet is bounded (ASCII) — array beats Map for cache locality",
+  ]}
+  againstItems={[
+    "n is tiny and nested loops are faster to write under stress",
+    "You must return the actual substring, not just length — still use window but store start index of best",
+    "Characters are Unicode code points outside BMP — normalize or use code point indices carefully",
+    "Problem asks for count of such substrings, not maximum length — different aggregation",
+  ]}
+/>
+
+## In an interview
+
+Restate: contiguous substring, all distinct chars, maximize length. Walk `"pwwkew"` — window grows to `"pw"`, second `w` forces left past first `w`, answer stays 3 at `"wke"`.
+
+Before coding, name sliding window invariant. Bug to mention: moving `left` only by one on duplicate (still correct but O(n²)); using `>` instead of `>=` when comparing last index to `left`.
+
+Follow-ups: return the substring itself; at most k replacements (02.01); minimum window containing all chars of a set (02.02).
+
+<KeyTakeaways items={[
+  "Maintain window [left, right] where every character inside appears at most once.",
+  "Store each character's most recent index; on duplicate inside the window, jump left to lastIndex + 1.",
+  "Each index moves left and right at most n times total — O(n) time.",
+  "Answer is max of window sizes, not the count of qualifying substrings.",
+  "Shrinking left one step at a time with a Set works but can degrade to O(n²).",
+  "This is the introductory sliding-window pattern before 02.02 Minimum Window Substring.",
+]} />

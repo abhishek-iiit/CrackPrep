@@ -1,0 +1,118 @@
+---
+title: "Word Ladder"
+number: "03.22"
+summary: "Each one-letter edit is an edge — BFS on the implicit word graph finds shortest transformation length without materializing all edges upfront."
+status: published
+free: true
+difficulty: core
+estMinutes: 15
+tags: [bfs, graph, string]
+updated: "2026-09-15"
+---
+
+## One letter at a time, shortest chain
+
+Transform `beginWord` into `endWord` by changing exactly one letter per step. Each intermediate word must appear in `wordList`. Return the length of the shortest sequence (including both endpoints), or `0` if no sequence exists.
+
+Brute force — try every word in the list as the next hop from the current word — is O(n · L · 26) per level with poor constant factors if you scan the full list each time. The graph is implicit: two words are adjacent if their Hamming distance is 1. You never need to precompute all edges; from the current word, generate all L·26 candidates and keep those in the set.
+
+The traps: `endWord` not in `wordList` means impossible (return `0`); revisiting words creates cycles and infinite BFS; counting steps — `"hit" → "hot"` is length 2, not 1.
+
+## BFS on the word graph
+
+Put `beginWord` on the queue with step count 1. Maintain a `visited` set. For each dequeued word, try changing each position to each of `'a'`–`'z'`. If the candidate is in `wordList` and unvisited, enqueue it. The first time you dequeue `endWord`, return its step count.
+
+The invariant: words at BFS depth `d` represent minimum-edit-distance `d - 1` from `beginWord`.
+
+<Steps>
+<Step title="Build a set from wordList for O(1) lookup">
+If `endWord` is missing from the set, return `0` immediately.
+</Step>
+<Step title="BFS from beginWord">
+Track steps alongside each queued word; mark visited on enqueue.
+</Step>
+<Step title="Generate neighbors by single-letter mutation">
+Loop index × 26 letters; skip the unchanged letter.
+</Step>
+<Step title="Return steps when endWord is dequeued">
+If the queue empties, return `0`.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function ladderLength(
+  beginWord: string,
+  endWord: string,
+  wordList: string[]
+): number {
+  const words = new Set(wordList);
+  if (!words.has(endWord)) return 0;
+
+  const queue: [string, number][] = [[beginWord, 1]];
+  const visited = new Set<string>([beginWord]);
+
+  while (queue.length) {
+    const [word, steps] = queue.shift()!;
+    if (word === endWord) return steps;
+
+    for (let i = 0; i < word.length; i++) {
+      for (let c = 97; c <= 122; c++) {
+        const next =
+          word.slice(0, i) + String.fromCharCode(c) + word.slice(i + 1);
+        if (words.has(next) && !visited.has(next)) {
+          visited.add(next);
+          queue.push([next, steps + 1]);
+        }
+      }
+    }
+  }
+
+  return 0;
+}
+```
+
+Let **n** be `wordList.length` and **L** word length. Each word generates O(26L) candidates; each word is processed once. Time **O(n · L · 26)** in the worst case. Space **O(n)** for the set and visited structure.
+
+<Callout type="tip">
+Bidirectional BFS from both ends meets in the middle and often cuts explored nodes on large lists — worth mentioning as a follow-up optimization, not required for the first pass.
+</Callout>
+
+<Tradeoff
+  forTitle="BFS with generated neighbors when"
+  againstTitle="Pre-built adjacency / bidirectional BFS when"
+  forItems={[
+    "You only need the shortest length, not every shortest path (03.23 Word Ladder II is the path-enumeration variant)",
+    "wordList fits in memory as a hash set — O(1) membership per candidate",
+    "Word length L is small (≤ 10) so 26L neighbors per node is cheap",
+    "Interview time favors a correct O(n·L) BFS over building a full adjacency map first",
+    "Same implicit-graph BFS pattern as 03.21 Shortest Path in Binary Matrix on a different domain",
+  ]}
+  againstItems={[
+    "wordList is huge and queries repeat — precompute wildcard buckets (`*ot`, `h*t`) once",
+    "Both ends are known and the graph is wide — bidirectional BFS reduces explored frontier",
+    "You must return all shortest transformation sequences — need layered graph + backtrack",
+    "Alphabet or word length is large enough that 26L per expansion dominates — bucket indexing wins",
+    "List is static and many ladder queries arrive offline — materialize adjacency upfront",
+  ]}
+/>
+
+## In an interview
+
+Example: `begin = "hit"`, `end = "cog"`, list `["hot","dot","dog","lot","log","cog"]` → `5` (`hit→hot→dot→dog→cog`). Confirm one letter per step, all intermediates must be in the list, return 0 if impossible.
+
+Say: model words as nodes, edges are one-letter edits; unweighted shortest path → BFS. Check `endWord ∈ wordList` before searching.
+
+Follow-ups: return the path (parent pointers), all shortest paths (03.23), bidirectional BFS, wildcard preprocessing. Bug to mention: counting edges vs nodes (`begin` counts as step 1).
+
+<KeyTakeaways
+  items={[
+    "Word Ladder is implicit-graph BFS: neighbors are one-letter mutations that exist in the word set",
+    "endWord must be in wordList — otherwise no valid sequence exists regardless of reachability",
+    "Mark visited on enqueue; each word should be expanded at most once at its shortest depth",
+    "Generate neighbors in O(26·L) per word rather than scanning the entire wordList",
+    "Return 0 (not -1) when no ladder exists — LeetCode's convention for this problem",
+    "03.23 Word Ladder II adds backtracking on the BFS layer graph to list every shortest chain",
+  ]}
+/>

@@ -1,32 +1,89 @@
 ---
 title: "Schema Evolution"
 number: "03.12"
-summary: "Schema Evolution — notes in progress."
-status: draft
+summary: "Why a schema change needs at least two deploys apart from the code that stops depending on the old shape, and how expand-contract gets you there safely."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [migrations, schema, deployment, compatibility]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The schema change is instant; the fleet rolling out to use it is not
 
-What breaks without this, and the situation that forces the decision.
+A migration that renames a column runs in milliseconds. The deploy that rolls out code depending on the new name takes minutes, sometimes longer with a slow canary — and for that entire window, old code and new code are both running against the same database at the same time. A schema change is not a single moment shared by every process that touches it; it is a step function the database takes instantly while the fleet takes a ramp to catch up.
 
-## How it works
+That gap is where schema changes actually break things, and the failure rarely looks like a syntax error. It looks like an old instance's `SELECT *` throwing an error because a column it expects is gone. It looks like a new column added `NOT NULL` with no default, and every insert statement the old code still issues — code that has never heard of the new column — failing immediately. It looks like a rename that the database completed atomically, while half the fleet is still holding the old name in a prepared statement. None of these are bugs in the migration. They are the direct consequence of treating a schema as if it changes for everyone at once, when in practice it changes for the database and then, gradually, for a fleet of processes that update on their own schedule.
 
-The mechanism, step by step.
+## Additive, destructive, and type-changing changes are not the same risk
 
-## Tradeoffs
+| Change | Risk during rollout | Typical fix |
+| --- | --- | --- |
+| Add a nullable column, no default | Low — old code ignores it, new code can start writing it | Usually safe as a single step |
+| Add a column with a default | Materializing the default for every existing row can force a full table rewrite on some engines and versions | Add nullable, backfill in batches, add the default or constraint after |
+| Add `NOT NULL` or a `CHECK` constraint | Every existing row must satisfy it, and validating that against a huge table can hold a long lock | Add as `NOT VALID`, then run `VALIDATE CONSTRAINT` separately — the same split 03.11 Online Indexing uses for indexes |
+| Rename a column or table | Atomic in the database, but not atomic across a fleet still referencing the old name | Never rename in place; add the new name, dual-write or backfill, retire the old name later |
+| Drop a column or table | Any code path still reading it breaks immediately, with no warning from the database | Confirm zero remaining readers across every deployed version before dropping |
+| Change a column's type | Often requires rewriting every row to the new representation | Add a new column of the new type, backfill and dual-write, cut over, drop the old column |
+
+The pattern across every row in that table is the same: a change is safe in isolation but risky in combination with a fleet that has not yet caught up, and the fix is almost always to split one change into a sequence where nothing in the sequence is destructive until nothing depends on the old shape anymore.
+
+## Expand, migrate, contract
+
+<Steps>
+  <Step title="Expand">
+    Add the new column, table, or constraint in a form that both old and new code can coexist with — nullable, with no new required behavior. Deploy application code that writes to the new shape, either alongside the old one (dual write) or in addition to it. At this point the old code path still works exactly as before.
+  </Step>
+  <Step title="Migrate">
+    Backfill existing rows into the new shape. On a large table this runs in batches — a bounded range of rows per statement, with a short pause between batches — rather than as one giant `UPDATE` that locks the table for its full duration and bloats it with a burst of dead row versions. Verify the backfill actually finished and matches before treating it as done.
+  </Step>
+  <Step title="Contract">
+    Once every deployed instance is confirmed running code that no longer reads the old column, and the rollback window for the deploy that stopped using it has passed, drop the old column in its own, separate migration.
+  </Step>
+</Steps>
+
+The rule buried inside this sequence is worth stating on its own: never combine "stop using the old column" and "drop the old column" in the same deploy. If that deploy needs to be rolled back — the ordinary, expected reason to keep a rollback window at all — the rolled-back code reaches for a column that no longer exists. Splitting the two into separate deploys means a rollback of the code change lands on a database that still has the old column sitting there, unused but harmless, exactly as it needs to be for the rollback to actually work.
+
+<Callout type="gotcha">
+Adding a column with a non-null default sounds identical to adding a nullable column, but on some engines and versions it is not: the database has historically needed to write the default value into every existing row to materialize it, turning an instant metadata change into a full table rewrite — effectively an exclusive lock for as long as that rewrite takes. Postgres since version 11 stores a constant default as metadata and computes it lazily on read instead, which removed this specific case, but the underlying caution generalizes: any change to an existing table's structure should be assumed to be a full rewrite until you have confirmed otherwise for the specific engine and version in front of you, because the exceptions are engine-specific and version-specific, not a rule you can carry from one system to another.
+</Callout>
+
+Renaming deserves its own line because it looks the safest and is actually one of the riskiest. The database renames a column atomically, in an instant. The fleet referencing that column by name does not update atomically — it updates instance by instance, over the length of a deploy. Treat a rename exactly like a drop-and-recreate: add the new name, have code write both for a transition period, backfill, cut reads over, then remove the old name once nothing references it. A rename that skips this and goes straight to `ALTER TABLE ... RENAME COLUMN` is a bet that no in-flight process is holding the old name at the instant the migration runs — a bet that gets harder to win as the fleet gets larger and the deploy window gets longer.
+
+A schema is a contract in exactly the sense 02.01 API Design Contracts uses that word for an API — the difference is that the "clients" of a database schema are every version of your own service currently running, plus any other service or job with direct read access to the table, and a schema contract has no version header to negotiate on. Compatibility has to be maintained the hard way, by controlling the order operations happen in, because there is no equivalent of an API version the caller can declare.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Use expand-contract, spread across separate deploys, when"
+  againstTitle="A single direct migration is acceptable when"
+  forItems={[
+    "The table is read or written by more than one version of the code at a time, which is true for essentially any rolling deployment",
+    "The change is destructive — a drop, a rename, a type change, or a new required constraint",
+    "Another service or a batch job reads the table directly, outside your own deploy process, so you cannot even see every consumer",
+    "Rollback of the current deploy needs to remain possible without also reverting the schema",
+    "The table is large enough that a naive change would hold a long lock or a full rewrite",
+  ]}
+  againstItems={[
+    "The change is purely additive — a new nullable column with no default — and nothing existing depends on its absence",
+    "The table is new, or not yet serving production traffic, so there is no fleet mid-rollout to protect",
+    "Exactly one process, under your direct control, ever touches this table, with no rolling deployment in between versions",
+    "The table is small enough that even a blocking rewrite completes in a moment nobody will notice",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Frame it as a rollout problem before a database problem: "The schema changes instantly, but the fleet reading and writing it doesn't, so I'd treat any destructive change as expand, migrate, then contract, across separate deploys." That framing pre-empts the two questions interviewers usually ask next — what happens on rollback, and what happens to in-flight requests during the transition — because expand-contract is specifically designed to keep both of those safe.
 
-<KeyTakeaways items={["", "", ""]} />
+Naming a concrete failure mode unprompted lands well here: a `NOT NULL` column added without a default breaking every insert statement issued by old code, or a rename breaking a prepared statement mid-rollout. Either shows the reasoning is about the deploy timeline, not just the SQL syntax.
+
+<KeyTakeaways
+  items={[
+    "A schema change completes instantly in the database, but the fleet of processes reading and writing that schema updates gradually across a deploy — that gap is where most migration incidents live",
+    "Additive, nullable changes are low-risk; destructive changes (drops, renames, new required constraints, type changes) need to be split across separate steps",
+    "Expand-contract splits a destructive change into add the new shape, backfill it, then remove the old shape once nothing depends on it anymore",
+    "Never combine 'stop using the old column' and 'drop the old column' in the same deploy — a rollback of that deploy needs the old column still present to succeed",
+    "A rename looks atomic but isn't, from the fleet's perspective — treat it as add-new, dual-write, cut over, drop-old, exactly like any other destructive change",
+    "Adding a NOT VALID constraint followed by a separate VALIDATE CONSTRAINT pass applies the same fast-metadata-change-then-slow-validation split that 03.11 Online Indexing uses for indexes",
+  ]}
+/>

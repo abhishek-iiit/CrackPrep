@@ -1,32 +1,94 @@
 ---
 title: "Deployment And Migration Safety"
 number: "14.04"
-summary: "Deployment And Migration Safety — notes in progress."
-status: draft
+summary: "How to change running systems without betting the fleet on a single binary flip — canaries, rollbacks, flags, and expand/contract migrations."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 14
+tags: [deployment, canary, feature-flags, migration]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The dangerous deploy is the one you cannot undo
 
-What breaks without this, and the situation that forces the decision.
+Most production incidents still involve a change — a new binary, a config flag, a schema edit, a traffic shift. Deployment safety is the set of practices that make change *reversible*, *observable*, and *incremental* so a bad diff burns a slice of the error budget (14.02) instead of the whole month. Migration safety is the same idea applied when the change cannot be a pure rollback because data or contracts moved; 14.05 Database Migration Safety goes deep on schema mechanics — this lesson is the broader release and cutover discipline.
 
-## How it works
+A "deploy" that is only `ssh` and hope is not a strategy. Neither is a pipeline that is green while your only verification is "the process started."
 
-The mechanism, step by step.
+## Incremental delivery patterns
 
-## Tradeoffs
+| Pattern | How it limits blast radius | Rollback story |
+| --- | --- | --- |
+| Rolling deploy | Replace instances in small batches | Redeploy previous artifact; in-flight mixed versions must be compatible |
+| Canary | Tiny % of traffic or one cell first | Instant traffic shift off canary if SLIs burn |
+| Blue/green | Two full environments; flip the router | Flip back; cost is double capacity during the window |
+| Feature flags | Code dark until flag on; progressive expose | Turn flag off without redeploying |
+| Shadow / dark launch | New path gets duplicated traffic, response ignored | No user impact; compare diffs offline |
+
+Canaries need **automated** promotion criteria — error rate, latency, key business metrics — not a human staring at a graph for thirty seconds. Humans approve exceptions; machines catch the obvious.
+
+<Callout type="gotcha">
+Forward-incompatible APIs between services during a rolling deploy are a classic silent outage: old callers hit new callees (or the reverse) and fail only on some percentage of pods. Require proto/JSON compatibility across at least one version skew, or deploy consumers before producers for additive changes and the reverse for removals.
+</Callout>
+
+## Expand, migrate, contract
+
+When the change is structural — dual writes, a new table, a new service owning a path — use the expand/contract sequence rather than a big-bang cutover:
+
+<Steps>
+  <Step title="Expand">
+    Deploy code that can read (and optionally write) both old and new representations. Old path remains authoritative.
+  </Step>
+  <Step title="Migrate">
+    Backfill data, dual-write, or shadow-read the new path. Verify with metrics and spot checks until confidence is high.
+  </Step>
+  <Step title="Shift">
+    Move read traffic gradually (14.06 Parallel Monolith Read Drain is one concrete form). Watch SLIs and correctness diffs.
+  </Step>
+  <Step title="Contract">
+    Remove dual paths and old code only when the new path has owned traffic long enough that rollback would reintroduce the old system deliberately, not as a panic.
+  </Step>
+</Steps>
+
+Feature flags make expand/contract operable at runtime: a flag can choose old versus new read path without a redeploy. Flags that live forever become a combinatorial test nightmare — treat cleanup as part of the migration, not optional hygiene.
+
+## Config and data are deploys too
+
+A config-service change or a price-table push can page as hard as a binary. Apply the same rules: canary config, versioned config, instant revert. Schema and backfill jobs get their own review — locking migrations, full-table rewrites at peak, and irreversible data transforms are how "maintenance windows" become incidents (14.05).
+
+Health checks should fail closed on dependencies you need, but not so eagerly that a brief blip drains the whole cluster into a crash loop. Separate *liveness* (restart me) from *readiness* (leave me in the pool).
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Invest in canaries, flags, and expand/contract when"
+  againstTitle="Ship simpler (rolling or even big-bang) when"
+  forItems={[
+    "Blast radius of a bad change includes revenue, data integrity, or a large fraction of users",
+    "You have SLIs that can gate promotion automatically within minutes",
+    "Mixed-version and dual-path operation is supportable for the migration duration",
+    "Error budget policy demands evidence before full exposure",
+    "Multiple services must move in lockstep and need compatibility windows",
+  ]}
+  againstItems={[
+    "The service is low-traffic internal tooling and a fast full rollback already exists",
+    "Change is a trivial revertible config with proven automatic undo",
+    "Dual-running systems would cost more than the risk they mitigate at current scale",
+    "You lack metrics to evaluate a canary — fix observability before theatre canaries",
+    "A true one-way door (legal deletion, irreversible crypto) where incremental exposure does not apply — then emphasize rehearsal and backups instead",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Talk about changing production as a controlled experiment: "Canary a small fraction, gate on SLIs, rollback by traffic shift or flag; for data changes use expand/migrate/contract so mixed versions stay safe." Name version skew between services as a failure mode. If asked about database specifics, point to online-safe schema steps and link the idea to 14.05 without drowning in DDL.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Safe deployment makes change incremental, observable, and reversible so failures burn a slice of budget rather than the fleet",
+    "Canaries need automated SLI gates; a canary without promotion criteria is a delayed full deploy",
+    "Feature flags separate deploy from release and enable instant mitigation — but undeleted flags accumulate risk",
+    "Expand/migrate/contract keeps old and new representations compatible until traffic and data have actually moved",
+    "Config, schema, and traffic shifts are deploys; treat them with the same canary and rollback discipline as binaries",
+    "Plan for version skew during rolling updates — incompatible APIs fail as intermittent pod-level errors, not clean breaks",
+  ]}
+/>

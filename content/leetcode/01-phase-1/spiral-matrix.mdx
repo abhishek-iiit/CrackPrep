@@ -1,0 +1,102 @@
+---
+title: "Spiral Matrix"
+number: "01.47"
+summary: "Shrink top/bottom/left/right boundaries each lap — when a row or column is exhausted, stop advancing that wall."
+status: published
+free: true
+difficulty: core
+estMinutes: 13
+tags: [matrix, simulation]
+updated: "2026-09-15"
+---
+
+## Walk the perimeter, then the next inner perimeter
+
+Return all elements of an `m × n` matrix in clockwise spiral order. `[[1,2,3],[4,5,6],[7,8,9]]` yields `[1,2,3,6,9,8,7,4,5]`.
+
+Simulating "direction" with a turn rule (right → down → left → up) works but needs careful handling when you hit a wall or a cell already visited. The **boundary shrink** version is easier to reason about: maintain `top`, `bottom`, `left`, `right`, walk each side of the current rectangle, then move the corresponding boundary inward. Stop when `top > bottom` or `left > right`.
+
+## Four sides, four bounds
+
+<Steps>
+<Step title="Left to right along top row">
+  `i` from `left` to `right` at row `top`. Then `top++`.
+</Step>
+<Step title="Top to bottom along right column">
+  `i` from `top` to `bottom` at col `right`. Then `right--`.
+</Step>
+<Step title="Right to left along bottom row (if top ≤ bottom)">
+  Prevents double-counting a single row. Then `bottom--`.
+</Step>
+<Step title="Bottom to top along left column (if left ≤ right)">
+  Same guard for a single column. Then `left++`.
+</Step>
+</Steps>
+
+The `if (top <= bottom)` and `if (left <= right)` guards are not optional — without them a 1×n or m×1 matrix visits its cells twice.
+
+## Solution
+
+```ts
+function spiralOrder(matrix: number[][]): number[] {
+  const result: number[] = [];
+  let top = 0;
+  let bottom = matrix.length - 1;
+  let left = 0;
+  let right = matrix[0].length - 1;
+
+  while (top <= bottom && left <= right) {
+    for (let c = left; c <= right; c++) result.push(matrix[top][c]);
+    top++;
+
+    for (let r = top; r <= bottom; r++) result.push(matrix[r][right]);
+    right--;
+
+    if (top <= bottom) {
+      for (let c = right; c >= left; c--) result.push(matrix[bottom][c]);
+      bottom--;
+    }
+
+    if (left <= right) {
+      for (let r = bottom; r >= top; r--) result.push(matrix[r][left]);
+      left++;
+    }
+  }
+
+  return result;
+}
+```
+
+Time **O(m n)**, space **O(1)** excluding the output array.
+
+<Tradeoff
+  forTitle="Boundary shrink simulation when"
+  againstTitle="Direction vector + visited set when"
+  forItems={[
+    "Matrix is dense and every cell is visited exactly once",
+    "You want explicit loops per side without modulo direction arithmetic",
+    "m and n differ — rectangular matrices are the common case",
+    "Follow-up may ask for spiral fill (write into matrix) with the same bounds",
+  ]}
+  againstItems={[
+    "Path must stop early at obstacles (not full spiral) — DFS or BFS fits better",
+    "You already have a generic grid walker with direction arrays from 01.49 Word Search",
+    "Matrix is huge and streamed row-by-row — you cannot hold all bounds in memory at once",
+    "Interview prefers a single while loop with dx/dy turns and you find that cleaner",
+  ]}
+/>
+
+## In an interview
+
+State output order with a 3×3 example. Mention 1×1 and 1×4 edge shapes. Choose boundary shrink and say why guards on the bottom and left legs matter.
+
+Bug to volunteer: omitting guards and duplicating cells on skinny matrices. Follow-ups: spiral matrix II (generate n×n); rotate layers (related to 01.48 Rotate Image).
+
+<KeyTakeaways items={[
+  "Spiral order is four sweeps per layer: top row, right col, bottom row, left col, then shrink bounds.",
+  "After top and right sweeps, check top ≤ bottom and left ≤ right before bottom and left sweeps.",
+  "Without those checks, a single-row or single-column matrix records cells twice.",
+  "Each cell enters the result exactly once — total time O(mn).",
+  "Direction-based simulation with visited flags also works but needs turn logic at boundaries.",
+  "Layer-by-layer thinking connects to 01.48 Rotate Image, which manipulates square layers differently.",
+]} />

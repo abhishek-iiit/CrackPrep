@@ -1,32 +1,120 @@
 ---
 title: "Clocks And Ordering"
 number: "06.05"
-summary: "Clocks And Ordering — notes in progress."
-status: draft
+summary: "Wall clocks skew, so distributed systems order events with logical clocks, vector clocks, or hybrid timestamps — each buying a different slice of causality."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: deep
+estMinutes: 20
+tags: [clocks, ordering, causality, timestamps]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Comparing timestamps across machines is usually a lie
 
-What breaks without this, and the situation that forces the decision.
+Node A stamps an event at `12:00:00.010`. Node B stamps another at `12:00:00.008`. Which happened first? If both clocks were perfect and synchronized, B's event is earlier. In practice, machines in the same datacenter commonly disagree by single-digit milliseconds even under NTP, and a stuck or stepped clock, a long GC pause that freezes a process's view of time, or a cross-region setup can push the gap far higher — enough that a "last writer wins" rule keyed on wall time will occasionally pick the wrong winner and never know it did.
 
-## How it works
+06.01 Distributed Systems Foundations already named the missing shared clock. This lesson is what you do instead: stop pretending wall time is a global order, and pick a clock that records the kind of order your application actually needs — happens-before, concurrent-and-diverged, or "close enough to real time that Spanner-style commits work."
 
-The mechanism, step by step.
+The trap is not that clocks are useless. Local timestamps for logs, SLOs, and human-facing "posted at" fields are fine. The trap is using them as the sole authority for conflict resolution, leader leases, or causal history across nodes — places where being wrong by a few milliseconds silently corrupts state rather than merely mis-sorting a log line.
 
-## Tradeoffs
+## Three kinds of time you might mean
+
+**Physical time** is wall-clock time from a quartz oscillator, GPS, or atomic reference, usually steered by NTP or a cloud time API. It is what humans mean by "when." It is also what skews. Leap smearing, stepwise corrections, and VM scheduling all move it under you. Useful for approximating real time; dangerous as a total order.
+
+**Logical time** ignores wall clocks entirely and only tracks causality: if event X could have influenced event Y, X gets a smaller logical stamp than Y. Lamport clocks and vector clocks live here. They will not tell you that two concurrent events happened "at the same wall-clock moment"; they will tell you they are incomparable — which is often the fact you needed.
+
+**Hybrid time** mixes both: a logical counter that rides on top of a physical clock so that when clocks are well behaved the stamps look like real time, and when they skew the logical component still preserves causality. Google TrueTime and CockroachDB's hybrid-logical clocks are the production faces of this idea.
+
+## Lamport clocks: a cheap total order that is not causal enough
+
+A Lamport clock is an integer counter on each process. Rules:
+
+1. Before emitting a local event, increment the local counter and stamp the event.
+2. When sending a message, include the current counter.
+3. When receiving a message with stamp `t`, set local counter to `max(local, t) + 1`.
+
+If A causally precedes B, then `C(A) < C(B)`. The converse is false: `C(A) < C(B)` does not mean A happened before B — the two events may have been concurrent, and the counters just happened to line up. That is enough to give a system a single, arbitrary total order for things like sorting log lines or breaking ties, and not enough to detect concurrent writes that need merging.
+
+<Callout type="gotcha">
+Last-writer-wins with Lamport timestamps still invents an order between concurrent updates. Two shopping-cart edits that never observed each other will get ordered as if one overwrote the other. If both edits must survive, you need concurrency detection — vector clocks or a CRDT — not a bigger Lamport number.
+</Callout>
+
+## Vector clocks: where concurrency becomes visible
+
+A vector clock gives each node (or actor) its own integer component in a vector. On a local event, a node increments only its own component. Messages carry the whole vector; on receive, the node merges component-wise maxima and then increments its own.
+
+Compare two stamps `V` and `W`:
+
+- `V` dominates `W` if every component of `V` is ≥ the matching component of `W`, and at least one is strictly greater — then W happened-before V.
+- They are concurrent if each has at least one component higher than the other — neither causally precedes the other.
+
+That concurrency bit is the whole product. Dynamo-style stores used vector clocks on values so that divergent versions could be kept and handed to the application (or a merge function) instead of silently dropping one. The cost is size: the vector grows with the number of writers you track. In practice systems bound it — track replica ids rather than every client, prune old entries, or fall back to last-writer-wins after a grace period — because an unbounded vector attached to every value is a denial-of-service against your own metadata budget.
+
+## Hybrid logical clocks and bounded uncertainty
+
+A hybrid logical clock (HLC) stores a physical time estimate plus a logical counter. When the physical clock moves forward, the logical part resets; when an incoming message carries a timestamp ahead of local physical time, the HLC advances to that message's stamp and bumps the logical component so causality still holds. The result sorts like timestamps most of the time, and still respects happens-before when NTP is having a bad afternoon.
+
+TrueTime goes further: it returns an interval `[earliest, latest]` rather than a point, reflecting GPS/atomic uncertainty — often measured in low milliseconds in Google's published descriptions, as an order-of-magnitude to reason with rather than a number to copy into your SLA. Spanner waits out the uncertainty before committing, which is how it sells external consistency: if commit of A finishes before commit of B starts in real time, A's timestamp is before B's. You buy linearizability across the globe by sometimes waiting.
+
+| Mechanism | Preserves causality? | Detects concurrency? | Tracks real time? | Typical use |
+| --- | --- | --- | --- | --- |
+| Wall clock + LWW | No — skew invents order | No | Yes (skewed) | Low-stakes fields, caches |
+| Lamport clock | Yes (one direction) | No | No | Totally ordered logs, simple ties |
+| Vector clock | Yes | Yes | No | Multi-version merge, Dynamo history |
+| HLC / TrueTime | Yes | Partial / via commit wait | Yes (bounded) | Databases that want commit order ≈ real time |
+
+## Ordering in the protocols you already use
+
+Replication and consensus do not usually stamp with NTP and hope. Raft and Multi-Paxos order entries by term/index in a replicated log (06.06 Consensus) — the log position *is* the order, and physical time is irrelevant to safety. Causal consistency sessions (06.02 Consistency Models) track a dependency set or a vector so a replica does not serve a read until it has seen the writes that read depends on. Snowflake-style ids (04.10 Snowflake ID Design) embed a timestamp for rough sortability and accept that skew can disorder ids across machines — 04.11 Clock Skew And ID Ordering is the dedicated treatment of that failure mode.
+
+The design move is always the same: decide which pairs of events must never be reordered, then pick the cheapest clock that forbids exactly those reorderings. Ordering every event in the system by wall time is the expensive, incorrect default.
+
+<Steps>
+  <Step title="Name the invariant that needs order">
+    "A user must see their own write," "two inventory decrements must serialize," and "concurrent cart edits must both survive" are three different invariants. Only the last needs concurrency detection; only the middle needs a consensus log or a lock; the first is often session stickiness.
+  </Step>
+  <Step title="Pick the weakest clock that protects it">
+    Session read-your-writes can be sticky routing. Causal cross-object reads need dependency tracking. Serializing conflicting writers needs a leader or consensus. Global real-time order needs TrueTime-style commit wait or acceptance that you cannot have it cheaply.
+  </Step>
+  <Step title="Put skew failure modes on the board">
+    Say what happens if node clocks jump 200 ms: lease expiry races (06.08 Distributed Locks And Leases), wrong LWW winners, id disorder. If the answer is "silent corruption," wall time is not the authority.
+  </Step>
+  <Step title="Bound metadata growth">
+    Vector clocks and causal histories are not free. Cap the number of tracked actors, expire old versions, and define a merge when the metadata budget is hit — otherwise the clock becomes the outage.
+  </Step>
+</Steps>
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Invest in logical or hybrid clocks when"
+  againstTitle="Rely on wall clocks when"
+  forItems={[
+    "Concurrent writes must be detected rather than arbitrarily ordered — shopping carts, collaborative documents, multi-master replication",
+    "Safety depends on happens-before (causal sessions, replica catch-up barriers), not on approximate wall time",
+    "You are building or choosing a database that advertises external consistency and can pay commit-wait under bounded time uncertainty",
+    "Cross-region skew makes NTP-based LWW demonstrably wrong often enough to show up in support tickets",
+    "Leader leases and fencing already need monotonicity that wall clocks cannot provide alone (06.09 Redis Redlock And Fencing Tokens)",
+  ]}
+  againstItems={[
+    "The stamp is only for humans or logs — approximate order is fine and causality does not matter",
+    "A single writer or consensus log already defines order, so an extra vector clock is pure overhead",
+    "Conflicts are vanishingly rare and last-writer-wins with NTP is an accepted product risk",
+    "You cannot afford per-value version metadata at this write rate, and CRDT/merge logic is out of scope",
+    "The system runs on one machine or one tightly coupled primary where a shared clock is not the bottleneck",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Open with the failure, not the acronym: "I will not use wall-clock last-writer-wins for concurrent cart updates, because skew invents an order between edits that never observed each other — I want vector clocks or a CRDT merge." Then escalate only as far as the invariant requires. If they ask how Spanner does global order, sketch TrueTime intervals and commit wait in two sentences; if they ask about Raft, say the log index is the clock and physical time is irrelevant to safety. Naming when two events are concurrent — and what the system does about that pair — is the signal that you understand ordering rather than timestamping.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Wall clocks skew across machines; using them as a global authority for conflict resolution or leases turns rare millisecond gaps into silent wrong winners.",
+    "Lamport clocks preserve happens-before in one direction and give a total order, but they cannot tell you two events were concurrent.",
+    "Vector clocks detect concurrency by per-actor components; that is what lets multi-master stores keep divergent versions instead of dropping one.",
+    "Hybrid logical clocks and TrueTime-style intervals reconnect causality to approximate real time — Spanner pays commit-wait inside the uncertainty bound for external consistency.",
+    "Consensus logs order entries by term and index; they do not need synchronized wall clocks for safety.",
+    "Choose the weakest clock that protects the invariant: sticky sessions for read-your-writes, vectors for mergeable concurrency, consensus for serializing conflict, TrueTime only when you truly need real-time global order.",
+  ]}
+/>

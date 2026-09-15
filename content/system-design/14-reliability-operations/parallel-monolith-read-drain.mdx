@@ -1,32 +1,106 @@
 ---
 title: "Parallel Monolith Read Drain"
 number: "14.06"
-summary: "Parallel Monolith Read Drain — notes in progress."
-status: draft
+summary: "How to move read traffic off a monolith onto a new service by dual-running paths, comparing results, and shifting load gradually until the old read path is dry."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [migration, strangler, read-drain, monolith]
+updated: "2026-09-15"
 ---
 
-## The problem
+## You cannot flip a monolith's busiest read in one deploy
 
-What breaks without this, and the situation that forces the decision.
+Extracting a capability from a monolith — product catalog, user profile, feed assembly — usually fails when teams cut write *and* read traffic together on a Tuesday. The safer pattern is a **read drain**: stand up the new service (or database) beside the monolith, send it a growing share of reads, prove parity, then leave the monolith as write authority until writes move in a later phase. "Drain" is literal: keep lowering the fraction of reads that still hit the old path until that path is idle enough to delete.
 
-## How it works
+This is expand/contract (14.04) applied to traffic, not just schema. It is also how a strangler fig extraction stays reversible when the new service is wrong.
 
-The mechanism, step by step.
+## The parallel read topology
 
-## Tradeoffs
+```text
+Client → Edge / gateway
+            ├─(1−p)→ Monolith read path  → old store
+            └─(p)──→ New service         → new store
+                         │
+                         └─ shadow mode: also call monolith, compare, discard new response
+```
+
+Three modes usually appear in sequence:
+
+1. **Shadow (dark) reads** — new path executes, results are compared to monolith, user always gets monolith. Measures correctness and latency without user risk.
+2. **Canary reads** — a small `p` of real users receive the new response; the rest stay on monolith. Errors and business metrics gate increases of `p`.
+3. **Drained** — `p = 1`; monolith read code is unused and can be contracted later.
+
+Writes often remain on the monolith during the whole drain, with dual-write or CDC feeding the new store. If the new store is only eventually consistent with monolith writes, the read drain must tolerate or hide that lag — otherwise you "prove" the new service by serving stale product prices.
+
+## Drain procedure
+
+<Steps>
+  <Step title="Prove shadow parity">
+    Diff responses on keys that matter (IDs, prices, permissions), not only HTTP 200. Track disagreement rate as a first-class metric. Investigate systematic diffs before any user-facing canary.
+  </Step>
+  <Step title="Shift a tiny live fraction">
+    1% of traffic or one geographic cell. Prefer sticky routing by user id so an individual session does not flip-flop between old and new within a page load.
+  </Step>
+  <Step title="Ramp on SLIs and diffs">
+    Increase `p` only while error budget burn, latency, and disagreement stay inside agreed bounds. Automatic ramp with automatic rollback beats a manual Friday afternoon bump to 50%.
+  </Step>
+  <Step title="Hold at 100% before deleting">
+    Bake long enough to cover weekly traffic patterns and batch jobs that still call the monolith API. Then remove dead read endpoints (contract).
+  </Step>
+</Steps>
+
+<Callout type="gotcha">
+Comparing timestamps, random ads, or unordered sets as byte-identical JSON creates eternal "parity failures." Normalize responses before diffing, or compare semantic fields. Otherwise the drain never starts because the dashboard is red for harmless reasons.
+</Callout>
+
+## What must be true for the pattern to work
+
+- **Routing control at the edge** — gateway, mesh, or monolith facade can choose old vs new per request.
+- **Data freshness contract** — CDC lag SLOs if the new store is a replica projection.
+- **Idempotent, side-effect-free reads** — shadowing a read that increments counters doubles billing; those are not reads.
+- **Clear ownership** of the disagreement metric — someone must be paged when parity collapses during ramp.
+
+Writes and transactional workflows that span old and new data need a different design (sagas, dual-write carefully ordered). Do not pretend a read drain solves write extraction.
+
+| Risk | Mitigation |
+| --- | --- |
+| New service stale after monolith write | Read-your-writes via sticky monolith for author, or wait for lag SLO |
+| Partial drain with shared cache | Partition cache keys by path version or bypass cache during canary |
+| Hidden monolith callers | Access logs / RPC graphs before claiming drain is complete |
+| Rollback after write cutover | Keep read drain reversible until writes move; after write cutover, rollback is a data problem |
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Use a parallel read drain when"
+  againstTitle="Cut over more abruptly when"
+  forItems={[
+    "The monolith read is high traffic and wrong answers or latency would burn significant error budget",
+    "You can shadow-compare and ramp by percentage or cell with automated rollback",
+    "The new data plane can be fed continuously (dual-write or CDC) while writes stay put",
+    "Multiple consumers will move gradually and need a long coexistence window",
+    "Political and operational appetite exists for a multi-week migration rather than a weekend gamble",
+  ]}
+  againstItems={[
+    "The endpoint is low traffic and a short maintenance cutover is cheaper than dual-running for weeks",
+    "Responses are non-deterministic and parity cannot be defined — fix that or pick another strategy",
+    "You cannot route fractionally (no gateway control) and would need invasive monolith branching everywhere",
+    "The extraction is write-heavy and read drain would not reduce the real risk",
+    "New and old stores cannot be kept within a freshness SLO you are willing to explain to users",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Describe extraction as traffic migration: "I dual-run the new read service in shadow until diffs are clean, then drain traffic by percentage with sticky user routing and automatic rollback; writes stay on the monolith until a later phase." Mention parity metrics and CDC lag as the usual footguns. If asked how you know the monolith is done, cite access metrics hitting zero on the old path before code deletion.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "A parallel read drain moves read traffic gradually onto a new service while the monolith remains a fallback and often still owns writes",
+    "Shadow compares before canary; canary ramps only while SLIs and disagreement rates stay inside bounds",
+    "Sticky per-user routing avoids flip-flopping a session between old and new implementations",
+    "Normalize semantic diffs — byte-identical JSON is the wrong parity test for many responses",
+    "Data freshness between monolith writes and the new read store is part of the design, not an afterthought",
+    "Contract the old read path only after bake time at 100% and evidence that hidden callers are gone",
+  ]}
+/>

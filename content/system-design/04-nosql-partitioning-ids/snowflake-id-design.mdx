@@ -1,32 +1,119 @@
 ---
 title: "Snowflake ID Design"
 number: "04.10"
-summary: "Snowflake ID Design — notes in progress."
-status: draft
+summary: "The 64-bit layout — timestamp, worker id, and sequence bits — and the arithmetic that sets how long it lasts and how fast it can generate ids."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: deep
+estMinutes: 20
+tags: [ids, snowflake, bit-packing, capacity-planning]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Sixty-four bits, three jobs
 
-What breaks without this, and the situation that forces the decision.
+A Snowflake id is one 64-bit integer asked to do three things at once: say roughly when it was created, say which machine created it, and guarantee that two ids created on the same machine in the same millisecond are still different. Cramming three jobs into one integer means every bit spent on one job is a bit taken from another, and the interesting design work is entirely in how you split them.
 
-## How it works
+The canonical layout, as Twitter originally published it: 1 unused sign bit, 41 bits of timestamp, 10 bits of worker id, 12 bits of sequence. That adds to 64. It is not the only valid split — Discord uses 42 timestamp bits and divides the worker field into a 5-bit worker id and a 5-bit process id; Instagram's sharded-id scheme spends 13 bits on a logical shard id and only 10 on the sequence, because its bottleneck was shard count, not per-shard throughput. The bit counts are a budget, and different systems are short on different things.
 
-The mechanism, step by step.
+## The layout, field by field
 
-## Tradeoffs
+| Field | Width | Range | What it buys |
+| --- | --- | --- | --- |
+| Sign bit | 1 | Always 0 | Keeps the value a positive signed 64-bit integer, so it behaves in languages and databases that don't have an unsigned 64-bit type |
+| Timestamp | 41 bits | 0 to 2,199,023,255,551 ms since a chosen epoch | How far into the future the scheme works before it runs out of room |
+| Worker id | 10 bits | 0 to 1,023 | How many independent generators can run at once without colliding |
+| Sequence | 12 bits | 0 to 4,095 | How many ids one worker can mint inside a single millisecond |
+
+An id is assembled by shifting each field into place and OR-ing them together:
+
+```text
+id = (timestamp_ms << 22) | (worker_id << 12) | sequence
+```
+
+The shift amounts fall straight out of the widths: worker id and sequence together occupy the low 22 bits — 10 plus 12 — so the timestamp starts at bit 22, and the worker id sits above the 12-bit sequence.
+
+## Generating one id
+
+<Steps>
+  <Step title="Read the current time and compute elapsed milliseconds since the epoch">
+    Not since 1970 — since a custom epoch chosen at design time, usually close to the system's launch date. Every millisecond spent before that epoch is a millisecond of the 41-bit budget not being used, so starting the clock late is free budget.
+  </Step>
+  <Step title="Compare against the last timestamp this worker used">
+    If the current time is strictly greater, the sequence resets to 0 and generation proceeds normally — the common case, since most workers don't generate 4,096 ids inside a single millisecond.
+  </Step>
+  <Step title="If the current time equals the last timestamp, increment the sequence">
+    Same millisecond, next id in it. If the sequence would overflow past 4,095, the worker has exhausted this millisecond's budget and must wait — spin or sleep — until the clock ticks forward to the next millisecond, then reset the sequence to 0 there.
+  </Step>
+  <Step title="If the current time is less than the last timestamp, stop">
+    The clock has moved backward. Generating an id now risks reusing a timestamp-and-sequence combination already handed out, which breaks both uniqueness and ordering. The correct move is to refuse to generate until real time catches back up — not to generate anyway and hope. 04.11 Clock Skew And ID Ordering covers why this happens and the guards beyond "just wait."
+  </Step>
+  <Step title="Assemble and return the id">
+    Shift the timestamp, worker id, and sequence into their fields and combine them into one 64-bit integer.
+  </Step>
+</Steps>
+
+## The arithmetic that sets the budget
+
+<Formula label="Timestamp lifespan">2^41 ms ≈ 2.199 × 10^12 ms ≈ 69.7 years from the chosen epoch</Formula>
+
+That number is why the epoch matters. Twitter's Snowflake used a custom epoch of November 2010; picking the Unix epoch instead would have burned 40 of those 69.7 years before the service ever ran, leaving under 30 years of headroom. Choosing an epoch at or near launch is the single free lever in the whole design — it costs nothing and buys back decades.
+
+<Formula label="Per-worker throughput ceiling">2^12 = 4,096 ids per worker per millisecond ⇒ 4,096,000 ids/sec per worker, in principle</Formula>
+
+<Formula label="Fleet-wide throughput ceiling">2^10 workers × 4,096 ids/ms = 4,194,304 ids/ms ≈ 4.19 billion ids/sec, in principle</Formula>
+
+Both throughput numbers are theoretical ceilings, not measured rates — the second one assumes 1,024 workers are all simultaneously generating at their individual maximum, which no real deployment does. The number worth remembering is the shape of the tradeoff, not the ceiling itself: doubling the worker-id space to support twice as many generators costs one bit, and that bit has to come from somewhere — either the sequence, halving per-worker burst capacity, or the timestamp, roughly halving the years before rollover.
+
+### Worked example: assembling one real id
+
+Take a service with a custom epoch of 2024-01-01T00:00:00 UTC. At generation time, a round 100,000,000,000 ms have elapsed since that epoch — about 3.17 years, a clean number chosen for the arithmetic rather than an exact timestamp. This worker was assigned worker id 37. It is the sixth id this worker has generated inside the current millisecond, so sequence = 5.
+
+- `timestamp_ms << 22` = 100,000,000,000 × 4,194,304 = 419,430,400,000,000,000
+- `worker_id << 12` = 37 × 4,096 = 151,552
+- `sequence` = 5
+- **id = 419,430,400,000,000,000 + 151,552 + 5 = 419,430,400,000,151,557**
+
+Sanity-check the budget: 100,000,000,000 ms is about 4.5% of the full 2,199,023,255,551 ms, 69.7-year, timestamp budget, so this hypothetical service has used a twentieth of its runway three years in — consistent with a healthy margin, not a warning sign. And the sequence value of 5 is nowhere near the 4,095 ceiling, which is the ordinary case; a worker only approaches that ceiling under a sustained burst of several thousand ids inside one millisecond, a real load level for a busy fleet-wide allocator but not for most individual services.
+
+## Assigning worker ids without colliding
+
+The one coordination step the whole design depends on is handing out worker ids so that no two live generators ever share one. Common approaches: a configuration value set per deployment, simple, but a human can duplicate it by mistake during a rushed rollout; a lease from a coordination service that a worker renews periodically and gives up on shutdown; or a value derived deterministically from something already unique in the environment, like the low bits of a container's IP address, accepting that the worker-id space then has to be sized around the deployment's address range rather than around throughput alone. 06.12 Metadata Service And Node Discovery covers the general problem of a fleet agreeing on identity without a single point of failure.
+
+<Callout type="warn">
+A worker-id collision is silent. Two workers quietly issuing overlapping ids does not throw an error anywhere — it produces duplicate primary keys that surface later as a unique-constraint violation on insert, or worse, as two unrelated rows sharing a key in a system with no unique constraint to catch it at all. Treat worker-id assignment as correctness-critical infrastructure, not a config value to set once and forget, especially across redeploys and autoscaling events that might reuse a released id before the old holder is really gone.
+</Callout>
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Design your own bit layout when"
+  againstTitle="Reach for an existing implementation instead when"
+  forItems={[
+    "Your throughput and fleet-size numbers genuinely don't fit the canonical 41/10/12 split — many more workers than sequence headroom, or the reverse",
+    "You want to embed something specific in the id itself, like a shard number, so routing can read it straight off the id with no lookup",
+    "You control both ends — the generator and every consumer that parses the id — so a nonstandard layout doesn't surprise anyone downstream",
+    "The runway math matters enough at your scale to choose the epoch deliberately rather than default to whatever a library ships with",
+  ]}
+  againstItems={[
+    "A well-tested existing implementation already fits your throughput and fleet-size numbers with no custom bit-splitting needed",
+    "You'd rather not own worker-id assignment, clock-skew guards, and sequence-overflow handling as bespoke code your team has to maintain",
+    "Interoperability matters — other systems already expect the canonical layout and parse ids assuming it",
+    "The throughput ceiling of the default split is nowhere close to your actual load, so there's no real gain to hand-tuning it",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Walk the layout out loud before the arithmetic: "64 bits, one unused, then time, then worker, then sequence — the split is a budget, and I'd size it to my numbers rather than assume the canonical 41/10/12." Then show you can do the arithmetic without a calculator: 41 timestamp bits is about 70 years from whatever epoch you pick, 12 sequence bits is 4,096 ids per worker per millisecond, and moving a bit from one field to the other trades years of runway for burst capacity or fleet size. Naming the epoch choice specifically — custom, near launch, not 1970 — is a small detail that reliably signals you've actually implemented one of these rather than only read about it.
 
-<KeyTakeaways items={["", "", ""]} />
+Then name the dependency before you're asked: every worker needs a worker id nobody else has, and every worker's clock needs to keep moving forward. The first is solved once, at assignment time. The second is never fully solved, only guarded against, which is the whole subject of 04.11 Clock Skew And ID Ordering.
+
+<KeyTakeaways
+  items={[
+    "A Snowflake id packs a timestamp, a worker id, and a per-millisecond sequence into one 64-bit integer, and the three field widths are a budget traded against each other",
+    "41 timestamp bits give about 69.7 years of runway from the chosen epoch — choosing a recent custom epoch instead of 1970 is free extra runway",
+    "12 sequence bits cap one worker at 4,096 ids per millisecond; overflowing that ceiling within a millisecond means waiting for the clock to tick forward",
+    "10 worker-id bits cap the fleet at 1,024 concurrent generators; each bit moved from this field to another halves that ceiling",
+    "The only coordination the scheme needs is assigning each worker a worker id nobody else holds — a one-time step, but a silently catastrophic one if it collides",
+    "A clock that moves backward relative to a worker's last-used timestamp must halt generation rather than proceed, or it risks reissuing an already-used timestamp-sequence pair",
+  ]}
+/>

@@ -1,0 +1,105 @@
+---
+title: "Russian Doll Envelopes"
+number: "03.38"
+summary: "Sort by width ascending and height descending on ties — longest strictly nested chain becomes LIS on heights in O(n log n)."
+status: published
+free: true
+difficulty: deep
+estMinutes: 17
+tags: [sorting, binary-search, lis]
+updated: "2026-09-15"
+---
+
+## Same width cannot nest — sort kills the tie trap
+
+Given envelopes `[width, height]`, one fits inside another only if **both** dimensions are strictly smaller. Find the maximum nesting depth (Russian doll count).
+
+`[[5,4],[6,4],[6,7],[2,3]]` → 3: `[2,3]` → `[5,4]` → `[6,7]`.
+
+O(n²) DP on pairs works for n ≤ 10⁴ but barely. The standard reduction: sort envelopes by **width ascending**, and for equal width by **height descending**. Now nesting is strictly increasing in both dimensions iff heights form a **strictly increasing subsequence** in sorted order.
+
+Why descending height on width ties? `[6,4]` and `[6,7]` share width — only one can appear in a valid chain. Sorting height descending keeps the larger height first so LIS cannot pick both.
+
+## Sort + LIS with binary search
+
+After sort, run longest increasing subsequence on heights using the patience-sorting / `tails` array method from 01.18 Longest Increasing Subsequence — O(n log n).
+
+For each envelope `(w, h)`, binary search `tails` for leftmost `>= h`, replace or append. `tails.length` is the answer.
+
+<Steps>
+<Step title="Sort by width asc, height desc on equal width">
+  Eliminates invalid same-width pairs from the LIS scan.
+</Step>
+<Step title="Walk sorted envelopes, maintain tails[] of LIS ending heights">
+  Binary search position for current height h.
+</Step>
+<Step title="Return tails.length">
+  Strict LIS length equals max nesting count.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function maxEnvelopes(envelopes: number[][]): number {
+  envelopes.sort((a, b) =>
+    a[0] === b[0] ? b[1] - a[1] : a[0] - b[0]
+  );
+
+  const tails: number[] = [];
+
+  for (const [, h] of envelopes) {
+    let lo = 0;
+    let hi = tails.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (tails[mid] < h) lo = mid + 1;
+      else hi = mid;
+    }
+    if (lo === tails.length) tails.push(h);
+    else tails[lo] = h;
+  }
+
+  return tails.length;
+}
+```
+
+Time **O(n log n)** from sort plus LIS. Space **O(n)** for sort and tails.
+
+<Tradeoff
+  forTitle="Sort + LIS on heights when"
+  againstTitle="O(n²) DP on pairs when"
+  forItems={[
+    "n up to 10⁵ — O(n log n) is the intended solution",
+    "You know 01.18 Longest Increasing Subsequence tails+binary-search trick",
+    "Both dimensions must be strict — sort preprocessing handles width conflicts cleanly",
+    "Interview expects the reduction explained, not just code",
+    "Follow-ups may add rotation or 3D boxes — same sort-one-axis LIS-other pattern",
+  ]}
+  againstItems={[
+    "n is under 500 — O(n²) DP by increasing width is simpler to write",
+    "Envelopes already sorted by width — skip sort, run LIS only",
+    "Interviewer forbids O(n log n) until you derive O(n²) first",
+    "01.18 LIS allows equal values in non-strict variant — here heights must be strictly increasing in the chain",
+    "Duplicate envelopes everywhere — sort tie-break still required or LIS overcounts",
+  ]}
+/>
+
+## In an interview
+
+Example: four envelopes above → 3. Clarify strict inequality on width and height.
+
+Explain sort trick before LIS — same-width pairs break naive sort-by-width-only.
+
+Follow-ups: 3D nesting, count all chains, print one valid chain. Bug: sorting height ascending on width ties, letting two same-width envelopes both enter the LIS.
+
+<KeyTakeaways
+  items={[
+    "Russian Doll Envelopes reduces to LIS on heights after sorting by width asc, height desc on ties",
+    "Descending height for equal width prevents picking two envelopes that cannot both nest",
+    "tails[] + binary search gives O(n log n) LIS — same machinery as 01.18 Longest Increasing Subsequence",
+    "O(n²) pair DP works for small n but not at 10⁵ scale",
+    "Nesting requires strict increases in both dimensions — non-strict LIS breaks the geometry",
+    "Sort-one-dimension-then-LIS pattern appears in interval scheduling and envelope variants",
+  ]}
+/>

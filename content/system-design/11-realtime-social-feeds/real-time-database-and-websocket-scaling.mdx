@@ -1,32 +1,107 @@
 ---
 title: "Real-Time Database And WebSocket Scaling"
 number: "11.01"
-summary: "Real-Time Database And WebSocket Scaling — notes in progress."
-status: draft
+summary: "Pushing live updates is easy on one box; the hard part is fan-out, sticky connections, and a write path that does not melt when every open socket wants the same hot key."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: deep
+estMinutes: 19
+tags: [websockets, realtime, scaling, pubsub]
+updated: "2026-09-15"
 ---
 
-## The problem
+## One server can push; a fleet has to find the right socket
 
-What breaks without this, and the situation that forces the decision.
+A real-time feature — live comments, presence dots, a collaborative cursor, a feed badge that ticks up without a refresh — looks like a database problem until you draw the clients. Each open browser holds a long-lived connection to *some* machine in your fleet. When a row changes, that change has to reach every interested socket, most of which are not on the box that wrote the row. The database knows the new value; it does not know which TCP connections care. Bridging those two worlds is the scaling problem: connection state lives on the edge, durable state lives in storage, and something in the middle has to route events without turning every write into a broadcast storm.
 
-## How it works
+On a single process this is trivial — mutate, then iterate an in-memory map of sockets. At ten thousand concurrent connections it is still often one machine. At hundreds of thousands it is not: file descriptors, memory per connection, and CPU for heartbeats all have ceilings, and a deploy that restarts that process drops everyone. Horizontal scale means accepting that the writer and the socket holders are different processes, usually on different hosts, and designing for that from the first box you draw.
 
-The mechanism, step by step.
+## What you are actually scaling
 
-## Tradeoffs
+Three loads grow independently, and treating them as one number is how designs fail:
+
+1. **Concurrent connections** — open WebSockets (or long-poll holds). Dominated by RAM and file descriptors, not by request rate. A quiet user still costs a slot.
+2. **Event fan-out** — how many sockets must be notified per write. One chat room with fifty members is cheap; a live sports ticker with a million viewers is a different product.
+3. **Durable write rate** — inserts and updates that must survive. The real-time path often amplifies this: every reaction write may also enqueue an event for every watching client.
+
+A system can be connection-heavy and write-light (presence), write-heavy and fan-out-light (private 1:1 typing indicators), or both heavy (a celebrity livestream chat). Name which one you have before picking a topology.
+
+## The edge: connection gateways, not app monoliths
+
+The usual shape is a thin **connection gateway** fleet in front of the rest of the system. Gateways terminate TLS and WebSockets, keep the per-socket state (user id, subscribed channels, last ping), and speak an internal protocol to the rest of the backend. Application servers and databases stay free of open sockets. That split matters for deploys: you can roll the business logic without reconnecting every client, and you can scale gateway count against concurrent connections without scaling the write path at the same ratio.
+
+Gateways need a way to find each other for delivery. The common patterns:
+
+- **Pub/sub bus** (Redis Pub/Sub, NATS, Kafka with short retention, a dedicated message broker). When a write succeeds, a publisher emits `channel → payload`. Every gateway subscribed to that channel delivers to its local sockets. Simple, and it fails the moment one channel is too hot for a single subscriber process — then you shard channels or move to a partitioned stream.
+- **Sticky routing plus direct push.** A registry (Redis, etcd, or an in-memory membership service) maps `userId → gatewayId`. The writer looks up owners and RPCs those gateways. Lower fan-out waste when interest is sparse; higher operational cost when users reconnect and the map is briefly wrong.
+- **Hybrid.** Presence and small rooms on pub/sub; celebrity or broadcast channels on a dedicated fan-out tier that batches and rate-limits.
+
+<Callout type="gotcha">
+Load balancers that distribute new TCP connections round-robin do not help a message find an already-open socket. Once the WebSocket is established, packets for that connection must keep hitting the same gateway — L4 stickiness by connection, or an explicit upgrade path that pins the client. If a gateway dies, clients reconnect and land elsewhere; the registry or subscription set must heal. Treating WebSocket scale as "add more app servers behind the same LB" without sticky affinity or a pub/sub layer is the classic interview miss. 02.06 Load Balancers covers the LB roles; the realtime-specific requirement is affinity or an out-of-band delivery bus.
+</Callout>
+
+## The database side: do not make the primary the notifier
+
+Durable truth and live notification want different access patterns. The write path should:
+
+1. Persist the mutation (transaction, or append to a log).
+2. Emit an event *after* commit — ideally from the same service that wrote, or via change-data-capture if you cannot trust application-level emit.
+3. Let gateways consume that event. The database itself should not open sockets or run per-subscriber loops.
+
+Polling the database from every gateway ("select where updated_at > ?") collapses under connection count: you have reinvented short polling at the wrong layer. Change feeds and CDC streams exist so the notification path scales with *writes and interested parties*, not with *open sockets × poll interval*.
+
+For read-your-own-writes on the socket that just submitted, short-circuit: the gateway that accepted the client action can echo the event locally after the write ACK, without waiting for the bus round trip. Everyone else still goes through the fan-out path. That one exception removes a class of "I posted and my own UI lagged" complaints without weakening the multi-node design.
+
+### Backpressure and hot channels
+
+A viral room or a stock ticker can produce more events than a mobile client can render or a gateway can write. Decide explicitly:
+
+- **Drop or coalesce** on the edge (last-write-wins for presence; sample reactions per 100 ms window).
+- **Buffer with a bound** and disconnect slow clients rather than unbounded queue growth in gateway memory.
+- **Separate channels by priority** so typing indicators cannot starve payment or safety alerts.
+
+Without a policy, the failure mode is not a clean 503 — it is gateway OOM and cascading reconnect storms.
+
+## Capacity sketch (order-of-magnitude)
+
+Assume 1M daily actives, 10% concurrent at peak → 100k open sockets. At ~10–50 KB of connection state and buffers per socket (a ballpark; implementations vary), that is on the order of 1–5 GB of RAM just for connection metadata across the fleet, before payload. Heartbeats every 30 s are ~3k messages/s of pure keep-alive. If 1% of those users sit in a hot broadcast generating 20 events/s, you are pushing 20k gateway deliveries/s for that channel alone — fine for a partitioned consumer set, fatal if every gateway naively subscribes to every channel. The arithmetic is there to force a question: *how selective is subscription?*
+
+| Concern | Scales with | Typical lever |
+| --- | --- | --- |
+| Open sockets | Concurrent users | More gateway nodes; tune fd limits and heartbeat interval |
+| Delivery fan-out | Interested sockets per event | Channel sharding; coalesce; sticky registry for sparse interest |
+| Durable writes | Mutation rate | Partition the primary store; async emit after commit |
+| Reconnect storms | Gateway or LB failure | Jittered backoff; session resume tokens; overprovision gateway headroom |
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Invest in a realtime gateway + bus when"
+  againstTitle="Keep push on the app servers when"
+  forItems={[
+    "Concurrent connections already outgrow a single process, or a rolling deploy would disconnect a user-visible share of the base",
+    "Writers and socket holders must be different machines — multi-AZ, multi-service, or CDC-driven notification",
+    "Fan-out varies wildly by channel and you need to shard hot rooms without resharding the whole database",
+    "You need independent autoscaling: connection count and write QPS do not peak together",
+    "Presence, typing, and durable posts share infrastructure but not the same failure budget",
+  ]}
+  againstItems={[
+    "Peak concurrent sockets fit comfortably on one or two boxes with headroom, and downtime during deploy is acceptable",
+    "Every client only cares about data it just wrote — no cross-user push, so HTTP request/response is enough",
+    "Updates are rare (minutes) and short polling or SSE from a single origin already meets the freshness SLA",
+    "The team cannot yet operate sticky LBs, a pub/sub plane, and reconnect semantics — complexity would outrun the feature",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Lead with the split: "Durable state in the database; connection state on a gateway fleet; a pub/sub or registry so a write on node A reaches sockets on node B." Then ask the three loads — concurrent connections, fan-out per write, durable write rate — and say which one dominates. Name the failure modes without being prompted: sticky sessions or bus required, hot channel backpressure, reconnect storms after a gateway blip, and never polling the primary from every edge node. If they push on "Firebase-style realtime database," translate it into the same pieces: clients subscribe to paths, the service owns fan-out, and your custom design is reconstructing that contract with explicit scaling knobs.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Real-time scale is three numbers — concurrent sockets, fan-out per event, and durable write rate — and they rarely grow together",
+    "Terminate long-lived connections on a gateway fleet; keep the database out of the socket path",
+    "Cross-node delivery needs sticky affinity plus a registry, or a pub/sub bus that gateways subscribe to by channel",
+    "Emit notifications after commit (or via CDC); do not have every gateway poll the primary for changes",
+    "Hot channels need an explicit coalesce or drop policy, or gateway memory becomes the outage",
+    "Plan reconnect storms: jittered backoff and spare gateway capacity matter as much as steady-state RAM",
+  ]}
+/>

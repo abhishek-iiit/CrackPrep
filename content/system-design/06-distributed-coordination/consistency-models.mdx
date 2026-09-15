@@ -1,32 +1,77 @@
 ---
 title: "Consistency Models"
 number: "06.02"
-summary: "Consistency Models — notes in progress."
-status: draft
+summary: "Linearizability, sequential, causal, and eventual consistency are four distinct promises about when a write becomes visible, not one fuzzy guarantee."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 14
+tags: [consistency, linearizability, replication, distributed-systems]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Two readers, two answers, and both technically correct
 
-What breaks without this, and the situation that forces the decision.
+Client A writes `x = 5`. A moment later, client B reads `x` and gets `3` — the old value — even though A's write already returned success. Is the system broken? It depends entirely on what it promised. If it advertised linearizability, this is a bug, full stop. If it advertised eventual consistency, this is Tuesday, and it resolves itself once replication catches up.
 
-## How it works
+"Consistency" gets used as marketing shorthand for "trust the data," but it is not one property. It is a spectrum of precise, mutually exclusive guarantees about when and in what order the effects of a write become visible to other readers. Choosing a datastore without knowing which point on that spectrum it gives you is choosing a bug you have not found yet.
 
-The mechanism, step by step.
+Every point on the spectrum trades the same two things against each other: coordination cost against how surprising the system's behavior is allowed to be. Coordinating less means answering faster and staying available when nodes cannot reach each other; it also means the value a client reads can lag, or even reorder relative to, what that same client already knows to be true. The rest of this lesson orders four common points on that spectrum from strongest to weakest.
 
-## Tradeoffs
+## Four points on the spectrum
+
+**Linearizability** is the strongest single-object guarantee. Every operation appears to take effect atomically at some instant between its invocation and its response, and that instant respects real, wall-clock time across every client — once a write completes, any subsequent read by anyone, anywhere, sees it or something newer. It behaves as if there were only one copy of the data and every operation ran one at a time in real order. The cost is that a read cannot be answered from a lone replica's local state without checking that the state is still current — usually a round trip to a leader or a quorum, which is exactly the coordination 06.06 Consensus exists to make affordable. ZooKeeper and etcd's core operations, and Spanner's externally-consistent writes, are the systems usually cited as linearizable.
+
+**Sequential consistency** is weaker in exactly one way: it drops the real-time requirement. Every client still sees operations in one single, globally agreed order that respects each client's own program order, but that agreed order need not match the order the operations actually happened in wall-clock time. A read can return something "stale" relative to a write that just completed elsewhere, as long as every observer agrees on the same story about which write came first. It is rarely a system's marketed, end-to-end guarantee in production — it shows up more as a stepping stone in proofs and protocol design than as a label on a database — but it is the guarantee a single, ordered broadcast without a real-time bound actually provides.
+
+**Causal consistency** drops the single-global-order requirement too, and only orders operations that are actually related by cause and effect: if operation B read a value that operation A wrote, or B happened after A on the same process, every node must show B after A. Operations with no causal link — concurrent writes from clients who never observed each other — can appear in different orders on different nodes, and that is fine. This is the guarantee behind "read your own writes" and "monotonic reads," and it is cheap enough that several systems offer it as a session-level default (MongoDB's causal-consistency sessions; COPS, the research system built explicitly around it).
+
+**Eventual consistency** is the floor. The only promise is that if writes stop arriving, every replica eventually converges to the same value. There is no ordering guarantee in the meantime — two reads from the same client seconds apart can see the data move backward if they land on replicas that have not converged in the same order. What makes this usable is conflict resolution applied at read or merge time (last-writer-wins by timestamp, version vectors, CRDTs), and the fact that "my own writes are visible to me" is usually bolted on separately as session stickiness rather than guaranteed by the model itself.
+
+| Model | Ordering guarantee | Respects real time? | Typical cost | Example |
+| --- | --- | --- | --- | --- |
+| Linearizable | Total order, matches wall-clock time | Yes | Coordinate on every operation | ZooKeeper/etcd, Spanner writes |
+| Sequential | Total order, program-order-consistent | No | Coordinate to fix one global order | Rare as a sole target; a theoretical anchor |
+| Causal | Partial order — only causally related ops | No | Track causal history (06.05 Clocks And Ordering) | MongoDB causal sessions, session guarantees |
+| Eventual | None — only convergence | No | None in the write path | DNS, Dynamo-style stores |
+
+## The guarantee has to match the invariant, not the datastore's label
+
+Few systems are honestly described by one word for every read path they expose. Dynamo-style stores let you tune the read and write quorum per request (06.03 Replication); the same cluster can serve one query path at something close to strong consistency and another at eventual consistency, because the two paths protect different invariants. "The database is eventually consistent" is often shorthand for "this particular read is," and treating it as a blanket property of the whole system is how a design ends up strongly consistent where it did not need to be and eventually consistent exactly where it could not afford to be.
+
+<Callout type="gotcha">
+"Read your own writes" is not automatic under eventual consistency. A client that writes, then immediately reads from a different, lagging replica, can see its own write disappear — not someone else's, its own. That surprises people because it reads like a bug in the client rather than a documented property of the model, which is exactly why it needs its own guarantee (session stickiness, or routing a client's reads back to the replica it wrote to) rather than being assumed for free.
+</Callout>
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Pay for stronger consistency when"
+  againstTitle="Accept weaker consistency when"
+  forItems={[
+    "The read must reflect the most recent acknowledged write, every time — inventory counts, seat reservations, balances, anything where a stale read causes a double-allocation",
+    "Multiple clients coordinate through the store itself, e.g. as a lock or leader-election substrate (06.07 Leader Election), where two clients disagreeing about the current state is the bug",
+    "The system already pays for a consensus-backed writer (06.06 Consensus) for other reasons, so serving linearizable reads from it costs little extra",
+    "Correctness bugs from stale or reordered reads are expensive to detect and worse to explain to a user after the fact",
+  ]}
+  againstItems={[
+    "Most reads can tolerate being a few hundred milliseconds to a few seconds behind the latest write — a social feed, a view count, a search index",
+    "The system must keep answering during a network partition, and losing availability to guarantee recency is the wrong trade for the workload (06.04 CAP And PACELC)",
+    "Read latency and throughput matter more than recency, and coordinating every read against a quorum or leader would multiply both",
+    "The application can supply its own narrow guarantee — read-your-writes via session stickiness, a version check — instead of paying for global linearizability everywhere",
+    "Concurrent writers are rare or naturally converge, so eventual consistency's only real cost, temporary staleness, is one nobody downstream will notice",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Name the guarantee by the invariant it protects, not by the term: "reads must reflect the last acknowledged write, because two clients could otherwise double-book the same seat, so this path needs linearizable reads" is a stronger answer than "I'll use strong consistency here." Expect the follow-up about cost — every stronger guarantee is coordination, and coordination is latency and reduced availability during a partition — and be ready to say which reads need it and which do not. Few real systems need every read path linearizable, and naming the split is usually the better design than picking one model for the whole system.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Consistency is not one guarantee — linearizability, sequential, causal, and eventual consistency are different, precise promises, and a database advertising 'consistency' without naming one of them hasn't said anything measurable.",
+    "Linearizability is the only one of the four that respects real, wall-clock time across all clients; sequential consistency agrees on one global order but not on when it happened.",
+    "Causal consistency only orders operations actually related by cause and effect, which is cheap enough that many systems offer it as a session-level default.",
+    "Eventual consistency promises convergence only if writes stop — while writes continue, two reads from the same client can see the data move backward unless something else, like session stickiness, is layered on top.",
+    "Stronger guarantees cost coordination on every operation; the practical skill is matching the guarantee to the specific invariant a read protects, not picking one model for an entire system.",
+    "'Read your own writes' is not automatic under eventual consistency — a client can read a replica that hasn't yet seen its own prior write, which is the failure mode most often mistaken for a client bug rather than a property of the model.",
+  ]}
+/>

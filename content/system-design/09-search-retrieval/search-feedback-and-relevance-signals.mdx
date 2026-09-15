@@ -1,32 +1,99 @@
 ---
 title: "Search Feedback And Relevance Signals"
 number: "09.08"
-summary: "Search Feedback And Relevance Signals — notes in progress."
-status: draft
+summary: "Clicks, skips, and purchases are noisy votes on ranking quality — how to turn them into signals without letting popularity collapse the index."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 14
+tags: [search, relevance, feedback, ranking-signals]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Text match does not know what users actually chose
 
-What breaks without this, and the situation that forces the decision.
+BM25 (09.05 BM25 Production Ranking) ranks by how query terms appear in documents. That is necessary and still incomplete. Two product pages can share similar term overlap while one converts and the other is abandoned in 800 ms. Users continuously vote with clicks, add-to-carts, dwell time, reformulations, and "did you mean" acceptances — whether you record those votes or not. **Search feedback** is the practice of logging those behaviors and folding them into ranking as **relevance signals**, alongside the lexical score.
 
-## How it works
+Without feedback, ranking freezes at "what the text says." With naive feedback, ranking freezes at "what was already popular" — new documents never surface, clickbait wins, and position bias teaches the model that rank #1 is always best because rank #1 always gets the clicks. The design problem is extracting signal from biased, incomplete behavioral data without destroying exploration.
 
-The mechanism, step by step.
+## What is worth logging
 
-## Tradeoffs
+Treat the search session as an event stream (08.03 Event Bus For Product Events is the right delivery shape; the payload is IR-specific):
+
+| Event | Rough meaning | Caveat |
+| --- | --- | --- |
+| Impression | Result was shown | Not evidence of relevance alone |
+| Click | User selected a result | Stronger, but position-biased |
+| Dwell / long click | Stayed on landing page | Short clicks often mean disappointment |
+| Purchase / signup | Downstream success | Sparse but high value |
+| Reformulation | Typed a new query after results | Previous results likely failed |
+| Pagination / "load more" | Needed more | Top results insufficient |
+| Explicit rating | Thumb / "not relevant" | Clean but rare |
+
+**Position bias** is the central gotcha: people click the first result more even when it is worse. A raw click-through rate (CTR) by document rewards whatever currently sits on top and creates a feedback loop. Debiasing methods range from simple (compare clicks to expected CTR for that position) to full click models; for system design interviews, naming position bias and refusing raw CTR as a global quality score is the bar.
+
+## From logs to features
+
+Signals enter ranking in layers:
+
+1. **Query–document affinity.** For this query (or query cluster), document D historically gets satisfied clicks. Useful as a feature or a multiplicative boost on top of BM25 — not as a total replacement. Sparse queries (head) have data; long-tail queries do not.
+2. **Document quality priors.** Aggregate engagement across queries: popularity, conversion rate, spam complaints. Query-independent — helps champions (09.06) and static rank, hurts cold start if overweighted.
+3. **Session context.** Recent clicks, locale, device, logged-in segment. Personalization features; privacy and isolation constraints apply.
+4. **Negative signals.** Skip patterns (impressed but never clicked while lower results were), quick-back, explicit hides. Often more informative than another click on the head result.
+
+Learning-to-rank (LTR) models consume these as features with BM25 score, field matches, freshness, and business rules. Offline labels still come from human judgments or carefully interpreted clicks — 09.09 Search Evaluation Metrics is how you know a new model is better before it reshapes production bias further.
+
+<Callout type="warn">
+Optimizing live ranking solely against online CTR without an exploration policy and offline gate is how you calcify a mediocre top-10. CTR can rise while user success falls — snappier clickbait titles, worse purchases. Pair behavioral training with relevance metrics that use purchases or human labels for the decisions that matter, and keep a lexical baseline you can roll back to.
+</Callout>
+
+## Cold start and exploration
+
+New documents have no clicks. If champions and LTR features require history, the inventory never enters the race. Mitigations:
+
+- **Lexical floor.** BM25 always contributes; behavior only reorders among reasonable text matches.
+- **Exploration slots.** Reserve one position for a candidate with uncertainty (new, low impressions) on a fraction of traffic.
+- **Prior from content.** Seller reputation, editorial score, predicted category affinity until real feedback arrives.
+- **Decay.** Old clicks age out so last year's viral misspelling page does not own the query forever.
+
+Freshness of the signal pipeline matters too. Batch-updating click features once a day may be enough for a catalog; a news search needs minutes. That is another consumer of the event bus with its own lag story (08.04 Queue Lag) — stale feedback is still usually better than none, but know which queries care.
+
+## Abuse and gaming
+
+Any published ranking signal becomes an attack surface: click farms, bot impressions, self-preferencing. Defend with bot filtering before training, rate limits on engagement events, and holdout evaluation that bots cannot easily optimize. Do not train directly on unfiltered edge logs.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Blend behavioral feedback into ranking when"
+  againstTitle="Stay mostly lexical when"
+  forItems={[
+    "You have enough head-query traffic that query–document click stats are statistically meaningful",
+    "Downstream success events (purchase, subscribe) exist to validate that clicks mean value",
+    "You can debias position and keep a BM25 (or similar) floor so cold documents still compete",
+    "Offline eval and online A/B tests are in place to catch CTR theater (09.09)",
+    "The product benefits from personalization or popularity that text alone cannot express",
+  ]}
+  againstItems={[
+    "Traffic is too sparse — almost every query is long-tail with empty feedback cells",
+    "You cannot yet filter bots or trusted-user clicks; training data would be adversarial garbage",
+    "Regulatory or product rules require explainable text match without popularity amplification",
+    "Cold-start inventory is the main catalog and exploration infrastructure is not funded",
+    "A well-tuned BM25 + query understanding pipeline already meets quality bars on labeled sets",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Separate three ideas quickly: "Lexical score finds text match; behavioral signals record what users chose; position bias means I cannot treat raw CTR as truth." Propose BM25 + a click-affinity feature for head queries, with exploration for new docs.
 
-<KeyTakeaways items={["", "", ""]} />
+Expect "how do you rank a brand-new item" and "won't this create a popularity monopoly." Answer with lexical floor, decay, and exploration slots. Point at evaluation (09.09) as the safety interlock before promoting a model trained on yesterday's biased clicks.
+
+<KeyTakeaways
+  items={[
+    "Behavioral feedback — clicks, dwell, purchases, reformulations — supplies relevance evidence that term overlap cannot see",
+    "Position bias makes raw CTR a dangerous training label; debias or model examination position explicitly",
+    "Use signals as features or bounded boosts on top of a lexical score, not as a total replacement for BM25",
+    "Cold start needs a text-match floor plus exploration; pure historical click rank entombs new documents",
+    "Optimize against downstream success and offline relevance metrics, not online CTR alone",
+    "Filter bots before training — published ranking signals attract gaming as soon as they move money",
+  ]}
+/>

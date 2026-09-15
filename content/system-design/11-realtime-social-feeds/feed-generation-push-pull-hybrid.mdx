@@ -1,32 +1,142 @@
 ---
 title: "Feed Generation Push Pull Hybrid"
 number: "11.07"
-summary: "Feed Generation Push Pull Hybrid — notes in progress."
-status: draft
+summary: "Why fan-out-on-write collapses under celebrity posts, fan-out-on-read cannot hit a feed latency budget, and the hybrid that splits the graph by degree."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: deep
+estMinutes: 20
+tags: [feeds, fanout, push-pull, hybrid]
+updated: "2026-09-15"
 ---
 
-## The problem
+## One write, ten million timelines
 
-What breaks without this, and the situation that forces the decision.
+A social feed looks like a read problem. Open the app, scroll twenty posts, close it. Underneath it is a write-amplification problem that only appears when someone with a large following publishes. One post must become visible in every follower's home timeline. Whether you do that work at write time or at read time is the whole design — and the wrong choice does not fail loudly. It fails as a publish that takes minutes to show up, or as a home-timeline request that cannot stay under a few hundred milliseconds once the follow graph gets fat.
 
-## How it works
+Call the two pure strategies by what they amplify. **Push** (fan-out-on-write) copies a post id into each follower's precomputed timeline when the post is created. **Pull** (fan-out-on-read) stores the post once and, at read time, merges recent posts from everyone the viewer follows. Push makes reads cheap and writes expensive. Pull makes writes cheap and reads expensive. Almost every production feed is a hybrid of the two, because the follow graph is not uniform: most accounts have dozens of followers; a few have tens of millions.
 
-The mechanism, step by step.
+11.05 Social Network Database Modeling and 11.06 Social Graph Follows And FlockDB cover the graph itself. This lesson is about what you do with that graph when a post lands.
 
-## Tradeoffs
+## Work the fan-out arithmetic before picking a box
+
+Assume round numbers you can defend in an interview — order-of-magnitude, not a benchmark. 100M monthly actives, 25M daily actives, each user follows 200 accounts on average, each user posts once a day, peak publish rate is roughly 3× the daily average.
+
+- **Posts per day:** 25M. Average ~290 posts/s; peak publish maybe ~900 posts/s.
+- **Mean fan-out if you push to everyone:** 200 writes per post → ~58k timeline inserts/s average, ~180k/s at peak — already a serious write path before celebrities exist.
+- **A celebrity with 10M followers:** one post is 10M timeline inserts. At 50k inserts/s sustained into a timeline store, that single post takes on the order of three minutes to fan out. At 200k inserts/s it still takes ~50 seconds. The author's publish API returned in 50 ms; the last follower sees the post tens of seconds to minutes later.
+- **Pull for an active user following 200 people:** open the app, fetch the latest N posts from each of 200 authors (or from a recent-posts index keyed by author), merge-sort by time, take the top 50. Even with aggressive caching, that is hundreds of keyed lookups merged on the request path — fine at small N, hostile to a 200 ms p99 budget once you also rank, filter muted authors, and hydrate media.
+
+The mean lies. The distribution of follower counts is heavy-tailed. Designing for the mean and shipping pure push means the 10M-follower post owns your queue for minutes and starves everyone else's fan-out. Designing for the mean and shipping pure pull means every home-timeline read pays for the densest follow graphs in the product.
+
+## Push: precompute the timeline
+
+On publish, look up the author's follower list and append the post id (plus enough ranking metadata to avoid a join on every scroll) into each follower's timeline structure — typically a per-user ordered list in Redis, Cassandra, or a similar write-friendly store, truncated to the last few thousand entries.
+
+<Steps>
+  <Step title="Persist the post once as source of truth">
+    Write the post body, media references, and author id to the posts store. The timeline never owns the body — only references — so a delete or edit has one place to update, and timeline rows stay small.
+  </Step>
+  <Step title="Enqueue fan-out, do not do it on the publish request">
+    Return success once the post is durable and a fan-out job is durably recorded — the same delegation pattern as 08.01 Delegation And Async Work. Synchronous fan-out to thousands of followers turns every publish into a multi-second request.
+  </Step>
+  <Step title="Workers walk the follower list and append">
+    Batch inserts where the store allows it. Cap concurrency per celebrity so one author cannot monopolize the cluster. 08.09 Fanout Patterns covers the queue and worker shape; the feed-specific constraint is ordering and truncation of each inbox.
+  </Step>
+  <Step title="Home timeline read is a range on one key">
+    `GET timeline:{userId}` for the newest page, then hydrate post bodies in a batch. Latency is dominated by one list read plus a multi-get — not by the follow graph.
+  </Step>
+</Steps>
+
+Push fails on celebrity degree. It also fails on inactive users: you still write into timelines that will not be opened this month, paying storage and write bandwidth for feeds nobody reads. Truncation helps storage; it does not help the burst of writes when the celebrity posts.
+
+## Pull: merge at read time
+
+Store each author's posts in an author-keyed recent list (or query the posts table by `author_id` with a time bound). On home-timeline read, load the viewer's follow set, fetch recent posts for those authors, merge by timestamp (or rank score), and return a page.
+
+Pull is the right default at small scale — one Postgres, a few thousand users, follow counts in the low hundreds — because there is no fan-out subsystem to operate. It becomes the wrong default when follow-set size × posts-fetched-per-author exceeds what you can finish inside the latency budget, or when the same merge runs millions of times an hour for overlapping follow graphs with no shared cache.
+
+The usual mitigations — cache each author's recent posts, cache the merged page briefly, skip authors who have not posted since the viewer's last visit — help, but they do not remove the merge. They only shrink its inputs.
+
+## Hybrid: push the normal case, pull the outliers
+
+The hybrid that shows up in almost every "design Twitter / Instagram feed" answer splits authors by follower count (or by a closely related signal: celebrity flag, verified broadcast account, or measured fan-out lag).
+
+| Author class | Rough threshold (pick one and defend it) | On publish | On home-timeline read |
+| --- | --- | --- | --- |
+| Normal | fewer than ~10k–100k followers | Push into each follower's inbox | Read the precomputed inbox |
+| Celebrity / high-degree | above the threshold | Write the post only (no mass push) | Pull this author's recent posts into the merge |
+| The viewer themselves | — | Optional fast path into own inbox | Often inject own posts so the author sees them immediately |
+
+Concrete walk-through with numbers. Threshold at 100k followers. 99.9% of posts come from authors under the threshold; each costs ~200 push writes on average. The remaining 0.1% of posts — the celebrity ones — would have been the bulk of write amplification under pure push. Instead they cost one write to the posts store. At read time, an active user who follows 195 normal accounts and 5 celebrities reads one inbox list (already containing the normal posts) and merges in recent posts from those five celebrity keys. The merge set stayed small on purpose.
+
+```text
+publish(post):
+  save post
+  if author.followers < THRESHOLD:
+    enqueue push_fanout(post, followers)
+  else:
+    # no mass push — readers will pull this author
+
+home_timeline(user):
+  inbox = timeline.get(user)           # pushed posts
+  celebs = follows.celebrities(user)   # high-degree followees
+  live = posts.recent(celebs, limit=k)
+  return merge_rank(inbox, live)[:page]
+```
+
+The threshold is an operational knob, not a law. Set it from measured fan-out lag and timeline-store write capacity: if a 50k-follower push already takes longer than your freshness SLO, the threshold is too high. If almost nobody is classified as celebrity and the write path is still on fire, the threshold is too high for a different reason — or mean follow counts are higher than you assumed.
+
+<Callout type="gotcha">
+Hybrid is not "push and also pull everything." If you push celebrities *and* pull them, you double-deliver unless you dedupe by post id on the merge. If you push nobody and pull everybody, you have renamed pure pull. The split only pays when the push set and the pull set partition the follow graph, and the read path knows which side each followee is on — usually a flag on the follow edge or a bloom/bit of "this followee is celebrity" maintained when degree crosses the threshold.
+</Callout>
+
+## What still hurts after you pick hybrid
+
+**Freshness for celebrity posts.** Pull means a celebrity post appears on the next home-timeline fetch, not when fan-out completes — which is usually *better* than waiting minutes for a push to finish. Say that out loud; interviewers often assume push is always fresher.
+
+**Inactive inboxes.** Push still writes to users who never open the app. Some systems skip fan-out to users inactive for N days and fall back to pull (or a rebuild) on next login — a second hybrid axis: active vs dormant viewers, not just normal vs celebrity authors.
+
+**Unfollow, mute, block.** Precomputed inboxes go stale relative to graph changes. Either delete matching entries asynchronously, filter on read, or accept brief wrongness. Filtering on read is simpler and usually enough for mute/block; unfollow should eventually stop new pushes and may leave old rows until truncated.
+
+**Ranking.** Chronological merge is the teaching version. Ranked feeds still need the same push/pull split for *candidate generation*; ranking runs on the merged candidate set. Do not pretend the hybrid replaces ranking — it only decides how candidates arrive cheaply.
+
+**Deletes and takedowns.** Timeline rows are references. A deleted post must either be tombstoned in the posts store and skipped at hydrate time, or actively scrubbed from inboxes. Hydrate-time skip is the usual first version; scrubbing is for legal/takedown urgency.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Push (or hybrid-push for normals) when"
+  againstTitle="Pull (or hybrid-pull for celebrities) when"
+  forItems={[
+    "Home-timeline p99 must stay low — a few hundred milliseconds — and you cannot afford a multi-author merge on every open",
+    "Most authors have modest follower counts, so per-post write amplification stays within what a timeline store and queue can absorb",
+    "Read:write on the feed is extremely skewed (hundreds of timeline reads per publish), so paying at write time amortizes cleanly",
+    "You can truncate inboxes and treat older pages as cold, so storage growth per user is bounded",
+    "Viewers are active enough that precomputing their inbox is not mostly wasted work",
+  ]}
+  againstItems={[
+    "An author has hundreds of thousands or millions of followers — mass push becomes a multi-minute job that starves the rest of the fan-out queue",
+    "You are early: follow counts fit in a read-time merge and you should not operate a fan-out fleet yet",
+    "Freshness for rare huge posts matters more than precomputing, and a small pull set of celebrity keys is enough",
+    "Graph mutations (unfollow, block) would make large precomputed inboxes constantly wrong without an expensive repair path",
+    "Write capacity on the timeline store is the scarce resource, not read latency on the home timeline",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Lead with the arithmetic, not the buzzwords. "Average follow count 200 means push is ~200 writes per post; a 10M-follower account is 10M writes — at 100k inserts/s that is ~100 seconds of fan-out for one tweet." Then name the hybrid: push below a degree threshold, pull above it, merge a small celebrity set at read time.
 
-<KeyTakeaways items={["", "", ""]} />
+Expect follow-ups: where does fan-out run (async workers, never on the publish request); what the timeline stores (post ids, not bodies); how the author's own post appears immediately (inject on write or bypass cache); how deletes work (hydrate-time filter); and what happens when the threshold is wrong (lag SLO vs wasted pull). Name inactive-user skip if you have time — it shows you know push waste is real.
+
+If they ask "what would Twitter do," resist a product mythology answer. State the mechanism and the knob: degree-split hybrid, threshold set from measured fan-out lag and timeline write throughput.
+
+<KeyTakeaways
+  items={[
+    "Feed generation is write amplification dressed as a read feature: one post must become visible across a follow graph whose degrees are heavily skewed",
+    "Pure push makes home-timeline reads cheap but turns celebrity publishes into multi-million-row fan-out jobs that can take minutes",
+    "Pure pull keeps publish cheap but merges recent posts across the follow set on every read — hostile to tight p99 once follows number in the hundreds",
+    "The standard hybrid pushes for normal-degree authors and pulls a small set of celebrity authors at read time, partitioning the graph by a defended threshold",
+    "Fan-out belongs on durable async workers after the post is saved — never on the publish request path",
+    "Still budget for inactive inboxes, mute/block filtering, hydrate-time deletes, and ranking on top of candidate generation — hybrid only solves how candidates arrive",
+  ]}
+/>

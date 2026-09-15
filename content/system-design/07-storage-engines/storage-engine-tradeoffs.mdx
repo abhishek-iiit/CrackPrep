@@ -1,32 +1,81 @@
 ---
 title: "Storage Engine Tradeoffs"
 number: "07.02"
-summary: "Storage Engine Tradeoffs — notes in progress."
-status: draft
+summary: "Write, read, and space amplification are the three costs a storage engine can trade against each other, but never make all three small at once."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [storage-engines, amplification, tradeoffs, architecture]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Every storage engine is honest about only one number
 
-What breaks without this, and the situation that forces the decision.
+Ask a storage engine's benchmark page how fast it is and it will answer with a headline throughput figure, measured under conditions favorable to whatever it is good at. That number is real, but it is not the whole bill. Underneath every storage engine's headline number are three quieter ones — how many bytes actually move for every byte the application asked to write, how many blocks actually get read for every logical read, and how much disk space a byte of live data actually occupies — and no engine gets to keep all three small. Picking a storage engine is picking which of those three costs you are willing to pay, not finding the one that avoids paying any of them.
 
-## How it works
+07.01 Storage Engine Design Constraints established that random writes are expensive and durability is a synchronous cost. This lesson names the three quantities every subsequent design in this module gets priced against.
 
-The mechanism, step by step.
+## The three amplifications
 
-## Tradeoffs
+- **Write amplification** — bytes actually written to the device per logical byte the application wrote. A page-based engine that updates 100 bytes inside a 4 KiB page has to write the whole page back, which is already 40x amplification for that one change, before counting whatever the write-ahead log adds on top.
+- **Read amplification** — block reads (I/Os) per logical read the application asked for. A lookup that has to check a primary structure and then a separate secondary index is two I/Os for one logical read; a design that has to check several files before it finds — or rules out — a key multiplies that further.
+- **Space amplification** — bytes occupied on disk per byte of live logical data. Old versions kept around after an update, tombstones for deletes that have not been reclaimed yet, and partially filled pages from fragmentation all count as space that is not holding any current value.
+
+None of the three is optional to think about; every design decision from here moves at least one of them, usually by moving another.
+
+## Picking two, because you cannot pick three
+
+The pattern shows up cleanly across the three broad families of engine this module builds toward:
+
+| Engine family | Write amplification | Read amplification | Space amplification |
+| --- | --- | --- | --- |
+| In-place (B-tree) | High — every update rewrites a page wherever it lives on disk, which is a random write | Low — tree-height lookups, no old versions to sift through | Low to moderate — no stale versions, but pages are rarely 100% full |
+| Append-only / log-structured | Low at write time — a sequential append touches nothing else — but the deferred cost resurfaces as compaction rewriting data later | Higher until compaction catches up — a key can live in more than one file | Higher until compaction catches up — superseded values and tombstones sit on disk until reclaimed |
+| Copy-on-write / versioned | Moderate — a changed leaf and its ancestors are rewritten, not the whole tree | Low to moderate, depending on how many versions a read must walk through | Higher — every version that has not been garbage-collected still occupies space |
+
+03.04 B-Tree is the in-place row above. 07.07 Log-Structured Storage and 07.09 LSM Tree Storage Engine build out the append-only row for the rest of this module. 07.06 Immutable Versioned Data Files is the versioned row, one layer down from a full tree structure.
+
+An in-place engine pays its bill on every write, at write time, in the currency of random I/O. A log-structured engine defers that bill — the append is nearly free — but the debt is real and comes due as compaction, which is why 07.07 Log-Structured Storage treats "something must eventually reclaim this space" as a structural obligation rather than an optional cleanup job. The bytes a design avoids writing now do not disappear; they move to a different time, a different subsystem, or a different resource — disk space instead of write bandwidth, or read latency instead of either. This three-way trade — sometimes called the RUM conjecture, for read, update, and memory (space) amplification — is the reason "just make it faster" is never a free instruction to give a storage engine: faster at what, paid for by which of the other two.
+
+<Callout type="note">
+"Update" in RUM is doing the work that "write" does above — the naming varies across sources, but the three-way shape does not. Whichever letters you use, the useful move is the same: name which two you are optimizing and say out loud which one you are accepting a worse number on, rather than presenting a design as though it improved all three.
+</Callout>
+
+## The three numbers only mean something against a workload
+
+None of the three amplifications is a fixed property of "an engine" in the abstract — they are properties of an engine plus a workload. A log-structured engine's read amplification looks bad against a workload of pure random point lookups on a cold cache and looks nearly free against a workload dominated by writes and few reads. An in-place engine's write amplification is a rounding error against a read-heavy, rarely-updated dataset and is the whole story against a workload that updates the same small set of rows constantly. Quoting one of the three numbers without naming the workload it was measured against is the same mistake as quoting a benchmark's throughput without saying what request mix produced it.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Optimize for low write amplification when"
+  againstTitle="Optimize for low read and space amplification when"
+  forItems={[
+    "Writes dominate the workload, or arrive in bursts that a foreground random-write cost cannot absorb",
+    "You can provision background bandwidth for a compaction or merge process and would rather pay there than on the write's critical path",
+    "Keys arrive in an order you do not control — hashed IDs, UUIDs — so an in-place structure would be doing random writes constantly anyway",
+    "The dataset is written far more often than any given byte of it is read back",
+  ]}
+  againstItems={[
+    "Reads must be latency-predictable at high percentiles, independent of how caught up a background process happens to be",
+    "The workload updates a small, hot set of keys repeatedly, where one in-place page rewrite beats appending a fresh version of the same row forever",
+    "Disk space must track live data tightly and predictably, not 'eventually, once compaction runs'",
+    "The team is not staffed or willing to operate a background compaction process, which the write-optimized side of this trade requires by construction",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Name the three amplifications by the numbers, not the acronym: "for this workload I care most about write amplification because writes are the dominant traffic, so I am willing to accept worse read amplification until a background process catches up." That sentence states a priority and pre-empts the obvious follow-up, which is "what did you give up to get that."
 
-<KeyTakeaways items={["", "", ""]} />
+If asked to compare two engines, resist answering with a single throughput number. Ask, or state, what each of the three amplifications looks like for the workload in front of you; a design that looks better on a vendor's benchmark can be worse on your workload if your read/write mix or your update pattern does not match theirs.
+
+<KeyTakeaways
+  items={[
+    "Every storage engine spends its I/O budget across three costs — write amplification, read amplification, and space amplification — and no engine makes all three small at once",
+    "Write amplification is bytes written to the device per logical byte written by the application; a 100-byte update to a 4 KiB page is already 40x amplification before the write-ahead log is counted",
+    "Read amplification is I/Os per logical read, and space amplification is disk bytes per live byte; both climb whenever superseded versions or tombstones sit around unreclaimed",
+    "In-place engines pay their cost as random writes at write time; log-structured and copy-on-write engines defer that cost to a background compaction process, which is a debt, not a discount",
+    "All three numbers are properties of an engine plus a workload, not of the engine alone — quoting one without naming the workload it was measured against is the same mistake as quoting throughput without naming the request mix",
+    "Choosing a compaction or merge strategy, later in this module, is exactly the act of picking which two of the three amplifications you are willing to keep small",
+  ]}
+/>

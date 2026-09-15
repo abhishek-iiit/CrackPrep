@@ -1,32 +1,76 @@
 ---
 title: "Graph Database Decision Boundary"
 number: "04.04"
-summary: "Graph Database Decision Boundary — notes in progress."
-status: draft
+summary: "Relational joins get slower with every hop; a graph database is built so traversal cost stays flat no matter how deep the query goes."
+status: published
 free: true
 difficulty: core
 estMinutes: 12
+tags: [graph-database, traversal, data-modeling]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The join that gets slower with every hop
 
-What breaks without this, and the situation that forces the decision.
+In a relational database, "who are my friend's friends" is a two-table self-join. "Who are my friends' friends' friends whom I'm not already connected to" is a three-way join with a `NOT EXISTS` clause. By the time the question is "find anyone within six hops who shares two mutual connections with me," the query planner is choosing among several bad options and the query is timing out against production data. Every additional hop in a relational schema means another join, and a join's cost scales with the size of the tables involved — depth multiplies cost.
 
-## How it works
+A graph database is built around the opposite premise: relationships are first-class, stored data, not something computed at query time. Each node holds direct references to its adjacent nodes and edges — index-free adjacency — so walking from one node to a neighbor is a pointer dereference, not an index lookup into a much larger table. Traversal cost then depends on the size of the pattern you're matching — how many hops, how many neighbors at each hop — not on the size of the whole dataset. A six-hop query over a graph of a hundred million nodes costs roughly what the same query costs over a graph of a hundred thousand nodes, provided the fan-out per hop is similar — a property relational joins simply don't have.
 
-The mechanism, step by step.
+## What index-free adjacency buys, and what it doesn't
 
-## Tradeoffs
+A property graph stores properties on both nodes and edges, and edges are typed and can carry their own attributes — `FOLLOWS since 2019`, `TRANSFERRED $500 on 2026-03-14`. Query languages built for this, like Cypher, express the shape of the pattern you want to match directly, rather than as a sequence of joins to write by hand.
+
+What it doesn't buy is aggregation. "How many nodes have more than a thousand edges" or "sum this property across every node" still has to touch every node, and a graph database has no particular advantage there over a well-indexed table doing the same full scan — sometimes it's worse, because each traversal step is a pointer chase rather than a batch operation a columnar or relational engine can stream through.
+
+### Where it earns its place
+
+- **Fraud rings and anti-money-laundering.** The question is literally "is there a path of transactions connecting these accounts," and the depth of the ring is unknown in advance — exactly the pattern index-free adjacency is built to answer.
+- **Permission and access-control inheritance.** "Can this user reach this resource" through nested group membership, where nesting depth varies per organization.
+- **Recommendation by shared connections.** "People you may know" via mutual connections, or "bought together" via shared purchase history — both multi-hop patterns over a graph that changes constantly.
+- **Knowledge graphs.** Entities and typed relationships queried by pattern rather than by a fixed schema of foreign keys.
+
+### Where it's the wrong tool
+
+- **Simple one-hop lookups.** "Get all posts by this user" is a single indexed lookup in any database; a graph database adds traversal machinery you don't need.
+- **Full-dataset aggregation and rollups.** Better served by a columnar store (04.03 Columnar Stores vs Wide-Column Stores) built for scanning, not pointer-chasing.
+- **Extremely high write throughput of simple, independent records.** A graph database's per-write cost of maintaining adjacency structures generally exceeds a wide-column or key-value store's flat append, for data that isn't relationship-heavy to begin with.
+- **Sharding highly connected data.** Cutting a graph across machines cuts edges, and a traversal crossing a shard boundary pays a network hop per hop of the query — keeping related nodes together across partitions is a genuinely hard, active problem, not a solved one.
+
+That last point is why the largest social graphs mostly don't run on a general-purpose graph database at all. Twitter's early follower graph, for instance, ran on FlockDB — a purpose-built adjacency-list store over a sharded relational substrate, optimized for exactly the operations a social graph needs (is A following B, list A's followers) and nothing more general; see 11.06 Social Graph Follows And FlockDB. The pattern generalizes: when the small set of traversal shapes a system will ever run is known in advance, a specialized, shardable structure over a boring database often beats a general graph engine that supports arbitrary pattern matching but can't shard the data as cleanly. 11.05 Social Network Database Modeling covers the broader modeling choice this sits inside.
+
+<Callout type="gotcha">
+Most graph databases scale up, not out, for exactly the sharding reason above — a common clustering model is read replicas of the whole graph on each node, not a horizontally partitioned graph. If a dataset won't fit on one machine, "use a graph database" and "shard it" are frequently in tension, and dataset size is worth asking about before committing to the tool, not after.
+</Callout>
 
 <Tradeoff
-  forTitle="Reach for it when"
+  forTitle="Reach for a graph database when"
   againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forItems={[
+    "The core queries are variable-depth traversals — friend-of-friend, fraud rings, permission inheritance — where the number of hops isn't known or bounded in advance",
+    "Relationships carry meaningful properties (weight, type, timestamp) the query needs to filter or reason about, not just connect through",
+    "The dataset's connectivity is dense enough that relational joins at the required depth would be prohibitively slow",
+    "The query is expressed more naturally as a pattern to match than as a series of joins to write",
+  ]}
+  againstItems={[
+    "Most queries are one-hop lookups by a known key, where a regular index does the job with less machinery",
+    "The dominant workload is full-dataset aggregation or analytical rollups rather than traversal",
+    "The graph is too large for one machine and its traversal patterns don't tolerate cross-shard hops — a purpose-built adjacency store over a shardable substrate usually wins, as in 11.06 Social Graph Follows And FlockDB",
+    "Write volume of simple, low-connectivity records is the bottleneck, not relationship traversal",
+    "The team would be adopting an entirely new query language and operational model for a small slice of the product's queries",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Justify it by the traversal, not the buzzword. If a design calls for "who's within two hops of fraud," name why a graph database specifically helps: the depth is unknown, and a join-based approach degrades with every additional hop while index-free adjacency doesn't. Expect to be asked how it scales past one machine — have an honest answer, because most graph databases scale by replicating the whole graph rather than partitioning it, and if the dataset won't fit on one node that's a real constraint worth surfacing before it becomes a rewrite.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "A graph database's core trick is index-free adjacency — each node holds direct references to its neighbors, so traversal cost depends on the pattern matched, not the size of the whole dataset.",
+    "A relational join gets more expensive with every additional hop; a graph traversal's cost stays roughly flat as long as the fan-out per hop stays similar.",
+    "Index-free adjacency helps traversal, not aggregation — full-dataset scans and rollups get no particular benefit from a graph database over a well-indexed alternative.",
+    "The clearest use cases have unknown or variable traversal depth: fraud rings, permission inheritance, and recommendation by shared connections.",
+    "Most graph databases scale by replicating the whole graph to more read nodes rather than partitioning it, because cutting a graph across shards cuts edges that traversals then have to cross over the network.",
+    "When traversal shapes are few and known in advance, a purpose-built adjacency store over a shardable substrate — as in 11.06 Social Graph Follows And FlockDB — often beats a general graph engine at real scale.",
+  ]}
+/>

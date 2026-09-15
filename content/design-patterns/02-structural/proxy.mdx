@@ -1,0 +1,104 @@
+---
+title: "Proxy"
+number: "02.07"
+summary: "Stand in for a real object to control when work happens — lazy load, access checks, remote calls, or caching."
+status: published
+free: true
+difficulty: core
+estMinutes: 14
+tags: [structural, access-control, lazy-loading]
+updated: "2026-09-15"
+---
+
+## The expensive object you should not create until someone needs it
+
+A document editor embeds high-resolution images. Loading every image at file-open means parsing a 200 MB project, allocating decoded bitmaps for forty pages the user is not viewing, and showing a spinner for eight seconds before the first keystroke lands. The image object is legitimate — it implements `draw()` and `getSize()` — but creating it eagerly is the wrong default.
+
+Proxy implements the same interface as the real subject and intercepts calls. A **virtual proxy** holds a filename and decodes the bitmap on first `draw()`. Until then, the proxy is a few bytes. Other proxy flavors guard **access** (does this user have permission before `delete()`?), stand in for a **remote** object (local stub that serializes calls over RPC), or **cache** results of expensive `compute()` calls. The client code calls `image.draw()` either way; it does not know whether it hit the real object or a stand-in.
+
+Proxy is often confused with Decorator because both wrap and delegate on the same interface. The intent differs: Proxy controls *relationship to the real subject* — when it exists, who may use it, where it lives. Decorator stacks *optional features* on an object that is already there.
+
+## Subject, real subject, and proxy
+
+- **Subject** — shared interface (`Image`).
+- **RealSubject** — the heavy object (`BitmapImage` — decodes file, holds pixels).
+- **Proxy** — implements Subject, holds a reference to RealSubject (or the data to create it), intercepts calls.
+
+<Steps>
+<Step title="Client holds a Subject reference">
+`thumbnail: Image` — may be proxy or real, type system does not distinguish.
+</Step>
+<Step title="Proxy intercepts the call">
+User triggers `thumbnail.draw()`. Virtual proxy checks whether RealSubject exists.
+</Step>
+<Step title="Lazy creation or access check">
+If not loaded, proxy reads file from disk, constructs RealSubject, caches the reference. Protection proxy verifies role before proceeding.
+</Step>
+<Step title="Delegation to RealSubject">
+Proxy forwards `draw()` to the real object. Subsequent calls skip creation cost.
+</Step>
+</Steps>
+
+```typescript
+class ImageProxy implements Image {
+  private real: BitmapImage | null = null;
+  constructor(private path: string) {}
+
+  draw(ctx: Canvas) {
+    if (!this.real) this.real = new BitmapImage(this.path);
+    this.real.draw(ctx);
+  }
+}
+```
+
+Remote proxies add failure modes production code must handle: network timeout, stale stub, partial serialization. The pattern does not remove those costs — it localizes them behind an interface so the rest of the app writes `service.fetch()` as if it were local.
+
+<Callout type="gotcha">
+A caching proxy must define invalidation. Infinite memoization on `getUser(id)` when profiles can change presents as a correctness bug, not a performance win. Name TTL, event-driven eviction, or pass-through on writes when you describe a caching proxy in design.
+</Callout>
+
+## Proxy versus Adapter, Facade, Decorator
+
+**02.01 Adapter** changes the interface. Proxy keeps it identical — substitutability is the point.
+
+**02.05 Facade** simplifies many subsystems into one entry. Proxy stands in for *one* object.
+
+**02.04 Decorator** adds behavior (compression, logging) around an existing object. Proxy manages *access to* the object — often the real subject does not exist yet when the proxy is created.
+
+Smart pointers in C++, Java dynamic proxies, Python `@property` lazy attributes, ORM lazy-loaded relations — all proxy variants in the wild.
+
+<Tradeoff
+  forTitle="Reach for Proxy when"
+  againstTitle="Skip Proxy when"
+  forItems={[
+    "Creating the real object is expensive and many instances will never be used — lazy load images, parsers, DB connections",
+    "Access control must sit between clients and the real subject without polluting the subject's code",
+    "The real object lives remotely and you need a local stub with the same interface for RPC or message passing",
+    "Repeated identical calls are expensive and a caching proxy with a defined invalidation story saves measurable work",
+    "You want to count, log, or rate-limit access to a sensitive resource transparently to callers",
+  ]}
+  againstItems={[
+    "The object is cheap to construct and always used — proxy adds indirection and double dispatch for no gain",
+    "You need to change the method signatures — that is Adapter, not Proxy",
+    "You are stacking optional features (retry, metrics, compression) on an already-created object — Decorator fits better",
+    "Lazy loading hides latency in the UI thread — first `draw()` stalls without a loading placeholder strategy",
+    "Caching proxy without invalidation rules — stale reads are worse than the cost you were avoiding",
+  ]}
+/>
+
+## In an interview
+
+Say: "Images are expensive to decode — I'd expose an `Image` proxy that loads the bitmap on first draw so opening the document stays fast." Same interface, box labeled Proxy delegating to RealSubject. Follow-ups: "Proxy vs Decorator?" Proxy controls access and existence; Decorator adds features to an object that is already instantiated. "What kind of proxy?" Name virtual, protection, remote, caching — pick the one that matches the prompt. "What breaks?" First-access latency spike on the UI thread; stale cache; remote proxy masking network failures until timeout.
+
+If the prompt is ORM lazy loading or a React data fetch wrapper, map it explicitly — interviewers accept real-world names when the structure matches.
+
+<KeyTakeaways
+  items={[
+    "Proxy implements the same interface as RealSubject and intercepts calls to control creation, access, location, or caching",
+    "Virtual proxy defers expensive construction until first use; protection proxy enforces permissions before delegation",
+    "Clients treat proxy and real subject interchangeably — substitutability is what makes this a structural pattern",
+    "Proxy differs from Decorator (feature stacking on an existing object) and Adapter (interface translation)",
+    "Caching and remote proxies require explicit invalidation and failure handling — the pattern localizes complexity, it does not remove it",
+    "Skip proxy when the object is always used and cheap to build — eager creation is simpler to debug",
+  ]}
+/>

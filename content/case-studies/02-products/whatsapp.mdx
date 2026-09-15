@@ -1,0 +1,156 @@
+---
+title: "WhatsApp"
+number: "02.04"
+summary: "One-to-one and group messaging, delivery receipts, offline sync queues, and fan-out limits for the chat interview prompt."
+status: published
+free: true
+difficulty: deep
+estMinutes: 20
+tags: [messaging, realtime, groups]
+updated: "2026-09-15"
+---
+
+## "Design WhatsApp" tests delivery guarantees on unreliable networks
+
+Chat looks simple on the surface: send a message, the other person sees it. The interview is about what happens when the other person is offline for three days, when the sender is on a train losing signal mid-send, when a group has 256 members and one message becomes 256 deliveries, and when the user opens the app on a second phone and expects the same history. Interviewers use this prompt for persistent connections, message ordering within a conversation, at-least-once delivery with client-side dedup, and the difference between "delivered to server", "delivered to device", and "read".
+
+## Clarify: 1:1, groups, and what you are not building
+
+> "I'll cover 1:1 messaging, group chat up to 256 members, delivery and read receipts, and offline message sync. Out of scope: voice/video calls, end-to-end encryption implementation, and media upload internals — I'll treat media as a URL pointer. Mobile-first, always-on connectivity preferred but offline must work."
+
+**Functional requirements:**
+
+- Send and receive text messages in 1:1 chats
+- Create groups, add/remove members, send group messages
+- Delivery status: sent → delivered → read (per message, per recipient in groups)
+- Offline support: messages queue on server until recipient reconnects; sender sees status updates
+- Message history sync when user logs in on a new device
+- Last-seen / online presence (optional — ask if in scope; mention briefly)
+
+**Non-functional requirements:**
+
+- Message delivery latency: under 500 ms when both parties online
+- Durability: messages must not be lost once the server acknowledges send
+- Ordering: messages within a single chat must appear in send order
+- Availability: 99.99% — chat downtime is immediately user-visible
+- Group size cap: 256 members (WhatsApp's actual cap — use it)
+
+## Capacity: small payloads, huge fan-out multiplier
+
+| Assumption | Value |
+|---|---|
+| DAU | 500M |
+| Messages sent per DAU per day | 50 |
+| Avg message size | 200 bytes text (media is a URL, ~100 bytes extra) |
+| Group messages fraction | 30% of all messages |
+| Avg group size | 20 members |
+| Concurrent online connections | 20% of DAU = 100M |
+
+**Message write rate:** 500M × 50 msgs/day ≈ **25B messages/day** ≈ **290k messages/s average**, ×3 peak ≈ **870k messages/s**. This is one of the highest sustained write rates in consumer software.
+
+**Effective delivery fan-out:** 70% are 1:1 (one delivery each) + 30% groups × 20 members = 6 deliveries per group message on average. Weighted: 0.7 × 1 + 0.3 × 20 ≈ **6.7 deliveries per message** → **~5.8M delivery events/s peak**. Group messages dominate downstream work even though they are the minority of sends.
+
+**Connection count:** 100M concurrent WebSocket (or QUIC) connections. That is a connection-layer design problem — multiple gateway tiers, sticky routing, horizontal scale. Not one box.
+
+**Storage:** 25B messages/day × 300 bytes ≈ **7.5 TB/day** of message payload. One-year retention ≈ **2.7 PB**. Index by `(chat_id, sequence)` for ordered retrieval. Hot chats in 01.03 Distributed Cache; cold history in a partitioned message store.
+
+**Offline queue:** if 10% of recipients are offline at any moment, the queue holds ~870k/s incoming deliveries to disconnected devices — backed by durable storage per user, not memory-only.
+
+## High-level design
+
+<Steps>
+<Step title="Connection and presence">
+Mobile client opens persistent WebSocket to a **gateway** node (region-local). Gateway registers `{user_id → connection_id}` in a presence store (Redis). Heartbeat every 30 s; missed heartbeats mark offline after 90 s.
+</Step>
+<Step title="Send 1:1 message">
+Client sends `{chat_id, client_msg_id, body, ts}` over WebSocket. Chat service validates membership, assigns a monotonic **server sequence number** per chat, persists to message store, returns ack with `server_msg_id` and `seq`. Client marks message "sent" (single checkmark).
+</Step>
+<Step title="Deliver to online recipient">
+Chat service looks up recipient in presence store. If online, push message to recipient's gateway via internal RPC. Gateway forwards over WebSocket. On gateway ack, update delivery status; notify sender (second checkmark).
+</Step>
+<Step title="Deliver to offline recipient">
+If recipient offline, write message to recipient's **offline inbox** (per-user queue in durable store). On reconnect, client sends `last_synced_seq`; server replays all messages with seq greater than that. Delivery receipts batch on replay.
+</Step>
+<Step title="Group message">
+Same persist step — one row in message store. Fan-out worker reads group membership (256 max), enqueues delivery task per member except sender. Each member gets the same `{server_msg_id, seq}` — one authoritative copy, many delivery pointers. Delivery and read receipts tracked per `(message_id, user_id)` pair.
+</Step>
+</Steps>
+
+| Component | Role |
+|---|---|
+| Gateway tier | WebSocket termination, millions of connections |
+| Chat service | Auth, sequence assignment, persist, route |
+| Message store | Ordered messages by `(chat_id, seq)` — Cassandra-style wide rows |
+| Presence store | Online/offline, connection routing |
+| Offline inbox | Per-user durable queue for disconnected delivery |
+| Group membership store | `{group_id → [user_ids]}` |
+
+## Deep dive: ordering, receipts, and group fan-out
+
+### Per-chat sequence numbers
+
+Global ordering across all chats is unnecessary and impossible at scale. **Per-chat monotonic sequence** is sufficient: each message in chat X gets seq 1, 2, 3… assigned by a lightweight counter (Redis INCR per chat, or DB row lock). Clients sort by seq within a chat. Two chats interleaving on the client UI is fine.
+
+Client-generated `client_msg_id` (UUID) handles **idempotency**: sender retries on timeout; server deduplicates on `(sender_id, client_msg_id)` and returns the original ack without double-inserting.
+
+### Delivery state machine
+
+Three states the sender cares about:
+
+1. **Sent** — server persisted and acked
+2. **Delivered** — recipient device received (or offline inbox accepted for later)
+3. **Read** — recipient opened the chat and the message was displayed
+
+Store receipts separately from message body — a group message with 256 members has 256 delivery rows and up to 256 read rows. Update via async events on 01.08 Distributed Message Queue so the hot send path does not wait for 256 writes.
+
+### Group fan-out without blocking send
+
+The sender's `POST` completes after one persist + enqueue. A fan-out worker delivers to each member — online push or offline queue write. At 870k messages/s with 30% group × 20 members, fan-out workers see ~5M delivery tasks/s peak. Shard workers by `group_id` or `recipient_id`; scale horizontally.
+
+For groups near 256 members, **batch presence lookup**: one query "which of these 256 are online?" then split push vs queue. Do not do 256 sequential Redis lookups.
+
+### Multi-device sync
+
+Each device maintains `last_synced_seq` per chat. New device login: full history fetch paginated by seq, or sync from seq 0 if first login. Sent messages sync the same way — the server is source of truth, not the device.
+
+<Callout type="gotcha">
+At-least-once delivery over WebSocket means duplicates arrive. The client deduplicates on `server_msg_id`. If you promise exactly-once without saying "exactly-once visible to the user via idempotent client," the interviewer will push on how you handle retry after a timeout that actually succeeded.
+</Callout>
+
+<Tradeoff
+  forTitle="Persistent WebSocket connection when"
+  againstTitle="HTTP polling / push notifications only when"
+  forItems={[
+    "Both parties are frequently online — sub-500 ms delivery needs a live channel",
+    "Delivery and read receipts must update in real time without client polling",
+    "100M concurrent connections is within your gateway budget with horizontal sharding",
+    "Typing indicators and presence are in scope — they require bidirectional push",
+    "Message volume is high enough that polling every N seconds wastes more bandwidth than maintaining connections",
+  ]}
+  againstItems={[
+    "Messages are infrequent (transactional email-style) — push notification on send is enough",
+    "Connection count or NAT timeout makes maintaining 100M WebSockets uneconomical",
+    "Battery constraints dominate — mobile OS kills background sockets; APNs/FCM wake-up is the primary path",
+    "The interviewer scoped to async chat (forum/DM with minute-scale latency tolerance)",
+    "Regulatory or corporate network blocks long-lived connections",
+  ]}
+/>
+
+## In an interview
+
+Open: "Chat is a persist-then-deliver system. I'll assign per-chat sequence numbers, push over WebSocket when online, queue durably when offline, and fan-out group messages asynchronously." Draw gateway, chat service, message store, presence — four boxes.
+
+Follow-ups: "End-to-end encryption?" (client encrypts; server stores ciphertext; key exchange out of scope unless they insist — then mention Signal protocol at high level). "What if two messages arrive out of order?" (buffer by seq on client; display when contiguous). "256-member group read receipts?" (sender sees "read by 47 of 256" aggregate, or tap for detail — do not push 256 individual updates synchronously).
+
+Volunteer the failure mode: **gateway node dies with 500k connections** — clients reconnect to another gateway with exponential backoff; during reconnect storm, presence flaps offline/online and delivery receipts lag. Mitigate with graceful drain on deploy and sticky session handoff. Also: **hot chat** — a viral group sends 10k messages/min; shard the chat's sequence counter and rate-limit per sender.
+
+<KeyTakeaways
+  items={[
+    "WhatsApp is persist-then-deliver: ack after durable write, push or queue depending on recipient presence",
+    "Ordering is per-chat sequence numbers, not global — clients deduplicate retries via client_msg_id",
+    "Group messages fan out asynchronously to up to 256 members; send path stays O(1) persist",
+    "Delivery receipts (sent/delivered/read) are separate rows, updated async — never block the send ack on 256 writes",
+    "At 870k messages/s peak, offline inboxes must be durable storage, not in-memory queues",
+    "WebSocket gateway scale (100M connections) and reconnect storms are the operational failure modes to name early",
+  ]}
+/>

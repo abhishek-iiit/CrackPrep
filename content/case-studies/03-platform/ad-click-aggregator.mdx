@@ -1,0 +1,152 @@
+---
+title: "Ad Click Aggregator"
+number: "03.05"
+summary: "Billions of click events per day, aggregates that must be auditable, and the dedup problem hidden inside 'at-least-once' delivery."
+status: published
+free: true
+difficulty: deep
+estMinutes: 20
+tags: [ads, streaming, aggregation]
+updated: "2026-09-15"
+---
+
+## Clicks are money — duplicates are lawsuits
+
+An ad click aggregator ingests billions of small events — `(ad_id, campaign_id, user_id, timestamp, click_id)` — and produces rollups advertisers pay against: clicks per ad per hour, unique users per campaign, spend against budget caps. Interviewers use this to test **high-throughput stream ingestion**, **idempotent aggregation**, and the gap between "we counted it" and "we counted it once." A duplicate click is not a rounding error; it is overbilling.
+
+The read/write shape is extreme: **writes dominate** (every click is an append), reads are analytical (dashboards, billing exports) and tolerate minutes of lag. That profile points at a log + stream processor, not a primary SQL database taking raw inserts at peak.
+
+## Clarify: count clicks, roll up for billing
+
+> "I'll design ingestion and hourly aggregation of ad clicks for billing and campaign dashboards. Out of scope: ad serving/auction, fraud ML models, and real-time bid adjustment — though I'll flag a hook for fraud scores."
+
+**Functional requirements:**
+
+- **Ingest** click events from ad servers and client beacons — fire-and-forget from the caller's perspective.
+- **Aggregate** clicks by `(ad_id, hour)`, `(campaign_id, day)`, etc.
+- **Query** aggregates for advertiser dashboards and billing CSV export.
+- **Dedup** on `click_id` — same physical click retried by the client must not double-count.
+
+**Non-functional requirements:**
+
+- **Ingest peak**: ask — "10B clicks/day" is a common FAANG-scale assumption; "100M/day" for mid-size — adjust math.
+- **Ingest latency**: accept click in **< 100 ms** (202 response); aggregation lag **< 15 minutes** for dashboards.
+- **Durability**: no lost clicks — at-least-once ingest with dedup downstream.
+- **Auditability**: raw log retained **90 days** for disputes.
+
+Ask: "Do we need unique users or raw click counts?" Unique requires **HyperLogLog or distinct state** — heavier than a counter. "Real-time budget cutoff?" That needs sub-minute aggregates feeding the ad server — tighter than dashboard lag.
+
+## Capacity: 10 billion clicks a day
+
+| Assumption | Value | Derived |
+|---|---|---|
+| Clicks per day | **10B** | ~**116k/s** average |
+| Peak factor | 4× (US business hours) | **~460k/s** peak ingest |
+| Event size | 200 bytes (JSON or Avro) | **~92 MB/s** peak ingest bandwidth |
+| Distinct ads | 10M active | Cardinality of grouping keys |
+| Raw log retention | 90 days | 10B × 200 B × 90 ≈ **180 TB** — object storage |
+| Aggregation windows | 1-hour buckets | 24 × 10M ad-hours/day if all ads active — sparse in practice |
+
+**Write path dominates.** 460k/s into Postgres is not viable. **Kafka** (or Pulsar) partitioned by `hash(ad_id)` or `hash(campaign_id)` — order-of-magnitude: hundreds of partitions, ~1–5k msgs/s each.
+
+**Dedup store:** `click_id` is UUID — 16 bytes key, 460k/s peak inserts into Redis with TTL 48h is ~8M keys in flight at steady peak if TTL covers retry window — feasible on a Redis cluster with sharding.
+
+## High-level design
+
+<Steps>
+<Step title="Click ingestion API">
+
+Ad server / pixel beacon calls `POST /v1/clicks` with `{ click_id, ad_id, campaign_id, user_id, timestamp, metadata }`. **Ingest API** validates schema, returns **202 Accepted** immediately, produces to **Kafka topic `clicks.raw`** partitioned by `campaign_id` (keeps one campaign's events ordered for budget). No aggregation on the hot path.
+
+</Step>
+
+<Step title="Stream processor aggregates">
+
+**Flink / Spark Streaming / Kafka Streams** consumers read `clicks.raw`:
+
+1. **Dedup**: `click_id` checked against **Redis SET** (or RocksDB state store) — duplicate → drop, increment `dedup_dropped` metric.
+2. **Aggregate**: tumbling **1-hour window** keyed by `(ad_id, hour_bucket)` — increment `click_count`; optional **HyperLogLog** for `unique_users`.
+3. **Sink**: write rolled-up rows to **OLAP store** (ClickHouse, Druid, or BigQuery) and **upsert counters** to **Redis** for near-real-time dashboard reads.
+
+</Step>
+
+<Step title="Raw log to cold storage">
+
+Parallel **Kafka Connect** sink archives every event (pre- or post-dedup — audit usually wants **pre-dedup raw**) to **S3** as Parquet partitioned by `date/hour`. Billing disputes replay from cold storage.
+
+</Step>
+
+<Step title="Dashboard and billing reads">
+
+Advertiser queries `GET /v1/reports?campaign_id=X&from=...` hit **ClickHouse** — columnar scans on `(campaign_id, hour)` complete in seconds over billions of rows. Billing batch job nightly reconciles OLAP totals against raw log sample — 01.08 Distributed Message Queue patterns for replay if mismatch.
+
+</Step>
+</Steps>
+
+## Deep dive: dedup and exactly-once semantics
+
+### Why at-least-once ingest is fine
+
+Clients retry on timeout; load balancers retry on 503. Ingest guarantees **at-least-once** into Kafka. **Exactly-once counting** happens in the aggregator via **idempotent dedup on `click_id`**. State the distinction clearly — interviewers mark down candidates who claim end-to-end exactly-once without naming the mechanism.
+
+Dedup options:
+
+| Approach | Pros | Cons |
+|---|---|---|
+| Redis SET per `click_id`, TTL 48h | Simple, fast | Memory at extreme scale |
+| Flink keyed state (RocksDB) | Colocated with processor | State size, checkpoint I/O |
+| Bloom filter then SET | Cheap negative lookup | False positives need handling — see 04.x Bloom filters in system design track |
+
+For 460k/s peak, **Bloom filter fronting Redis** cuts memory: if Bloom says "definitely new," proceed; if "maybe seen," check SET.
+
+### Late and out-of-order events
+
+Mobile clicks arrive seconds late; batch uploads arrive hours late. **Watermarks** in Flink: allow 10-minute lateness in the hour window, then emit final count. Late events after watermark either drop (with metric) or update a **correction stream** — billing systems often run a **daily reconciliation job** that replaces hourly estimates with ground truth from raw log.
+
+<Callout type="warn">
+Partitioning Kafka by `campaign_id` preserves order per campaign but creates hot partitions if one campaign receives 50% of traffic — monitor partition lag and split hot campaigns to dedicated topics. The failure mode is one lagging partition blocking budget cutoff for a Super Bowl advertiser.
+</Callout>
+
+### Unique user counting
+
+Raw `click_count` is a sum. **Unique users per campaign per day** needs approximate distinct (HyperLogLog — ~12 KB per sketch) or exact set (impossible at scale). Say HLL with ~2% error unless the interviewer demands exact — then daily batch on sampled data.
+
+## Stream aggregation versus batch SQL
+
+<Tradeoff
+  forTitle="Kafka + stream processor when"
+  againstTitle="Batch warehouse only when"
+  forItems={[
+    "Ingest exceeds ~10k events/s — you need partitioned append-only log, not row inserts",
+    "Dashboard lag under 15 minutes requires incremental aggregation, not nightly SQL",
+    "Dedup must happen close to ingest rate — stream state or Redis at processor scale",
+    "Raw log retention for audit is TB-scale — object storage + stream sink is natural",
+    "Campaign budget hooks may need near-real-time counts within minutes",
+  ]}
+  againstItems={[
+    "Volume is under ~1M events/day — cron + Postgres GROUP BY overnight is sufficient",
+    "Dashboards are daily-only — batch ETL to warehouse matches SLA",
+    "Team has no stream ops expertise — managed Kafka + Connect + scheduled BigQuery queries is simpler",
+    "Dedup is rare — idempotent ingest from a single trusted ad server",
+    "Queries are ad-hoc exploratory — dump raw to Snowflake, skip pre-aggregation",
+  ]}
+/>
+
+## In an interview
+
+Open: "Clicks are append-only money events — I'll ingest at-least-once to Kafka, dedup on click_id, aggregate in a stream processor to ClickHouse." Three minutes clarify (unique vs raw count), five minutes capacity (460k/s peak), ten minutes ingest → stream → OLAP, seven on dedup and late data.
+
+Follow-ups: "Lost click?" (Kafka retention + replay), "Duplicate click_id collision?" (UUID — negligible; if sequential IDs, sharded id generator — 01.05 Unique ID Generator), "Fraudulent clicks?" (parallel fraud scorer on stream, flag before billing).
+
+Volunteer: "Billing from at-least-once without dedup overcounts — the dedup store is not optional." Volunteer hot partition on mega-campaign.
+
+<KeyTakeaways
+  items={[
+    "Ad clicks are write-heavy append streams — Kafka at peak, not SQL inserts on the hot path",
+    "Ingest is at-least-once; exactly-once billing requires idempotent dedup on click_id in the stream processor",
+    "Tumbling windows with watermarks handle hour buckets; late events need correction jobs or extended lateness",
+    "OLAP column store (ClickHouse/Druid) serves dashboard queries; raw Parquet in object storage serves audit replay",
+    "Unique user metrics need HyperLogLog or batch approximation — exact distinct sets do not scale to billions",
+    "Partition by campaign_id for ordering but watch hot partitions — one mega-campaign can stall an entire pipeline",
+  ]}
+/>

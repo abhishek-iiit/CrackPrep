@@ -1,0 +1,124 @@
+---
+title: "Trapping Rain Water II"
+number: "03.35"
+summary: "2D rain fill is boundary-first BFS — always expand the lowest wall cell so interior height is capped by the enclosing rim."
+status: published
+free: true
+difficulty: deep
+estMinutes: 20
+tags: [heap, bfs, matrix]
+updated: "2026-09-15"
+---
+
+## The rim sets the water level — process from outside in
+
+Given an `m × n` height map, compute trapped volume after rain. Unlike 03.34 Trapping Rain Water (1D), a cell's water depends on **all four directions** and the global bowl shape — local left/right maxes are not enough.
+
+For cell `(r,c)`, water is `max(0, wallHeight - heightMap[r][c])` where `wallHeight` is the smallest effective boundary enclosing it. The algorithm: treat the matrix border as the initial dam, then expand inward always picking the **lowest border cell** next — a min-heap (priority queue) BFS.
+
+When you pop boundary height `h` and visit neighbor `(nr,nc)` not yet sealed:
+- Trapped at neighbor: `max(0, h - heightMap[nr][nc])`.
+- Push neighbor with effective height `max(h, heightMap[nr][nc])` — water cannot rise above the path that reached it.
+
+<Steps>
+<Step title="Seed the min-heap with all border cells, mark visited">
+  The outer rim is the initial enclosing wall.
+</Step>
+<Step title="Pop smallest height h, scan 4 neighbors">
+  Skip out of bounds or visited.
+</Step>
+<Step title="Add max(0, h - neighborHeight) to answer">
+  Push neighbor at max(h, neighborHeight) — the new dam level for further expansion.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function trapRainWater(heightMap: number[][]): number {
+  const m = heightMap.length;
+  const n = heightMap[0].length;
+  if (m < 3 || n < 3) return 0;
+
+  const visited = Array.from({ length: m }, () => Array(n).fill(false));
+  const heap: [number, number, number][] = []; // [height, row, col]
+
+  const push = (r: number, c: number) => {
+    heap.push([heightMap[r][c], r, c]);
+    visited[r][c] = true;
+  };
+
+  for (let r = 0; r < m; r++) {
+    push(r, 0);
+    push(r, n - 1);
+  }
+  for (let c = 1; c < n - 1; c++) {
+    push(0, c);
+    push(m - 1, c);
+  }
+
+  const dirs = [
+    [0, 1],
+    [0, -1],
+    [1, 0],
+    [-1, 0],
+  ];
+  let water = 0;
+
+  while (heap.length) {
+    heap.sort((a, b) => a[0] - b[0]);
+    const [h, r, c] = heap.shift()!;
+
+    for (const [dr, dc] of dirs) {
+      const nr = r + dr;
+      const nc = c + dc;
+      if (nr < 0 || nr >= m || nc < 0 || nc >= n || visited[nr][nc]) continue;
+      visited[nr][nc] = true;
+      water += Math.max(0, h - heightMap[nr][nc]);
+      heap.push([Math.max(h, heightMap[nr][nc]), nr, nc]);
+    }
+  }
+
+  return water;
+}
+```
+
+Time **O(mn log(mn))** with a proper binary heap; sorting the array each pop is shown for clarity — in production use a min-heap. Space **O(mn)** for visited and heap.
+
+<Tradeoff
+  forTitle="Min-heap boundary BFS when"
+  againstTitle="03.34 two-pointer 1D trick when"
+  forItems={[
+    "Input is a 2D height map — 03.34 left/right max logic does not apply per row alone",
+    "You need the globally correct enclosing wall, not independent row/column scans",
+    "m,n up to 200 — O(mn log mn) is acceptable",
+    "Same 'expand lowest boundary first' pattern appears in 03.13 Swim in Rising Water",
+    "Interviewers expect you to name why greedy inward from lowest rim works",
+  ]}
+  againstItems={[
+    "Problem reduces to 1D — use 03.34 two pointers instead",
+    "Matrix is tiny — precompute per-cell min of four directional max envelopes is overkill but O(mn) possible with different prep",
+    "You cannot implement a heap quickly — BFS with sorted insert still passes at n=200",
+    "03.33 Maximal Rectangle is binary/on histograms — different trapped-geometry problem",
+    "All heights equal — answer is zero without any heap work; quick exit saves time",
+  ]}
+/>
+
+## In an interview
+
+Example: 3×3 map with a central pit — walk through one pop that fills the center below rim height.
+
+Contrast 03.34: 2D needs global enclosure. Explain invariant: processed cells are sealed; unvisited interior cannot leak below current heap min.
+
+Follow-ups: 03.13 Swim in Rising Water, return filled grid, 3D version. Bug: pushing neighbor at its raw height instead of `max(h, heightMap[nr][nc])`, which lets water leak through a saddle.
+
+<KeyTakeaways
+  items={[
+    "Trapping Rain Water II traps volume per cell as max(0, enclosingWall - cellHeight)",
+    "Seed a min-heap with border cells and expand inward from the lowest wall each step",
+    "When visiting a neighbor from wall height h, push it at max(h, neighborHeight) to preserve the dam",
+    "O(mn log mn) time with a heap; O(mn) space for visited marks",
+    "03.34 Trapping Rain Water is the 1D special case — do not apply its two-pointer proof here",
+    "03.13 Swim in Rising Water shares lowest-boundary expansion — same heap instinct, different objective",
+  ]}
+/>

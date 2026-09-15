@@ -1,0 +1,101 @@
+---
+title: "Command"
+number: "03.02"
+summary: "Turning an action into an object lets you queue, log, undo, and replay operations without the invoker knowing how they run."
+status: published
+free: true
+difficulty: core
+estMinutes: 14
+tags: [behavioral, undo, decoupling]
+updated: "2026-09-15"
+---
+
+## Actions trapped inside button handlers
+
+A text editor binds fifty toolbar buttons and keyboard shortcuts to the same underlying operations: insert text, delete selection, apply bold, move the caret. Wire each button directly to `document.insert(...)` and the first feature request for undo sends you rewriting every handler. Add a macro recorder and you are copying call sequences by hand. Queue operations for offline sync and every network round-trip knows about paragraph objects, selection ranges, and font tables.
+
+The mess is not the operations — it is that **invocation** and **execution** are welded together. The UI layer knows too much about the document model, and nothing records *what was requested* as a durable, replayable unit.
+
+Command wraps each action in an object with a single method — usually `execute()` — and optionally `undo()`. The button does not call the document; it constructs a command and hands it to an invoker. The invoker runs it now, stacks it for undo, logs it, or serialises it for later. The document changes; the toolbar stays dumb.
+
+## Invoker, command, receiver
+
+Four roles, though the receiver sometimes collapses into the command itself for trivial operations:
+
+- **Command** — stores the parameters needed to perform (and reverse) one action.
+- **Receiver** — the object that knows how to do the real work (the document, the light bulb, the bank account).
+- **Invoker** — triggers commands without knowing their internals (toolbar, remote control, job scheduler).
+- **Client** — builds concrete commands and wires them to UI controls.
+
+<Steps>
+<Step title="Client builds a concrete command">
+Capture everything needed to redo the action: target object, arguments, sometimes a snapshot of state before the change if undo is cheap enough to store inline.
+</Step>
+<Step title="Invoker executes or enqueues">
+`invoker.run(command)` calls `execute()`. For undo, push the same instance onto a stack before or after execution depending on whether you need pre-state or post-state.
+</Step>
+<Step title="Command delegates to the receiver">
+`execute()` calls receiver methods. `undo()` reverses them — or restores a memento if reversal is non-trivial (see 03.05 Memento).
+</Step>
+</Steps>
+
+```typescript
+interface Command {
+  execute(): void;
+  undo(): void;
+}
+
+class InsertText implements Command {
+  constructor(
+    private doc: Document,
+    private pos: number,
+    private text: string
+  ) {}
+  execute() { this.doc.insert(this.pos, this.text); }
+  undo() { this.doc.delete(this.pos, this.text.length); }
+}
+```
+
+Macro support falls out naturally: a `MacroCommand` holds a list of child commands and runs them in order, undoing in reverse. Transaction logs in event-sourced systems are command streams with different persistence — same shape, different scale.
+
+<Callout type="tip">
+Not every command needs undo. Read-only queries (`GetBalance`) can share the command interface for uniform logging and metrics without implementing `undo()` — split `Executable` from `Reversible` if the empty `undo()` stubs start multiplying.
+</Callout>
+
+## Undo stacks and the memory they cost
+
+Undo is not free. Storing full document snapshots per keystroke blows memory on a 40-page file; storing inverse operations is cheaper but fails when operations are not cleanly invertible (hash a password, send an email). Cap the undo depth — 50–100 steps is a common UX default — and coalesce rapid-fire commands (ten single-character inserts become one "typing burst" command).
+
+For redo, pop from undo onto a redo stack; any new command clears redo. That behaviour is familiar to users and easy to get wrong if two invokers share one stack without synchronisation.
+
+<Tradeoff
+  forTitle="Reach for Command when"
+  againstTitle="Avoid Command when"
+  forItems={[
+    "You need undo, redo, or a command history the user can walk backward through",
+    "Operations must be queued, scheduled, retried, or executed on a remote worker asynchronously",
+    "The UI or API layer should stay decoupled from the domain object that performs the work",
+    "You want uniform logging, auditing, or permission checks wrapped around every mutating action",
+    "Macro recording, batch jobs, or transactional 'apply all then commit' semantics are on the roadmap"
+  ]}
+  againstItems={[
+    "The action set is tiny and stable — a direct method call with no undo or queue requirement is simpler",
+    "Undo requires storing megabytes per step and users will not tolerate the memory or latency cost",
+    "Every new feature means a new command class and the boilerplate outweighs the flexibility",
+    "Operations are inherently one-way (charge card, send push) and faking undo with compensating transactions is a different pattern",
+    "You already have a first-class event log or CRDT — duplicating state changes as command objects adds nothing"
+  ]}
+/>
+
+## In an interview
+
+Lead with the capability, not the UML: "I would wrap each user action in an object so I can stack them for undo and replay them from a queue." Expect "Command vs Memento for undo" — Command stores the operation; Memento stores the state snapshot; they compose (command executes, memento captures before-state). Ask whether they want synchronous undo or eventual consistency on a distributed log. Name the misuse: a command object that secretly reaches around the receiver and mutates global singletons — you have rebuilt a god function behind an interface.
+
+<KeyTakeaways items={[
+  "Command encapsulates a request as an object, separating the object that invokes the operation from the one that performs it.",
+  "The invoker holds commands and can execute, queue, log, or undo them without knowing domain details.",
+  "Undo/redo is a stack of command instances — cap depth and coalesce rapid edits or memory grows with every keystroke.",
+  "MacroCommand composes child commands for batch execution and reverse-order undo without new domain logic.",
+  "For non-invertible operations, pair Command with 03.05 Memento to snapshot receiver state instead of coding a fragile inverse.",
+  "Event sourcing at scale is Command's idea with persistence and replay — same decoupling, different infrastructure."
+]} />

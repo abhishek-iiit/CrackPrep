@@ -1,0 +1,117 @@
+---
+title: "Lowest Common Ancestor of a Binary Search Tree"
+number: "02.20"
+summary: "Walk from the root: the first node where p and q diverge to opposite sides (or equals one) is the LCA."
+status: published
+free: true
+difficulty: intro
+estMinutes: 11
+tags: [binary-tree, bst, traversal]
+updated: "2026-09-15"
+---
+
+## Use the ordering, not a generic tree walk
+
+Given a BST and nodes `p` and `q`, return their lowest common ancestor — the deepest node that has both as descendants (a node can be ancestor of itself).
+
+On a **general** binary tree, LCA is post-order with parent maps or recursive split logic. On a BST, both targets lie in sorted order relative to every ancestor. Start at root: if both values are smaller, LCA is in the left subtree; if both larger, go right; otherwise the current node is the split point — one value on each side, or one value equals the current node.
+
+Example: tree `[6,2,8,0,4,7,9,null,null,3,5]`, p=2, q=8 → answer 6 (first node where paths to 2 and 8 diverge). p=2, q=4 → answer 2 (because 2 is an ancestor of 4 and p can be the LCA).
+
+That single downward walk is **O(h)** time, O(1) space — no parent pointers, no post-order collection. h is O(log n) balanced, O(n) skewed.
+
+## One pointer from the root
+
+While at `node`:
+- If `p.val < node.val && q.val < node.val` → `node = node.left`
+- Else if both greater → `node = node.right`
+- Else return `node` (split or match)
+
+Order of p and q does not matter — compare both to current.
+
+<Steps>
+<Step title="Start at root">
+  Both p and q are guaranteed to exist in the tree.
+</Step>
+<Step title="Move toward the interval gap">
+  Both targets strictly on one side → descend that side.
+</Step>
+<Step title="Stop at first non-descent">
+  Current node is between them or equals one — that is the LCA.
+</Step>
+</Steps>
+
+Generic LCA on a non-BST requires storing paths or a three-flag recursion — strictly more work than this walk.
+
+## Solution
+
+```ts
+class TreeNode {
+  val: number;
+  left: TreeNode | null;
+  right: TreeNode | null;
+  constructor(val?: number, left?: TreeNode | null, right?: TreeNode | null) {
+    this.val = val ?? 0;
+    this.left = left ?? null;
+    this.right = right ?? null;
+  }
+}
+
+function lowestCommonAncestor(
+  root: TreeNode | null,
+  p: TreeNode | null,
+  q: TreeNode | null
+): TreeNode | null {
+  let current = root;
+
+  while (current !== null) {
+    if (p!.val < current.val && q!.val < current.val) {
+      current = current.left;
+    } else if (p!.val > current.val && q!.val > current.val) {
+      current = current.right;
+    } else {
+      return current;
+    }
+  }
+
+  return null;
+}
+```
+
+Time **O(h)**. Space **O(1)**.
+
+<Tradeoff
+  forTitle="BST downward walk when"
+  againstTitle="General binary tree LCA when"
+  forItems={[
+    "Input is a valid BST — ordering tells you which subtree contains both targets",
+    "You need O(1) extra space and no parent pointers",
+    "Values are unique — split point is unambiguous",
+    "p or q may equal the LCA — the else branch handles that without special cases",
+    "h is O(log n) on balanced trees — fast on large inputs",
+  ]}
+  againstItems={[
+    "Tree is not a BST — must use post-order or parent-pointer path intersection",
+    "Nodes referenced by pointer identity but values duplicate — BST value walk ambiguous; need pointer path",
+    "You must return path length to LCA as well — still one walk, but record depth",
+    "Offline queries on static BST — Euler tour + RMQ can batch LCAs",
+    "Interviewer deliberately gives a non-BST to test whether you overfit the shortcut",
+  ]}
+/>
+
+## In an interview
+
+Clarify: BST property holds; p and q distinct nodes in the tree; return the node reference, not just value. Walk through p ancestor of q — answer is p, not below p.
+
+Say: "I'll walk from the root; if both targets are smaller I go left, both larger I go right, otherwise I'm at the fork."
+
+Bug: assuming p.val < q.val and only comparing one side; using strict inequalities on the wrong branch so you skip the LCA when one node equals current. Follow-ups: LCA on a general binary tree; LCA with parent pointers (02.19's tree without BST); insert then query.
+
+<KeyTakeaways items={[
+  "On a BST, LCA is the first node where p and q are not both strictly on the same side.",
+  "O(h) time, O(1) space — one downward walk, no path lists.",
+  "If one target equals the current node, that node is the LCA — do not descend past it.",
+  "Swapping p and q does not change the walk — compare both each step.",
+  "Generic binary tree LCA needs different machinery; do not post-order a BST problem away.",
+  "Assumes valid BST (02.18); skewed trees still work but h may be O(n).",
+]} />

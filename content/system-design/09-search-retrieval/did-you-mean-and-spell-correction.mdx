@@ -1,32 +1,80 @@
 ---
 title: "Did You Mean And Spell Correction"
 number: "09.15"
-summary: "Did You Mean And Spell Correction — notes in progress."
-status: draft
+summary: "When a misspelled query would return nothing useful, how edit distance, logs, and confidence decide whether to rewrite or only suggest."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [search, spell-correction, query-understanding, edit-distance]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Zero results is often a spelling problem wearing a retrieval costume
 
-What breaks without this, and the situation that forces the decision.
+The inverted index only knows terms it was built with. A query token one edit off a popular term — `"nikke shoes"`, `"iphoen case"` — can miss every posting list that would have made a good result page. Users rarely blame their typing; they blame search. Spell correction exists to close that gap inside the query understanding pipeline (09.07 Query Understanding Pipeline), after tokenization and before expansion and retrieval.
 
-## How it works
+The design tension is not "can we find a closer dictionary word." It is **when to trust a rewrite**. Silent correction of `"ruby"` to `"rubi"` in a jewelry context, or of a rare brand into a common competitor, destroys precision. Showing "Did you mean …?" preserves agency; auto-correcting only when confidence is high preserves recall without training users that the box cannot be trusted.
 
-The mechanism, step by step.
+## Mechanisms that are good enough under a latency budget
 
-## Tradeoffs
+Correction has to run on the query path. Exotic models lose to simple methods that hit a vocabulary sized to your corpus and logs.
+
+| Approach | Idea | Strength | Weakness |
+| --- | --- | --- | --- |
+| Edit distance to lexicon | Generate candidates within 1–2 Damerau-Levenshtein edits; rank by frequency | Predictable, language-light | Costly if naively scanned; weak on phonetic errors |
+| Symmetric delete / BK-trees / tries | Index deletes of dictionary words for fast candidate gen | Fast candidate retrieval | Memory and build complexity |
+| Phonetic codes (Soundex, Metaphone) | Match similarly pronounced tokens | Catches "smith"/"smyth"-class errors | Coarse; many false friends |
+| Log-trained noisy channel | P(intended) × P(typed \| intended) from reformulations | Reflects real user fixes | Needs volume; cold start for new terms |
+| Neural correctors | Sequence models | Strong on hard cases | Latency, ops cost, harder to explain |
+
+Production systems often **cascade**: if the raw query already retrieves well (enough hits, healthy click model), skip correction. If not, generate candidates from a dictionary built from index terms plus head queries, score with edit distance and frequency, and either suggest or rewrite.
+
+<Callout type="gotcha">
+Dictionary pollution is the quiet failure. If yesterday's misspellings and bot queries enter the lexicon as first-class terms, the corrector learns to "fix" good queries into garbage, or to treat typos as authoritative. Build the lexicon from index vocabulary and vetted head queries; put a frequency floor on anything promoted from raw logs.
+</Callout>
+
+## Suggest versus auto-rewrite
+
+Two UX contracts, two risk profiles:
+
+- **Did you mean** — keep the original retrieval (even if thin), show a prominent alternative. User opts in. Safer for ambiguous tokens and brands.
+- **Auto-correct / silent rewrite** — replace the query before retrieval when confidence is high: very low original hit count, one dominant candidate, small edit distance, candidate is much more frequent. Show a "showing results for X — search instead for Y" affordance so the user can undo.
+
+Confidence should be a real threshold you can tune against judged sets or online metrics (09.09 Search Evaluation Metrics), not an engineer’s gut feel on a whiteboard. Weight corrected terms carefully when you still mix original and corrected tokens — the pipeline lesson still holds: a guess is not equal to what the user typed.
+
+For multi-term queries, correct token-by-token with a cap on total edits, and prefer corrections that improve the whole query’s hit rate rather than greedily "fixing" every token. Proper nouns and SKUs often belong on an allowlist that refuses correction.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Auto-rewrite the query when"
+  againstTitle="Only show Did you mean when"
+  forItems={[
+    "The original query returns near-zero useful hits and one candidate dominates on frequency and edit distance",
+    "You can show an explicit undo control so silent correction is reversible in one click",
+    "Offline eval shows net gains in success rate without harming head queries that were already fine",
+    "The vocabulary is closed enough — apps, SKUs with known catalogs — that false friends are rare",
+    "Latency allows correction only on the miss path, not on every already-successful query",
+  ]}
+  againstItems={[
+    "Tokens are often brands, people, or codes where a 1-edit neighbor is a different entity",
+    "You lack eval harnesses and would be shipping rewrite rules on intuition",
+    "Legal or trust constraints make silent query changes unacceptable",
+    "Query language mix or code-switching makes edit-distance-to-English-lexicon actively harmful",
+    "The safer product move is to educate with a suggestion while still honoring the literal string",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Introduce correction as a confidence-gated stage in query understanding: "I only rewrite when the raw query is likely to fail and a much more frequent near-neighbor exists; otherwise I suggest." Walk through candidate generation (edits against a lexicon), ranking (frequency × closeness), and the suggest-versus-rewrite UX. Expect "what about brands?" — allowlists and never correcting high-confidence proper nouns. Name dictionary pollution before you are asked why correction got worse after a traffic spike from bots.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Spell correction closes the gap between typed tokens and index vocabulary when a small edit would otherwise yield empty or useless retrieval",
+    "Run correction after tokenize/normalize and gate it on confidence — not every query should be rewritten",
+    "Candidate generation via bounded edit distance plus frequency (or a noisy-channel model from logs) beats naïve dictionary scans under latency constraints",
+    "Did you mean is the safe default; auto-rewrite needs an undo affordance and a tuned confidence threshold",
+    "Keep the lexicon clean: index terms and vetted head queries, not raw typo traffic, or the corrector trains on garbage",
+    "Protect brands, SKUs, and proper nouns with allowlists so correction cannot rename the user's intent",
+  ]}
+/>

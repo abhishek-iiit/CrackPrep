@@ -1,32 +1,102 @@
 ---
 title: "Gravatar-Style Avatar Service"
 number: "13.03"
-summary: "Gravatar-Style Avatar Service — notes in progress."
-status: draft
+summary: "Content-addressed avatar URLs keyed by identity hash — how a tiny shared profile-image service gets caching, defaults, and privacy right."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: intro
+estMinutes: 9
+tags: [avatars, cdn, hashing]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Avatars are a caching problem wearing a face
 
-What breaks without this, and the situation that forces the decision.
+Almost every product needs a small square image for a user. The naive path — `/api/users/{id}/avatar` hitting an app server on every comment render — turns profile photos into a latency and auth burden on the hottest HTML and JSON paths. Gravatar's enduring idea is simpler: **an avatar is a URL derived from an identity hash**, served as a static object from a CDN, with a deterministic default when nothing was uploaded.
 
-## How it works
+You do not have to outsource to Gravatar to steal the shape. Many systems build an internal twin: hash email or user id → object key → CDN.
 
-The mechanism, step by step.
+## The URL contract
 
-## Tradeoffs
+Classic Gravatar-style:
+
+```text
+https://cdn.example.com/avatar/{hash}?s=80&d=identicon
+```
+
+- **`hash`** — typically MD5/SHA of a normalised email, or a keyed hash of an internal user id (better for privacy than raw email hashes on shared infrastructure).
+- **`s`** — size preset (allowlisted: 40, 80, 160…).
+- **`d`** — default policy when missing: solid colour, generated identicon/mystery-person, or redirect to a global default asset.
+
+The browser and CDN treat this like any other immutable-ish static file. Comment threads, leaderboards, and emails reference the URL without calling your identity API.
+
+## Upload and publish path
+
+<Steps>
+  <Step title="User uploads a photo">
+    Prefer direct-to-object-storage (13.01) into a private incoming key.
+  </Step>
+  <Step title="Process fixed presets">
+    Eager-generate square crops at the allowlisted sizes (and maybe WebP+JPEG). Avatars are hot and few-variant — a good eager case from 13.02.
+  </Step>
+  <Step title="Publish under the hash key">
+    Write to `avatar/{hash}/80.webp` etc., or one master plus CDN presets. Update `avatar_version` if you use versioned URLs.
+  </Step>
+  <Step title="Invalidate or version">
+    Either `?v={version}` on the URL your API returns, or short TTL plus purge. Version query params are the reliable option.
+  </Step>
+</Steps>
+
+## Defaults and missing users
+
+Default images prevent broken icons for users who never uploaded. Generated identicons also avoid leaking whether an email is registered when the hash is email-based — a privacy footgun of naive "404 vs 200" behaviour on email-hash URLs. Prefer:
+
+- Always 200 with a default image, or
+- Hash internal ids that are not guessable from email, and rate-limit lookup APIs separately.
+
+## Privacy and abuse
+
+| Risk | Mitigation |
+| --- | --- |
+| Email → hash rainbow tables | Prefer internal id hashing; salt if the CDN is shared; treat email hashes as personal data |
+| Hotlinking / scrapers | Signed URLs, referrer policy, or accept that public avatars are public |
+| NSFW uploads | Moderation queue before publish; revert to default on strike |
+| Tracking pixels via avatar | Separate avatar CDN host; careful cookie policy |
+
+<Callout type="note">
+If your API already returns user objects with a CDN avatar URL, HTML never needs a secondary identity round trip. That single field is the integration surface — keep it stable, versioned, and size-agnostic (`s` param or srcset).
+</Callout>
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Use hash-addressed CDN avatars when"
+  againstTitle="Serve avatars through the app API when"
+  forItems={[
+    "Avatars appear on ultra-hot paths (comments, lists) and must be cacheable static GETs",
+    "A small set of sizes covers every client",
+    "You want deterministic defaults without per-request app logic",
+    "Email or notification clients need an absolute HTTPS image URL",
+    "Cross-product sharing of the same identity image matters",
+  ]}
+  againstItems={[
+    "Avatars are strictly private and every fetch must re-check ACLs that a CDN cannot express",
+    "You need per-viewer watermarking or personalisation of the image itself",
+    "Regulatory rules forbid content-addressing identity with the hash scheme you planned",
+    "Volume is tiny and a single authenticated API is already fine",
+    "You are not ready to moderate UGC images but still want them on a global CDN",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Describe opaque hash (or user-id) URLs on a CDN, eager small presets, version params on change, and safe defaults that do not leak account existence. Mention direct upload + processing. Keep it short — avatar services are an application of 13.01/13.02, not a separate storage invention.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Gravatar-style systems map an identity hash to CDN-cached image URLs so hot paths never hit the app for bytes",
+    "Eager-generate a few square size presets; avatars are the classic hybrid opposite of long-tail on-demand galleries",
+    "Version the URL on change rather than relying only on purge",
+    "Default images should not reveal whether an email or account exists",
+    "Prefer hashing non-secret internal ids over raw email MD5 when you own the stack",
+    "Moderate before publish — a global CDN will happily amplify an abusive upload",
+  ]}
+/>

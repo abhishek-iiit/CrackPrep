@@ -1,0 +1,103 @@
+---
+title: "Clone Graph"
+number: "01.27"
+summary: "Copy a connected graph by mapping each original node to a new node before you follow neighbors — BFS or DFS with a hash map."
+status: published
+free: true
+difficulty: core
+estMinutes: 13
+tags: [graph, bfs, dfs, hash-map]
+updated: "2026-09-15"
+---
+
+## Same shape, new nodes — shared references are the bug
+
+Each node has a value and a list of neighbors. Return a **deep copy** of the graph starting from a reference node. The copy must have new node objects; pointing new neighbors at old nodes is wrong.
+
+Naive DFS that creates a node whenever it sees a value duplicates work when the graph has cycles — you re-enter the same neighbor and allocate again. Without a map from old → new, you cannot tell "already cloned" from "first visit."
+
+## Traverse with an old-to-new map
+
+Whether BFS or DFS, the pattern is identical: if `old` is in the map, return the existing clone; otherwise create `clone = new Node(old.val)`, store `map.set(old, clone)`, then attach neighbors by recursively (or iteratively) cloning each neighbor and pushing onto `clone.neighbors`.
+
+The invariant: every edge in the original has exactly one corresponding edge between the mapped endpoints in the copy, and no clone node is created twice for the same original.
+
+<Steps>
+<Step title="Seed the map on first visit">
+On encountering `node`, if mapped, return clone. Else allocate clone and record mapping **before** descending — that breaks cycles safely.
+</Step>
+<Step title="Clone neighbors">
+For each `neighbor` in `node.neighbors`, `clone.neighbors.push(cloneGraph(neighbor))` in DFS, or enqueue unvisited neighbors in BFS after linking.
+</Step>
+<Step title="Return the clone of the start">
+If input is null, return null. Otherwise return `map.get(start)` or the DFS result on the reference.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+class GraphNode {
+  val: number;
+  neighbors: GraphNode[];
+  constructor(val?: number, neighbors?: GraphNode[]) {
+    this.val = val ?? 0;
+    this.neighbors = neighbors ?? [];
+  }
+}
+
+function cloneGraph(node: GraphNode | null): GraphNode | null {
+  if (!node) return null;
+  const map = new Map<GraphNode, GraphNode>();
+
+  function dfs(old: GraphNode): GraphNode {
+    if (map.has(old)) return map.get(old)!;
+    const copy = new GraphNode(old.val);
+    map.set(old, copy);
+    for (const nei of old.neighbors) {
+      copy.neighbors.push(dfs(nei));
+    }
+    return copy;
+  }
+
+  return dfs(node);
+}
+```
+
+Time **O(V + E)** — each node and edge visited once. Space **O(V)** for the map and recursion stack (BFS uses a queue instead of stack depth).
+
+<Tradeoff
+  forTitle="DFS/BFS + map when"
+  againstTitle="Different approach when"
+  forItems={[
+    "You must deep-copy an arbitrary undirected graph with cycles and no global node list",
+    "Node identity (object reference) is the key — values alone may duplicate if not unique",
+    "The pattern reappears in Copy List with Random Pointer and Serialize/Deserialize Graph",
+    "V and E are bounded (~100 nodes) — straightforward traversal is enough",
+    "Either BFS or DFS is acceptable; pick one and explain cycle handling via the map"
+  ]}
+  againstItems={[
+    "You are given adjacency lists by index (0..n-1) — array of new nodes indexed by id is simpler, no hash map on objects",
+    "The task is serialize/deserialize — you need a wire format, not just an in-memory clone",
+    "Graph is a tree with parent pointers — cloning may still use a map but no cycle risk simplifies order",
+    "You must merge two cloned subgraphs — map from old to new is still required but construction order changes",
+    "Nodes carry heavy payloads — shallow copy of payload with deep copy of graph structure needs explicit rules"
+  ]}
+/>
+
+## In an interview
+
+Define the node shape. Emphasize **deep copy** — new objects, same topology. Draw a triangle graph and show why revisiting node 1 without a map creates duplicates.
+
+Say you will keep `Map<original, clone>` and create the clone before recursing into neighbors. BFS is fine if you prefer a queue.
+
+Follow-ups: **Clone Graph** with n nodes given as adjacency list by index, **Copy List with Random Pointer**, or serialize to string. Bug to flag: mapping by `val` when values repeat — always key on object reference.
+
+<KeyTakeaways items={[
+  "Clone Graph: map each original node to its clone; create the clone before visiting neighbors to handle cycles.",
+  "DFS and BFS both work — O(V+E) time, O(V) extra space for the map (and stack or queue).",
+  "Never key the map by node.val alone — duplicate values exist; use the node reference.",
+  "The clone's neighbor list must point to cloned nodes, never back to the original graph.",
+  "Null input returns null; single-node graph returns a single new node with empty neighbors.",
+  "Same old-to-new map pattern applies to Copy List with Random Pointer and graph serialization follow-ups."
+]} />

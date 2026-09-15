@@ -1,32 +1,85 @@
 ---
 title: "Batching"
 number: "02.10"
-summary: "Batching — notes in progress."
-status: draft
+summary: "Why paying a fixed per-call cost once for many items beats paying it once per item, and the latency you trade to get there."
+status: published
 free: true
 difficulty: core
 estMinutes: 12
+tags: [batching, throughput, latency]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The problem: a round trip costs the same whether it carries one row or a thousand
 
-What breaks without this, and the situation that forces the decision.
+A network round trip inside a datacenter runs somewhere from half a millisecond to a few milliseconds, largely independent of how much data rides along up to a fairly generous limit. A database insert wrapped in its own transaction pays for a WAL fsync — often single-digit milliseconds on spinning media, submillisecond but still nonzero on flash — again mostly independent of row count. Send one row at a time and every one of those fixed costs is paid once per row: a thousand single-row inserts at 2 ms each is two full seconds, almost none of it spent doing the actual write.
 
-## How it works
+Batching is the fix, and it is almost embarrassingly simple: collect several items and pay the fixed cost once for the group. A thousand rows in one multi-row `INSERT`, or one broker produce request carrying a thousand messages, still pays roughly the same fixed overhead as a single row would — the throughput gain is close to the batch size itself, up to the point where the batch is large enough that the fixed cost stops dominating and actual data-transfer time takes over.
 
-The mechanism, step by step.
+## When to flush: size, time, or both
 
-## Tradeoffs
+A batcher accumulates items and has to decide when enough is enough. Two triggers cover essentially every real system.
+
+<Steps>
+  <Step title="Size threshold">
+    Flush once N items (or B bytes) have accumulated. This bounds batch size — useful when the receiving side has its own limit, like DynamoDB's cap of 25 items and 400 KB per `BatchWriteItem` call — but on a quiet stream it can leave a nearly-full batch waiting indefinitely for one more item that may not arrive for minutes.
+  </Step>
+  <Step title="Time threshold">
+    Flush every T milliseconds regardless of how many items have accumulated. This bounds added latency, but on a bursty stream it flushes tiny batches during quiet periods, giving up most of the throughput gain exactly when it would help least.
+  </Step>
+  <Step title="Whichever fires first">
+    Nearly every production batcher uses both: flush at N items or T milliseconds, whichever comes first. Kafka's producer exposes this directly as `batch.size` and `linger.ms` — the producer waits up to `linger.ms` for a batch to fill to `batch.size`, but never longer.
+  </Step>
+</Steps>
+
+The time threshold is a latency tax charged to every item, whether or not it needed batching. An item arriving right as a time-triggered batch flushes pays almost no added wait; one arriving right after a flush waits nearly the full window before the next one closes.
+
+<Formula label="Average added latency from a time-triggered batch">≈ window ÷ 2</Formula>
+
+For arrivals spread roughly evenly across the window, an item's expected wait is half the window — a `linger.ms` of 20 adds roughly 10 ms on average, not 20. That is an approximation, not an exact figure: bursty or clustered arrivals push the real average away from it in either direction, but it is close enough to reason about the order of magnitude a given window costs before measuring it.
+
+## What a batch trades away
+
+The throughput win is real, but three costs come with it.
+
+**Added latency.** Every item in a time-triggered batch waits, on average, half the window, and an item unlucky enough to arrive right after a flush waits nearly the full window. For a system with a tight p99 latency target, batching is directly in tension with 02.12 Tail Latency — the batch window becomes a floor under the best case, not just the average.
+
+**Blast radius on failure.** A batch of a thousand rows that fails as a unit fails all thousand at once, where a thousand independent single-row writes would have had 999 successes and one failure. Whether that is acceptable depends on whether the batch is genuinely one unit of work — a set of related rows in one transaction — or a thousand unrelated items batched purely for efficiency, in which case an all-or-nothing failure is a cost the batching introduced rather than one the workload already had.
+
+**Partial failure handling.** Many bulk APIs — Elasticsearch's `_bulk`, DynamoDB's `BatchWriteItem` — return a per-item status rather than a single pass/fail for the whole batch, because a batch of independent items usually should not fail as a unit. That pushes complexity onto the caller: it has to parse a mixed response and decide what to do with the items that failed, and if any of that handling includes a retry, the retry needs the same idempotency guarantee that 02.09 Retries Timeouts And Idempotency covers, now applied per item inside the batch rather than to the request as a whole.
+
+<Callout type="tip">
+Batching composes with backpressure rather than replacing it. A batcher with an unbounded accumulation buffer just relocates the "unbounded queue" problem from the network to memory — 02.11 Backpressure covers what has to bound that buffer once the consumer side cannot keep up with even the batched writes.
+</Callout>
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Batch when"
+  againstTitle="Send unbatched when"
+  forItems={[
+    "The per-call fixed cost — a round trip, an fsync, a transaction commit — is large relative to the cost of the item itself",
+    "Throughput matters more than the latency of any single item, and the workload can tolerate a bounded added wait",
+    "The receiving system charges per call rather than per byte, or gives a real efficiency break for bulk operations",
+    "Items naturally arrive in bursts, so a batch window mostly absorbs a burst rather than delaying isolated requests",
+  ]}
+  againstItems={[
+    "A tight per-item latency SLA leaves no room for even a small added wait — anything close to the tail-latency budget is a problem",
+    "Items are truly independent and a caller needs to know the fate of its own item immediately, not after a batch containing unrelated items resolves",
+    "The write is already large enough that the fixed per-call cost is a rounding error next to the payload itself",
+    "The added complexity of partial-failure handling and per-item retries costs more than the round trips it would save",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Bring it up by naming the fixed cost you are amortizing, not the word "batching" itself: "Each insert here pays for a WAL fsync regardless of row count, so I will buffer writes and flush every 20 ms or every 500 rows, whichever comes first, to turn that fixed cost from per-row to per-batch." Be ready to say what the batch window costs in added latency, and to name the partial-failure question before being asked: a batch of independent items should report per-item status, not a single pass/fail, and any retry of a failed item needs to be idempotent on its own.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "A fixed per-call cost — a round trip, an fsync, a transaction commit — is paid once per batch instead of once per item, turning a cost proportional to item count into one closer to constant",
+    "A batch flushes on a size threshold, a time threshold, or both together — size bounds batch size, time bounds added latency, and most production batchers use both",
+    "A time-triggered batch adds roughly half its window as average latency to the items inside it, though bursty arrivals push the real number away from that estimate",
+    "Batching increases blast radius: a batch that fails as one unit turns what would have been isolated single-item failures into a shared one",
+    "Bulk APIs that batch independent items typically return per-item status rather than one pass/fail, which pushes response parsing and per-item retry idempotency onto the caller",
+    "Batching trades latency for throughput, which puts it in direct tension with a tight tail-latency budget on the same path",
+  ]}
+/>

@@ -1,32 +1,92 @@
 ---
 title: "Fixed Block Chunking And Content Addressing"
 number: "13.10"
-summary: "Fixed Block Chunking And Content Addressing — notes in progress."
-status: draft
+summary: "Why splitting files into fixed-size content-addressed blocks enables resume, dedupe, and cheap deltas — and when rolling-hash chunking earns its complexity."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 14
+tags: [chunking, content-addressing, dedupe, sync]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The unit of transfer should not be the file
 
-What breaks without this, and the situation that forces the decision.
+A 4 GB disk image that changes 8 MB in the middle should not cost 4 GB on the wire. Fixed-size block chunking splits a file into blocks of a chosen size — 1 MiB, 4 MiB, sometimes smaller for chattier sync — hashes each block, and treats the hash as the block's identity in a blob store. Content addressing means the key *is* the hash: put is idempotent, two uploads of identical bytes converge on one object, and "do you have this block?" is a cheap existence check.
 
-## How it works
+This is the mechanism under many sync and backup systems; 13.09 Remote File Sync Design covers when to invoke it. The lesson here is how the split and the address interact — and what breaks when the block size or the hash is wrong for the workload.
 
-The mechanism, step by step.
+## Fixed blocks end to end
 
-## Tradeoffs
+<Steps>
+  <Step title="Choose a block size">
+    Larger blocks mean fewer hashes, less metadata, and better throughput on fat networks; they also mean a one-byte edit dirties an entire block. Smaller blocks improve delta granularity and hurt listing and request-rate overhead. 1–4 MiB is a common default for LAN/cloud sync; tune down when edits are tiny and frequent.
+  </Step>
+  <Step title="Split and hash">
+    Read the file sequentially, emit blocks of fixed length (last block short), compute a cryptographic hash per block (SHA-256 is the usual interview-grade choice). The file becomes an ordered list of hashes — a blocklist — plus file-level metadata.
+  </Step>
+  <Step title="Upload missing blocks only">
+    For each hash, ask the block store if it exists; PUT only the misses. Content addressing makes retries safe: a second PUT of the same hash is a no-op or an overwrite of identical bytes.
+  </Step>
+  <Step title="Publish the new blocklist">
+    Once all blocks are present, write the versioned file metadata that points at the ordered hash list (13.11 Blocklist Versioned File Metadata). Readers assemble the file by fetching blocks in order — or sparse-read a range by mapping byte offsets to block indices.
+  </Step>
+</Steps>
+
+Dedup scope follows how you key the store: global namespaces dedupe across every user (maximum savings, maximum cross-tenant fingerprinting concern); per-tenant or per-user namespaces isolate savings and blast radius. Encryption-before-hash (client-side encryption) kills cross-user dedupe unless you use convergent encryption deliberately — and convergent encryption has known confirmation-of-file attacks you should name if you propose it.
+
+## Fixed versus content-defined chunking
+
+Fixed chunking is simple and maps cleanly to byte ranges: offset `O` lives in block `O / block_size`. Its failure mode is the **insertion shift**: insert one byte at the start of a file and every subsequent fixed block changes, so the delta looks like a full rewrite. Content-defined chunking (rolling hash / Rabin-style CDC, as in rsync-inspired and many backup agents) places boundaries where content fingerprints match a pattern, so an insertion typically only invalidates nearby chunks.
+
+| Approach | Delta quality on inserts | Implementation | Natural fit |
+| --- | --- | --- | --- |
+| Fixed-size blocks | Poor when edits shift alignment | Trivial split, trivial offset math | Sync with mostly overwrite-in-place, VM disks with sparse writes, teaching designs |
+| Content-defined (rolling hash) | Good — boundaries absorb shifts | Rolling hash CPU cost, variable sizes, harder range math | Backup agents, rsync-like protocols, document-ish files with inserts |
+| Whole file | Worst | One object key | Small files where chunk overhead exceeds savings |
+
+CDC variable sizes also complicate SLOs: a "block" might be 100 KB or 8 MB unless you clamp min/max. Fixed blocks keep pack files and caches predictable.
+
+<Callout type="gotcha">
+Content addressing is only as trustworthy as the hash and the verification path. Always verify hash on write (and ideally on read) against the bytes; a corrupted block stored under the "right" key poisons every file that references it. End-to-end checksums (07.20) are the same discipline at a different layer.
+</Callout>
+
+## GC, sharing, and the cost of immortal blocks
+
+Blocks outlive any single file version. GC requires reference counting or mark-and-sweep from live blocklists — run too eagerly and you delete a block a concurrent upload still needs; run too rarely and storage grows without bound as old versions accumulate. Immutability helps: never mutate a hash's bytes in place; only add or GC.
+
+Shared blocks couple failure domains: one bad disk scrub affecting a hot block can hit many files. Replication and scrubbing policies for the block store matter more than for unique whole-file objects.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Use fixed-size content-addressed blocks when"
+  againstTitle="Prefer CDC or whole-file when"
+  forItems={[
+    "You need resume, cross-version dedupe, and simple offset-to-block mapping",
+    "Workloads mostly overwrite regions in place rather than insert bytes at the front",
+    "Block-store operations must stay idempotent under flaky mobile clients",
+    "Operational simplicity beats best-possible delta ratio",
+    "Multiple file versions or users can share identical regions (images, package layers, VM base disks)",
+  ]}
+  againstItems={[
+    "Insert-heavy edits make fixed alignment cause near-full-file invalidation — CDC pays for itself",
+    "Files are small enough that per-block HTTP and metadata overhead dominates transfer time",
+    "You need maximum wire efficiency against a server that can compute rolling signatures online (classic rsync)",
+    "Client-side encryption requirements forbid naive global dedupe and you will not take on convergent encryption",
+    "You lack a plan for block GC against versioned blocklists — storage will quietly diverge from live data size",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Lead with the cost you avoid: "I chunk large files into fixed content-addressed blocks so an edit only reuploads dirty blocks and retries are idempotent." Know one number — pick a block size and say what edit pattern would make you shrink it. When asked about rsync, explain insertion shift versus rolling-hash CDC without dismissing fixed blocks: they win on simplicity and range mapping. Name GC and hash verification as the failure modes before the interviewer does.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Fixed block chunking turns a file into an ordered list of hashes; content addressing makes each hash an idempotent key in a block store",
+    "Only missing blocks need upload — resume and cross-file dedupe fall out of existence checks on hashes",
+    "Block size trades delta granularity against metadata and request overhead; 1–4 MiB is a common starting band, not a law",
+    "Fixed chunks suffer insertion shift; content-defined chunking absorbs inserts at the cost of complexity and variable sizes",
+    "Publish a new blocklist only after all referenced blocks exist, or readers assemble a torn file",
+    "Blocks need GC against live references and hash verification on write — silent corruption under a content hash is a fleet-wide poison",
+  ]}
+/>

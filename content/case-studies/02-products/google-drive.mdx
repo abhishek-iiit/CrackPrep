@@ -1,0 +1,165 @@
+---
+title: "Google Drive"
+number: "02.01"
+summary: "Chunked upload, metadata vs blob split, sync deltas, and last-writer-wins versus merge for the file-storage interview prompt."
+status: published
+free: true
+difficulty: deep
+estMinutes: 20
+tags: [storage, sync, upload]
+updated: "2026-09-15"
+---
+
+## "Design Google Drive" tests whether you can split blobs from metadata
+
+The prompt sounds like one system. It is two: a metadata service that answers "what files does this user have, and where is the latest version?" and an object store that holds the bytes. Interviewers use it to see if you know that split, whether you can reason about resumable uploads for multi-gigabyte files on flaky mobile networks, and what you do when two devices edit the same file offline and both come back online. The failure mode they are listening for is treating a 2 GB video like a 2 KB JSON document — same API, same retry logic, same conflict story — and discovering halfway through that your upload path cannot survive a dropped connection.
+
+## Clarify: metadata, blobs, and what "sync" means here
+
+Batch the questions. Three minutes, then draw.
+
+> "I'll focus on file upload, download, folder hierarchy, and cross-device sync. Out of scope unless you want otherwise: real-time co-editing like Google Docs, full-text search, and virus scanning. Is that the right slice?"
+
+**Functional requirements** — name the API calls:
+
+- Upload a file (create or replace)
+- Download a file by ID
+- List folder contents, create/rename/move/delete files and folders
+- Share a file or folder with another user (read or edit)
+- Sync: client learns what changed since last sync and pulls/pushes deltas
+
+**Non-functional requirements** — ask explicitly:
+
+- Max file size? (Assume 5 GB unless told otherwise — it forces chunking.)
+- Durability? (Assume eleven nines for blobs once committed; metadata in a replicated DB.)
+- Latency? Upload can be slow; list-folder and metadata sync should feel instant — target under 200 ms p99 for metadata reads.
+- Consistency? Eventual across devices is fine for most files; ask whether any file type needs stronger guarantees.
+- Offline? Assume yes — clients queue changes and replay on reconnect.
+
+**Actors:**
+
+- **Uploader** — mobile and desktop, intermittent connectivity, large files
+- **Downloader** — same user on another device, or a share recipient
+- **Sync client** — polls or receives push, applies deltas locally
+- **Share recipient** — read-mostly, occasional edit
+
+Put real-time collaborative editing out of scope unless the interviewer pulls it back in — that is OT/CRDT territory and a different forty-five minutes.
+
+## Capacity: two traffic profiles, one storage number
+
+State assumptions as assumptions. Round numbers you can multiply in your head.
+
+| Assumption | Value | Why it matters |
+|---|---|---|
+| Registered users | 500M | Population for DAU math |
+| DAU | 100M (20%) | Active sync/upload population |
+| Files per active user | 200 avg | Metadata row count |
+| New uploads per DAU per day | 2 | Write rate |
+| Avg upload size | 5 MB | Most photos/docs; tail is video |
+| Download-to-upload ratio | 5:1 | Read-heavy on blobs |
+| Retention | Indefinite | Storage only grows |
+
+**Metadata writes:** 100M DAU × 2 uploads/day = 200M upload events/day ≈ **2,300/s average**, ×3 peak ≈ **7k metadata writes/s**. Renames, moves, and share events add maybe another 30% — call it **10k metadata writes/s at peak**.
+
+**Blob ingest:** same 200M files/day × 5 MB ≈ **1 PB/day** of new blob data — order-of-magnitude, not a benchmark. That is roughly **12 GB/s average ingest**, ×3 peak ≈ **35 GB/s**. This is why uploads go direct-to-object-store, not through your API servers.
+
+**Blob reads:** 5× uploads → **60 GB/s average**, **180 GB/s peak** across the CDN and origin. A CDN fronting immutable blob versions handles most of this; origin is cold storage plus edge miss fill.
+
+**Metadata storage:** 500M users × 200 files ≈ **100B file records** if everyone filled up — in practice a fraction. At 500 bytes per metadata row (name, parent, owner, version, timestamps, ACL pointer): **50 TB** of hot metadata in a sharded SQL or wide-column store. Manageable; the blobs are the cost center.
+
+**Blob storage growth:** ~1 PB/day new data before dedup and tiering. Dedup by content hash (same attachment emailed to ten people) might cut 20–40% in practice — say it out loud, do not bake it into the first diagram.
+
+<Callout type="gotcha">
+Do not provision API servers for 35 GB/s of upload bytes. The upload API returns a pre-signed URL; the client PUTs chunks directly to object storage. If your diagram shows upload traffic flowing through the metadata service, the interviewer will stop you.
+</Callout>
+
+## High-level design: metadata service plus object store
+
+<Steps>
+<Step title="Upload init — metadata first">
+Client calls `POST /files` with name, parent folder, size, content hash if known. Metadata service creates a file record in `uploading` state, returns `file_id` and a set of pre-signed URLs for N chunks (e.g. 8 MB each). No bytes touch the API tier.
+</Step>
+<Step title="Chunk upload — direct to object storage">
+Client uploads chunks in parallel to object storage (S3-style). Each chunk gets an ETag. On failure, retry that chunk only — not the whole file. Client tracks completed part numbers locally for resume.
+</Step>
+<Step title="Upload complete — commit">
+Client calls `POST /files/{id}/complete` with the list of part ETags. Metadata service verifies all parts exist, assembles the manifest, flips status to `ready`, increments version, publishes a change event to the sync bus (01.08 Distributed Message Queue).
+</Step>
+<Step title="Download">
+Client requests `GET /files/{id}`. Metadata service checks ACL, returns a short-lived signed download URL pointing at the blob (or CDN URL for popular/shared files). Bytes stream from edge or origin — not from the metadata DB.
+</Step>
+<Step title="Sync">
+Client sends `GET /changes?cursor={token}` periodically or receives a push via WebSocket. Server returns a delta list: created, modified, deleted, moved files since cursor. Client applies locally, fetches missing blobs. Client pushes its offline queue the same way.
+</Step>
+</Steps>
+
+**Core components:**
+
+| Component | Responsibility |
+|---|---|
+| Metadata DB | File tree, versions, ACLs, upload state — sharded by `user_id` |
+| Object storage | Immutable blob chunks and assembled objects |
+| Upload coordinator | Pre-signed URL minting, multipart assembly |
+| Sync / notification | Change feed per user, WebSocket or long-poll |
+| CDN | Cache popular downloads and shared links |
+
+## Deep dive: chunk upload, sync cursor, conflict resolution
+
+### Resumable multipart upload
+
+Split a 5 GB file into ~625 chunks of 8 MB. The client uploads chunks 1–400, loses Wi-Fi, reconnects, asks the server which parts are already committed (`GET /files/{id}/status`), uploads 401–625, then completes. The metadata service never holds the file in memory.
+
+Content-defined chunking (rolling hash boundaries) enables **block-level dedup**: if chunk 47 already exists in the store, skip uploading it. Mention it as an optimization; do not design the whole interview around it unless asked.
+
+### Sync without scanning the whole tree
+
+A per-user **change log** (append-only) beats querying "all files where mtime > X" across 200k rows. Each metadata mutation appends `{file_id, change_type, version, timestamp}` to the user's log. The sync cursor is an offset into that log. 01.08 Distributed Message Queue fits here as the pipe between the metadata write path and notification workers.
+
+For folder listing at scale, cache the expanded tree per user in 01.03 Distributed Cache with short TTL — invalidate on any change event for that user.
+
+### Conflict resolution when two devices edit offline
+
+Two realistic strategies; pick one and defend it.
+
+**Last-writer-wins (LWW):** each file has a monotonic version. Device A and Device B both edit offline. On sync, higher version wins; the loser gets a "conflict copy" (`filename (conflict copy from Device B).docx`). Simple, predictable, what Dropbox did for years. Downside: silent data loss of one edit if the user does not notice the conflict copy.
+
+**Version branching:** keep both versions, expose a merge UI. Better for user trust, more metadata complexity — parent file points to two child versions until the user picks or merges.
+
+For a forty-five minute interview, LWW plus conflict copies is the default answer. Mention that Google Docs-style real-time merge requires OT/CRDT and is out of scope.
+
+<Tradeoff
+  forTitle="Chunked direct-to-object-store upload when"
+  againstTitle="Single-request upload through API when"
+  forItems={[
+    "Files exceed a few MB — mobile uploads fail mid-stream and must resume without restarting",
+    "Peak ingest is measured in GB/s — API servers cannot proxy that volume",
+    "You want dedup at the chunk level via content hashes",
+    "Pre-signed URLs move auth to the edge of upload, keeping the metadata tier stateless",
+    "Multipart assembly is a well-understood primitive in S3, GCS, and Azure Blob",
+  ]}
+  againstItems={[
+    "All files are small (under 5 MB) and upload volume is low — a single PUT through the API is simpler",
+    "You need server-side scanning or transformation before any byte is stored — the blob must pass through your tier once",
+    "The interviewer scoped out large files and mobile offline — Pastebin-scale (01.06) not Drive-scale",
+    "Strict upload auditing requires inspecting every byte on your servers, not at the storage layer",
+  ]}
+/>
+
+## In an interview
+
+Open with the split: "Drive is a metadata service plus an object store. I will keep bytes off the API path and focus on resumable chunked upload, a per-user change feed for sync, and last-writer-wins with conflict copies for offline edits." Spend three minutes on clarify and capacity — the PB/day number is what justifies chunking and CDN.
+
+Follow-ups to expect: "How do you handle sharing permissions?" (ACL table keyed by file_id, check on every metadata read and signed-URL mint). "What if two users edit the same shared file?" (same LWW story, or lock-on-open if they push you toward Docs). "How do you delete?" (tombstone in metadata, async garbage-collect unreferenced chunks — do not delete blobs synchronously on user delete).
+
+Volunteer the failure mode before being asked: a client that completes upload but crashes before calling `/complete` leaves orphaned chunks — solve with a sweeper job that deletes parts for uploads in `uploading` state older than 24 hours.
+
+<KeyTakeaways
+  items={[
+    "Google Drive is two systems: a sharded metadata DB for the file tree and ACLs, and an object store for immutable blob bytes",
+    "Large-file upload goes direct-to-storage via pre-signed multipart URLs — API servers never proxy gigabytes",
+    "Sync uses a per-user append-only change log and a cursor token, not a full-tree scan on every poll",
+    "Offline conflict resolution defaults to last-writer-wins with a named conflict copy for the losing edit",
+    "At 100M DAU uploading twice daily, blob ingest is ~12 GB/s average — that number is what forces CDN and chunked upload into the design",
+    "Orphaned multipart parts from crashed clients need a TTL sweeper; otherwise storage cost leaks silently",
+  ]}
+/>

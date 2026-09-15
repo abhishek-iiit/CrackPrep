@@ -1,0 +1,162 @@
+---
+title: "Netflix"
+number: "02.07"
+summary: "Video ingest, multi-bitrate encoding, and CDN-backed streaming — the read path that dominates watch time."
+status: published
+free: true
+difficulty: deep
+estMinutes: 21
+tags: [streaming, cdn, transcoding, video]
+updated: "2026-09-15"
+---
+
+## Streaming is a delivery problem dressed as a catalog
+
+"Design Netflix" sounds like "design a video website." What interviewers actually probe is the gap between upload and playback: a two-hour 4K master becomes dozens of encoded segments at multiple bitrates, replicated to edge caches, and fetched in small chunks as the viewer's network speed changes. The catalog, search, and recommendations matter for product completeness, but the mechanism that fails in production is almost always playback — buffer stalls, origin overload during a premiere, encoding backlog after a content drop.
+
+If you spend thirty minutes on SQL schemas for titles and never reach the CDN, you have answered a different prompt. Lead with watch path, then back into metadata.
+
+## Clarify: watch path first, studio pipeline second
+
+**Functional scope to confirm:**
+
+- Users browse a catalog and play video on demand (no live TV unless they ask).
+- Playback supports pause, resume, seek — progress must persist.
+- Multiple devices; same account, concurrent stream limits are a product rule you can ask about.
+
+**Non-functional:**
+
+- Startup time — "playback begins within 2–3 seconds on broadband" is a reasonable default.
+- Rebuffering — adaptive bitrate should keep stalls rare; ask if they care about p99 stall rate.
+- Availability during a popular release — edge caching and origin shielding matter here.
+
+**Out of scope to declare:**
+
+*"I'll cover catalog metadata, upload/encode, CDN delivery, and playback with resume. Out of scope: content production tools, billing, regional licensing enforcement, and a full recommendation ML stack — I'll mention a simple 'because you watched' cache, not train models."*
+
+**One clarifying question that changes the diagram:** "Are we designing global scale with our own CDN footprint, or a simpler 'videos on S3 + CloudFront' shape?" Either is fine — say which you assume.
+
+## Capacity: bytes dominate, not request count
+
+| Assumption | Value | Notes |
+| --- | --- | --- |
+| Subscribers | 250M | Order-of-magnitude global scale |
+| Watch hours per subscriber per day | 1.5 h | Peak evening skew ~3× average |
+| Average encoded bitrate (ABR mix) | 5 Mbps | Phone + TV blended guess |
+| Catalog size | 15k titles | Metadata is tiny vs video |
+| New titles per month | 100 | Ingest/encode is batch + spike |
+| Concurrent streams at peak | ~15% of evening DAU | Origin planning for misses |
+
+**Egress at peak (rough):** 250M × 40% evening active × 15% streaming concurrently × 5 Mbps ≈ tens of Tbps aggregate — you will not serve that from one origin region. This number exists to justify CDN-first architecture, not to size exact machines.
+
+**Metadata QPS:** Browse and search are high compared to a typical API, but still orders of magnitude below video segment fetches. A title page might be 10 KB JSON; one second of video is megabits.
+
+**Storage:** Masters are large (tens of GB per title); encoded outputs are smaller but numerous (many bitrates × many segments). Cold masters in object storage; hot encoded packages replicated to CDN origins.
+
+## High-level design: ingest, encode, publish, play
+
+| Component | Role |
+| --- | --- |
+| Catalog service | Title metadata, genres, artwork URLs, availability windows |
+| Upload / ingest | Accept mezzanine file; store master in object storage |
+| Transcoding pipeline | Job queue + workers; output HLS/DASH segments at multiple bitrates |
+| Origin storage | Packaged manifests + segments; source for CDN fill |
+| CDN | Edge caches segments; manifest routing; mid-tier origin shield |
+| Playback API | Returns signed manifest URL, DRM license path, resume offset |
+| Progress service | Write watch position every N seconds; read on resume |
+| Search / browse | Index over catalog; not on the hot playback path |
+
+<Steps>
+  <Step title="Ingest: master to object storage, job to queue">
+    Studio upload lands in a durable bucket. A message enqueues transcode jobs with profile list (360p–4K, AVC/HEVC). Ingest is async — a title is not playable until encoding completes and QA passes.
+  </Step>
+  <Step title="Transcode: parallel workers, segment output">
+    Workers produce fMP4 or MPEG-TS segments (~2–6 s each) per bitrate ladder rung. Manifest generator writes `.m3u8` or DASH MPD pointing at segment URLs. Failed chunks retry independently; progress tracked in a job store.
+  </Step>
+  <Step title="Publish to origin + CDN prefetch">
+    Packaged output copied to origin buckets per region. CDN prefetch or passive fill on first viewer request. Popular titles warm edges before release hour.
+  </Step>
+  <Step title="Play: client adaptive bitrate over CDN">
+    Client requests manifest from playback API (auth, geo, device capability). Player picks initial bitrate from network estimate, fetches segments from nearest edge, switches rungs on buffer health. Bytes flow CDN → client; origin sees only cache misses.
+  </Step>
+  <Step title="Resume: progress writes off the critical segment path">
+    Client heartbeats watch position every 30 s to progress service. On reopen, playback API includes start offset; player seeks in manifest. Progress loss of one heartbeat is fine; do not synchronously write progress per segment fetch.
+  </Step>
+</Steps>
+
+## Deep dive: adaptive streaming and the CDN fill problem
+
+### Adaptive bitrate (ABR) — what the player actually does
+
+The server does not "pick a quality" once. The player maintains a buffer (often 15–30 seconds ahead) and chooses the next segment's bitrate based on download throughput and buffer occupancy. Too aggressive → rebuffer when bandwidth dips. Too conservative → wasted pixels and higher egress cost.
+
+Each rung in the ladder is the same content at different encodes:
+
+```text
+manifest.m3u8
+  ├── 480p  ~1.2 Mbps  → seg_001.ts, seg_002.ts, ...
+  ├── 720p  ~2.5 Mbps  → seg_001.ts, seg_002.ts, ...
+  └── 1080p ~5.0 Mbps  → seg_001.ts, seg_002.ts, ...
+```
+
+Interview points: segments must be aligned across rungs so the player can switch mid-playback without a visible glitch (same keyframe boundaries). Encoding pipeline enforces GOP alignment — you do not need to implement it, but naming it signals you understand why transcode is not trivial ffmpeg one-liners.
+
+### CDN architecture — origin shield and thundering herd
+
+When a new episode drops, millions of clients request the same first segments simultaneously. Without caching, that is a synchronized miss storm on origin.
+
+Layers that survive it:
+
+- **Edge cache** — segments are immutable (content-addressed by `{title_id}/{bitrate}/{seq}`); long TTL is safe.
+- **Origin shield / mid-tier** — one POP per region collapses misses before they hit the central origin bucket.
+- **Signed URLs** — playback API returns time-limited URLs so the CDN cannot serve anonymous hotlinking; auth stays off the byte path where possible.
+
+Failure mode to name: origin meltdown during premiere presents as rebuffering everywhere, not a 500 on the homepage. Monitoring cache hit ratio and origin egress per title is how ops catches it.
+
+### Transcoding as a batch system, not a request handler
+
+A 4K master might produce hundreds of segment files × bitrates × audio tracks. This runs on a GPU/CPU farm behind a queue (01.08 Distributed Message Queue pattern). Prioritize by release date; throttle so one blockbuster ingest does not starve the weekly batch.
+
+Do not put encode on the user-facing path. Metadata service answers "is this title available to play?" separately from "encoding job 47% complete."
+
+<Callout type="tip">
+02.02 YouTube shares the same ingest → transcode → CDN → ABR playback skeleton. Netflix interviews often emphasize concurrent stream limits, resume, and premiere cache warming; YouTube prompts often emphasize upload-at-scale and long-tail catalog. Lead with the shared delivery pipeline, then differentiate.
+</Callout>
+
+<Tradeoff
+  forTitle="Own CDN footprint + origin shield when"
+  againstTitle="Managed CDN + single origin when"
+  forItems={[
+    "Aggregate egress is large enough that CDN cost and cache hit ratio directly affect margin",
+    "Premiere events create predictable synchronized miss storms you must pre-warm for",
+    "You need fine-grained control over mid-tier shield POPs per region",
+    "Custom segment packaging or DRM integration exceeds what a vanilla SaaS CDN exposes",
+    "Ops can run cache invalidation, fill monitoring, and per-title bandwidth dashboards",
+  ]}
+  againstItems={[
+    "Scale is interview-sized or early product — S3 + CloudFront (or equivalent) meets latency targets",
+    "Catalog is small and popularity is smooth, not premiere-shaped spikes",
+    "Team has no capacity to operate private edge infrastructure",
+    "DRM and signed URL requirements are met by a commercial CDN product out of the box",
+    "Time-box favors demonstrating ABR logic and metadata path over POP topology",
+  ]}
+/>
+
+## In an interview
+
+Start: *"Netflix is on-demand video delivery at CDN scale. I'll separate catalog metadata from the byte path: encode once into segmented ABR ladders, cache immutably at the edge, and let the player adapt bitrate based on buffer health."* Then clarify scope and assume 250M subscribers if they delegate numbers.
+
+Draw two pipelines: horizontal **ingest → transcode → origin** (batch, async) and horizontal **playback API → CDN → client ABR** (real-time, read-heavy). Connect them only at packaged manifest + segment URLs.
+
+Expect: "How does seek work?" (manifest byte-range or segment index + keyframe alignment), "What if CDN misses during launch?" (prefetch, shield, stagger release — not bigger origin alone), "Resume?" (async progress writes, read offset on play). Volunteer that conflating catalog DB with segment serving is the common weak answer — bytes never flow through Postgres.
+
+<KeyTakeaways
+  items={[
+    "Netflix interviews test video delivery — transcode, segment, CDN cache, adaptive bitrate — not catalog SQL alone",
+    "Capacity math is egress-dominated: concurrent streams × bitrate drives CDN and origin shield design, not metadata QPS",
+    "Ingest and transcode are async batch pipelines; playback is immutable segmented files fetched from CDN edges",
+    "ABR switches bitrate rungs per segment based on buffer and throughput; encodes must align keyframes across ladders",
+    "Premiere failures look like rebuffering from cache miss storms — origin shield, prefetch, and long-lived segment TTLs are the fix",
+    "Progress/resume is a separate low-rate write path; never block segment fetches on durable watch-position updates",
+  ]}
+/>

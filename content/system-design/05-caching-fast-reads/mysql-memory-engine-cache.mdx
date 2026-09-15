@@ -1,32 +1,84 @@
 ---
 title: "MySQL MEMORY Engine Cache"
 number: "05.07"
-summary: "MySQL MEMORY Engine Cache — notes in progress."
-status: draft
+summary: "An in-memory MySQL table as a cache — SQL access and familiar ops, with no durability, table-level locking history, and a ceiling that is still just RAM."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: intro
+estMinutes: 10
+tags: [caching, mysql, memory-engine, sql]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Caching without leaving the database process
 
-What breaks without this, and the situation that forces the decision.
+Not every hot read path needs Redis. Sometimes the data you want to keep in RAM already lives next to MySQL, the access pattern is relational (joins, secondary lookups, ad-hoc filters), and the team is unwilling to operate another fleet. MySQL's **MEMORY** storage engine (historically also called HEAP) stores table contents in RAM inside the database server: rows are addressable with ordinary SQL, indexes are hash or B-tree style in memory, and a restart empties the table.
 
-## How it works
+That last property is the whole product contract. MEMORY is a cache that speaks SQL, not a durable store that happens to be fast. Treat a crash or a restart as a flush. If you cannot reload the table from a durable source — another InnoDB table, a snapshot job, an application warm-up — you should not have put the only copy there.
 
-The mechanism, step by step.
+05.01 Caching Layers still applies: this is an application-adjacent or database-local cache layer, not a replacement for edge caching, and not a substitute for InnoDB when you need durability or row-level concurrency under mixed read/write load.
 
-## Tradeoffs
+## What you get, and what you pay
+
+**Gets you.** Sub-millisecond reads for data that fits in the server's memory budget, queryable with SQL your application already knows, transactional semantics only in the limited sense MEMORY supports (no crash-safe commits — the table is gone after a restart regardless). Useful for lookup tables, rate-limit buckets rebuilt periodically, session-like data with a reload path, or staging hot dimensions for joins against larger InnoDB fact tables.
+
+**Costs you.**
+
+- **Durability is zero.** `mysqld` restart, OOM killer, host failure — table is empty. Plan the rebuild explicitly.
+- **Size ceiling is RAM**, shared with InnoDB buffer pool, connections, and OS page cache. A MEMORY table that grows without bound crowds out the buffer pool that InnoDB needs for the durable data, which is a slow-motion outage: durable queries get worse because the "cache table" ate the memory.
+- **Concurrency model is not InnoDB's.** MEMORY traditionally uses table-level locking for writes; concurrent writers serialize. Fine for read-mostly reference data refreshed in batches; hostile as a general-purpose write-hot cache. (Engine details evolve — verify against your version — but do not assume row-level MVCC like InnoDB.)
+- **Types and features are restricted.** No `BLOB`/`TEXT` in older rulesets, limited transaction support, different index behavior (hash indexes are point-lookup oriented; they do not help range scans the way InnoDB B-trees do).
+
+| Property | MEMORY table | InnoDB table | Redis / Memcached |
+| --- | --- | --- | --- |
+| Durability | None across restart | Crash-safe (with redo) | None by default (optional in Redis) |
+| Access API | SQL | SQL | Key-value / data structures |
+| Typical locking | Table-level on writes | Row-level | Per-key operations, single-threaded command path in Redis |
+| Fits when | SQL + ephemeral + small | Source of truth | Shared across many app instances |
+| Ops surface | Same MySQL you already run | Same | New cluster, new failure domain |
+
+The middle column is the reminder: if you need durability, use InnoDB and lean on its buffer pool as the innermost cache (05.01). MEMORY is for when you explicitly want a separate ephemeral relation, not for "make this table faster" as a substitute for indexing and query design — 03.03 Database Indexing and 03.05 Query Planning fix more read problems than moving a table to MEMORY does.
+
+## When it is the right shape
+
+A worked pattern: a `country_id → country_metadata` map of a few megabytes, joined constantly, updated rarely via a controlled reload. Keep the canonical copy in InnoDB (or a config service). Load or swap into a MEMORY table on a schedule or on deploy. Readers hit MEMORY; a restart triggers reload from InnoDB. No Redis, no invalidate bus, no second language of TTLs — at the cost of everything living on the primary's RAM and write refreshes taking a table lock.
+
+Another pattern that looks tempting and usually is not: stuffing per-user session rows into MEMORY on the primary and calling it a session store. Cross-instance sharing works only if every app talks to that same MySQL; HA means MySQL HA; a restart logs everyone out unless you rebuild from somewhere else. That design wants a dedicated session store or a durable table, not MEMORY as an accident.
+
+<Callout type="tip">
+If the reason you reached for MEMORY is "the InnoDB buffer pool should already keep this hot," measure before inventing a second copy. An undersized buffer pool or a missing index often explains the slowness; a MEMORY twin then doubles memory pressure without fixing the root cause.
+</Callout>
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Use a MEMORY table when"
+  againstTitle="Use Redis/Memcached or plain InnoDB when"
+  forItems={[
+    "The working set is small, read-mostly, and naturally queried with SQL joins or filters",
+    "You already operate MySQL and adding a cache fleet is disproportionate to the problem",
+    "A full reload from a durable source after restart is simple and fast",
+    "Writers are rare or batched, so table-level write locking is acceptable",
+    "The data is explicitly ephemeral — a derived view, not the system of record",
+  ]}
+  againstItems={[
+    "Many application instances need a shared cache without sending all traffic through the database primary",
+    "You need row-level concurrency under sustained writes",
+    "The dataset may grow toward a meaningful fraction of the host's RAM and fight the InnoDB buffer pool",
+    "You need TTLs, eviction policies, and cluster failover as first-class cache features — 05.02 through 05.04",
+    "Durability matters; MEMORY cannot provide it regardless of how carefully you dump the table",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Introduce MEMORY as "an in-process, SQL-addressable cache inside MySQL with no durability," not as a mysterious faster engine. Say what reloads it after restart, how big it is allowed to be relative to the buffer pool, and why writes will not be the hot path. If the interviewer offers Redis, compare on purpose: Redis for shared multi-instance caching and data structures; MEMORY for small SQL-shaped ephemeral tables beside data you already store in MySQL. Willingness to say "I would not use MEMORY here" for sessions or large write-heavy data is part of the answer.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "MySQL MEMORY stores a table in RAM with SQL access and zero durability across restart — it is a cache, not a store",
+    "Size it explicitly so it cannot starve the InnoDB buffer pool that protects durable data",
+    "Write concurrency is historically table-level; prefer read-mostly or batched refresh patterns",
+    "Always pair MEMORY with a durable source and a rebuild plan; a restart is an expected flush",
+    "Prefer fixing indexes and buffer-pool sizing before cloning hot InnoDB data into MEMORY",
+    "Choose Redis when many app instances need a shared cache outside the database; choose MEMORY when SQL locality and simple ops outweigh that",
+  ]}
+/>

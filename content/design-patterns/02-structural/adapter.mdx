@@ -1,0 +1,107 @@
+---
+title: "Adapter"
+number: "02.01"
+summary: "Wrap a third-party API whose interface does not match yours so existing client code keeps working without forking the library."
+status: published
+free: true
+difficulty: core
+estMinutes: 13
+tags: [structural, integration, legacy]
+updated: "2026-09-15"
+---
+
+## Your analytics SDK speaks XML; your app speaks JSON
+
+The payment processor you integrated last quarter exposes `processPayment(cardNumber, expiry, amountCents)`. Your checkout service already calls `charge(PaymentRequest)` everywhere — thirty call sites, three teams, a test suite that mocks the old shape. The vendor is not going to rename their method for you, and rewriting every caller because one dependency changed its contract is the kind of churn that ships nothing for a sprint.
+
+That mismatch is the whole problem Adapter exists to solve. You cannot change the foreign interface — it is a library, a legacy mainframe endpoint, a partner's REST schema. You also should not scatter translation logic at every call site, because the mapping rules (field names, error codes, idempotency keys) belong in one place and will change when the vendor ships v3. Adapter is the object that owns that translation and exposes the interface your code already expects.
+
+This is not the same as building a nicer API on top of a messy subsystem — that is 02.05 Facade, which simplifies a *complex* surface. Adapter reconciles two *incompatible* surfaces. The subsystem behind the adapter may be trivial; the point is the shape mismatch, not the complexity.
+
+## How the roles fit together
+
+Four pieces, named the way the Gang of Four names them:
+
+- **Target** — the interface your client code already depends on (`PaymentGateway.charge(...)`).
+- **Adaptee** — the thing you cannot change (`LegacyStripeClient.processPayment(...)`).
+- **Adapter** — implements Target, holds an Adaptee, translates each call.
+- **Client** — talks only to Target; never sees Adaptee.
+
+<Steps>
+<Step title="Client calls the Target interface">
+The checkout service invokes `gateway.charge({ token, amount, currency })` exactly as before the vendor swap.
+</Step>
+<Step title="Adapter translates the request">
+The adapter maps `PaymentRequest` fields to the Adaptee's parameter order, converts currency to cents, attaches the merchant id the legacy SDK requires.
+</Step>
+<Step title="Adaptee does the real work">
+The third-party SDK hits the network. The adapter does not reimplement payment logic — it only reshapes the conversation.
+</Step>
+<Step title="Adapter maps the response back">
+Error code `E402` becomes `InsufficientFundsError`. A success payload becomes your domain's `ChargeResult`. The client receives Target types only.
+</Step>
+</Steps>
+
+Two mechanical variants matter in interviews:
+
+- **Object adapter** — composition: the adapter holds an Adaptee instance and delegates. This is what you reach for in Java, TypeScript, or any language without multiple inheritance.
+- **Class adapter** — inheritance: the adapter subclasses both Target and Adaptee. Works in C++ where you need to adapt at compile time; awkward when Adaptee is a concrete class you do not control.
+
+```typescript
+interface PaymentGateway {
+  charge(req: PaymentRequest): Promise<ChargeResult>;
+}
+
+class LegacyStripeAdapter implements PaymentGateway {
+  constructor(private legacy: LegacyStripeClient) {}
+
+  async charge(req: PaymentRequest): Promise<ChargeResult> {
+    const raw = await this.legacy.processPayment(
+      req.token, req.expiry, Math.round(req.amount * 100)
+    );
+    return { id: raw.tx_id, status: mapStatus(raw.code) };
+  }
+}
+```
+
+The snippet is ten lines, not eighty — the pattern's value is the boundary, not the implementation volume.
+
+<Callout type="gotcha">
+Do not let the adapter accumulate business rules. Validation, pricing, fraud scoring belong upstream. Once the adapter starts deciding *whether* to charge, it has become a Facade or a domain service wearing an adapter costume — and the next vendor swap means untangling policy from translation.
+</Callout>
+
+<Tradeoff
+  forTitle="Reach for Adapter when"
+  againstTitle="Skip Adapter when"
+  forItems={[
+    "A third-party or legacy interface cannot change and your codebase already depends on a different shape",
+    "Translation rules (field mapping, error remapping, unit conversion) must live in one place, not at every call site",
+    "You are swapping vendors or SDK versions and want callers untouched — only the adapter file changes",
+    "The Adaptee is usable as-is but exposes the wrong abstraction level (XML DOM when you want plain objects)",
+    "Tests mock a stable Target interface; swapping the real Adaptee behind the adapter does not rewrite the suite",
+  ]}
+  againstItems={[
+    "You control both sides and can change the client to match — an adapter adds a permanent indirection tax",
+    "The mismatch is one call in one file; a dedicated adapter class is ceremony without a second consumer",
+    "What you really need is to hide five subsystems behind one entry — that is Facade, not interface translation",
+    "You need to add optional behavior around an object at runtime — that is 02.04 Decorator, not reshaping an interface",
+    "The foreign API is so broken that wrapping it faithfully preserves the brokenness; sometimes you renegotiate the dependency instead",
+  ]}
+/>
+
+## In an interview
+
+Introduce it by the cost you are avoiding: "We have client code built against one interface and a library that speaks another — I'd put an adapter between them so we do not rewrite thirty call sites when the vendor changes." Draw Target on the left, Adaptee on the right, Adapter in the middle implementing Target and holding Adaptee. Expect the follow-up: "How is that different from Facade?" Facade reduces complexity of a subsystem you own; Adapter translates between two existing interfaces you did not design together. "Object or class adapter?" Say object adapter unless the language forces inheritance. "What about Proxy or Decorator?" Proxy controls *access* to an object with the *same* interface; Decorator *extends* behavior on the same interface. Adapter changes the interface shape itself.
+
+Name the failure mode before they ask: an adapter that silently drops fields or swallows error codes — the integration looks green in happy-path tests and fails in production on edge cases the mapping never handled.
+
+<KeyTakeaways
+  items={[
+    "Adapter exists when an existing interface and a foreign Adaptee cannot be made to match — translation belongs in one object, not at every call site",
+    "The Client depends on Target; the Adapter implements Target and delegates to Adaptee, mapping requests and responses both ways",
+    "Object adapter (composition) is the default; class adapter (multiple inheritance) is a C++-era special case",
+    "Adapter is not Facade — Facade simplifies complexity you own; Adapter reconciles incompatibility you inherited",
+    "Keep business logic out of the adapter; it translates shape, it does not decide policy",
+    "In interviews, contrast with Proxy (same interface, controlled access) and Decorator (same interface, stacked behavior)",
+  ]}
+/>

@@ -1,32 +1,87 @@
 ---
 title: "Bucketed Time Window Aggregation"
 number: "10.06"
-summary: "Bucketed Time Window Aggregation — notes in progress."
-status: draft
+summary: "Pre-aggregate events into fixed time buckets so dashboards sum a few rows instead of scanning the raw stream for every chart."
+status: published
 free: true
 difficulty: core
 estMinutes: 12
+tags: [aggregation, time-windows, analytics, bucketing]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Scanning raw events for every chart does not scale
 
-What breaks without this, and the situation that forces the decision.
+A dashboard that asks "requests per minute for service X over the last 24 hours" can be answered by filtering a raw event table. At low volume that is fine. At millions of events per minute it becomes a full scan dressed as a product feature — every refresh pays for the same aggregation again, and ad-hoc filters multiply the cost.
 
-## How it works
+The alternative is to decide the time grain up front, fold events into that grain as they arrive (or in a near-line job), and store one row — or one sketch — per `(metric_key, bucket_start)`. A day at one-minute grain is 1,440 buckets; a chart is a sum or merge across a contiguous range of those buckets, not across every raw event.
 
-The mechanism, step by step.
+## Pick a grain, then commit to how buckets close
 
-## Tradeoffs
+<Steps>
+  <Step title="Choose the finest grain you will query interactively">
+    Product graphs often want one-minute or five-minute buckets. Alerting may want ten-second buckets for a few hours of retention. Finer grain means more rows and more merge work; coarser grain means you cannot zoom without going back to raw events. Store raw (or sampled) events for re-aggregation; serve interactive queries from buckets — 10.07 Raw Events Vs Derived Analytics.
+  </Step>
+  <Step title="Assign each event to a bucket by event time">
+    `bucket = floor(event_timestamp / bucket_width) * bucket_width`. Use event time for analytics truth; processing time drifts with consumer lag and makes the same incident look like it happened when the job caught up. Late events need a policy: update the old bucket within a grace period, or spill to a correction stream.
+  </Step>
+  <Step title="Aggregate inside the open bucket">
+    Maintain in-memory counters, HLLs, Count-Min Sketches, or t-digests keyed by business dimensions for the current bucket. On each event, update the structure for that key. This is the same hot-path idea as 10.02 View Counting At Scale, scoped to a time interval that will close.
+  </Step>
+  <Step title="Seal the bucket and write an immutable aggregate">
+    When wall clock (plus allowed lateness) passes the bucket end, flush the aggregate to durable storage and start a new empty structure. Sealed buckets are cheap to cache and to merge upward (twenty 1-minute HLLs merge into a 20-minute HLL — 10.05 Mergeable Sketches For Analytics).
+  </Step>
+</Steps>
+
+Sliding windows ("last 15 minutes continuously") are usually implemented as a ring of fine buckets you sum on read, not as one structure that deletes arbitrary old events. Deleting from a Bloom filter or HLL is painful; dropping a whole bucket is trivial.
+
+<Callout type="note">
+Tumbling windows (aligned to clock boundaries) and sliding windows (every query shifts) are different UX, same storage trick: keep fine buckets, assemble the window at query time. Sliding does not require a different sketch type — it requires enough retained fine grain to cover the slide.
+</Callout>
+
+## Late data and the grace period
+
+Out-of-order events are normal once you have multiple producers and a queue. A strict seal-at-boundary rule undercounts whenever an event arrives after flush. Common pattern: keep the bucket writable for a grace period (30 seconds to a few minutes, depending on SLA), accept updates to already-"closed" buckets, and emit a revised aggregate version. Downstream readers either wait for watermark progress or show a provisional number marked as such. Systems that pretend lateness does not exist show mysterious dips at hour boundaries that "heal" later — operators chase ghosts.
+
+| Grain | Buckets per day | Good for | Painful for |
+| --- | --- | --- | --- |
+| 10 seconds | 8,640 | Short-term ops charts | Long-range retention cost |
+| 1 minute | 1,440 | Product analytics default | Sub-minute incident zoom |
+| 5 minutes | 288 | Coarse SLOs, cheaper storage | Fast spike shape |
+| 1 hour | 24 | Executive rollups | Almost any operational debug |
+
+Many pipelines keep two grains: fine for recent hot data, rolled-up coarse for cold history — same idea as hot/cold storage, applied to aggregates.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Pre-aggregate into time buckets when"
+  againstTitle="Query raw events (or a warehouse scan) when"
+  forItems={[
+    "The same time-range aggregates are read repeatedly by dashboards or alerts",
+    "Interactive latency matters and scanning the raw stream cannot meet it",
+    "You can name the grains and dimensions in advance (service, endpoint, campaign)",
+    "Sketches or counters per bucket stay small enough to flush and merge cheaply",
+    "Late data can be handled with a grace period or versioned bucket updates",
+  ]}
+  againstItems={[
+    "Query patterns are ad-hoc and dimensions are not known at ingest time",
+    "You need full-fidelity event lists, not totals or sketch queries, for every investigation",
+    "Volume is low enough that raw scans are cheap and pre-aggregation adds needless moving parts",
+    "Bucket definitions change weekly and you lack raw events to rebuild derived series",
+    "Correctness requires reading unaggregated facts inside an open transaction with the write path",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Say what you materialize: "I will fold events into one-minute buckets keyed by the dimensions we chart, seal them after a short lateness grace period, and answer dashboard ranges by summing or merging those buckets — raw events stay available for re-aggregation when someone invents a new dimension." Expect questions on event time versus processing time, and on how unique counts over a window must merge HLLs rather than add per-bucket estimates. Naming watermark and grace period shows you have seen late data in production, not only in a diagram.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Bucketed aggregation trades a fixed time grain for query cost that scales with number of buckets in range, not with raw event volume",
+    "Assign events by event time, keep a grace period for lateness, and version or revise buckets instead of pretending streams arrive in order",
+    "Sliding windows are usually a ring of fine sealed buckets merged at read time — dropping a bucket beats deleting from inside a sketch",
+    "Mergeable sketches per bucket compose into longer windows; summing HLL estimates does not equal a merged distinct count",
+    "Keep raw or sampled events when dimensions may change; buckets are derived speed layers, not the only copy of truth",
+    "Finer grains cost more storage and flush work; coarser grains lose shape — many systems keep fine recent and coarse historical rolls",
+  ]}
+/>

@@ -1,0 +1,100 @@
+---
+title: "Chain Of Responsibility"
+number: "03.01"
+summary: "When several handlers could answer a request, a chain lets each try in order without the caller knowing which one finally handled it."
+status: published
+free: true
+difficulty: core
+estMinutes: 13
+tags: [behavioral, middleware, decoupling]
+updated: "2026-09-15"
+---
+
+## One request, many possible owners
+
+A support ticket arrives: billing question, technical bug, account lockout, legal threat. Each type belongs to a different team, but the customer does not pick the team — they hit one "Contact us" form. Someone upstream has to decide who gets it, and that decision changes whenever you add a tier (VIP routing, fraud review, regional compliance) without changing the form itself.
+
+The naive fix is a growing `if/else` or `switch` in the entry point: check category, check plan tier, check country, check whether the user is flagged. That works until the fifth condition and the third team reorganisation. Every new handler edits the same function. Tests become a combinatorial grid. Worse, the caller — the web controller, the message consumer, the CLI — ends up knowing the full org chart.
+
+Chain of Responsibility moves the routing into the handlers. Each link knows only whether it can handle the request and who comes next. The caller sends the request to the head of the chain and stops caring.
+
+## Handlers, links, and the pass-or-handle decision
+
+Three roles:
+
+- **Handler** — declares a method like `handle(request)` and holds a reference to the next handler.
+- **Concrete handlers** — each implements a slice of the policy ("I take billing disputes under $500", "I take anything tagged `security`").
+- **Client** — builds the chain once and always invokes the head.
+
+The collaboration is always the same: try locally, succeed or forward.
+
+<Steps>
+<Step title="Client sends the request to the first handler">
+The client never branches on request type. It calls `chain.handle(request)` and trusts the chain to terminate somewhere.
+</Step>
+<Step title="Handler checks whether it applies">
+Each handler runs a cheap predicate — type, amount, header flag, user role. If it does not apply, it forwards to `next` without mutating the request unless enrichment is intentional (adding audit metadata is fine; silently dropping fields is not).
+</Step>
+<Step title="Handler processes or the chain ends">
+If the handler applies, it executes and returns a result. If no handler applies, the chain ends — that is a real outcome you must design for (404, escalate to human, dead-letter queue), not an accident.
+</Step>
+</Steps>
+
+```typescript
+interface SupportRequest { topic: string; amount?: number }
+
+abstract class Handler {
+  private next: Handler | null = null;
+  setNext(h: Handler) { this.next = h; return h; }
+  handle(req: SupportRequest): string {
+    if (this.canHandle(req)) return this.process(req);
+    return this.next?.handle(req) ?? "no handler matched";
+  }
+  protected abstract canHandle(req: SupportRequest): boolean;
+  protected abstract process(req: SupportRequest): string;
+}
+```
+
+HTTP middleware stacks are the production-shaped version: auth runs, then rate limiting, then routing, then the controller. Each layer can short-circuit with a response or call `next()`. Express, Koa, and ASP.NET Core all expose the same idea under different names.
+
+<Callout type="gotcha">
+A chain with no default handler fails silently — the request vanishes with no error surfaced to the client. Always make "nobody handled this" an explicit, logged, testable path, the same way you would for a 404 route.
+</Callout>
+
+## Ordering is policy, not plumbing
+
+The sequence of links is not neutral. Put auth before expensive work. Put cheap filters before I/O. Document the order where the chain is built — reordering links changes behaviour, and that change rarely shows up in a type checker.
+
+When handlers share mutable context (a request-scoped bag of attributes), keep writes idempotent and name who owns each key. Two handlers both setting `request.user` is how you get the wrong identity attached to an audit log.
+
+<Tradeoff
+  forTitle="Reach for a chain when"
+  againstTitle="Avoid a chain when"
+  forItems={[
+    "Multiple independent policies can apply to the same request type and the set of policies changes often",
+    "The caller should stay ignorant of which department or module ultimately handles the work",
+    "You want to add or reorder handlers at runtime or via configuration without recompiling the entry point",
+    "Each handler is a small, testable unit with a clear 'can I take this?' predicate",
+    "The workflow is naturally sequential — auth before business logic before logging — and short-circuiting early saves real work"
+  ]}
+  againstItems={[
+    "Exactly one handler should always run and the mapping from request to handler is stable — a plain map or switch is clearer",
+    "You need every handler to run, not the first match — that is a pipeline or event bus, not a responsibility chain",
+    "Debugging 'which link dropped this?' is too costly for your team size and you lack tracing through the chain",
+    "Order sensitivity is high but implicit — six handlers deep and nobody can explain why fraud runs after shipping",
+    "Latency budget is tight and walking a linked list of polymorphic calls adds overhead you cannot afford on the hot path"
+  ]}
+/>
+
+## In an interview
+
+Introduce it by the coupling you are removing: "I do not want the front door to know every downstream team." Draw a linear chain, not a web — interviewers will ask how this differs from Mediator (03.04 Mediator centralises; the chain decentralises along one axis). Expect follow-ups on where the chain is built (composition root, middleware registration), what happens when nothing matches, and how you test individual handlers without standing up the whole stack. Name the failure mode before they ask: silent drops when no handler claims the request, and subtle behaviour changes when link order shifts without anyone noticing.
+
+<KeyTakeaways items={[
+  "Chain of Responsibility decouples the sender from the receiver by giving each handler a chance to process or pass the request to the next link.",
+  "The caller talks only to the head of the chain; adding a new handler means inserting a link, not editing every call site.",
+  "Each handler implements the same interface with a local 'can I handle this?' check — keep that predicate cheap and side-effect free.",
+  "An unmatched request at the end of the chain is a designed outcome: return an error, escalate, or dead-letter — never fall through silently.",
+  "Link order is business policy; document it and test reordering explicitly because middleware stacks change behaviour when links move.",
+  "HTTP middleware is the everyday form of this pattern — short-circuit on response or call next() — even when nobody labels it GoF."
+]} />

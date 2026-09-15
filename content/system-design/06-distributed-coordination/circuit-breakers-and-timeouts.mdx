@@ -1,32 +1,100 @@
 ---
 title: "Circuit Breakers And Timeouts"
 number: "06.10"
-summary: "Circuit Breakers And Timeouts — notes in progress."
-status: draft
+summary: "Timeouts bound how long you wait; circuit breakers stop calling a sick dependency so retries do not finish the outage the dependency started."
+status: published
 free: true
 difficulty: core
 estMinutes: 12
+tags: [circuit-breaker, timeouts, resilience, cascading-failure]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The dependency that takes your service down with it
 
-What breaks without this, and the situation that forces the decision.
+Service A calls service B. B slows from 5 ms to 2 seconds under load. A's threads pile up waiting; A's own callers time out; A's autoscaler adds pods that all wait on B; B's queue grows further. Nobody deployed a bug. The call graph amplified a slow dependency into a site-wide outage. Retries without budgets make it worse — every timed-out call becomes three more calls into the same fire (02.09 Retries Timeouts And Idempotency).
 
-## How it works
+A **timeout** is the deadline on a single attempt: after N milliseconds you stop waiting and take a branch (fail, retry, degrade). A **circuit breaker** is a higher-level switch: after enough failures or timeouts, stop calling B for a cool-down period and fail fast (or serve a fallback) so A remains responsive and B gets room to recover. Timeouts answer "how long will I wait this time." Breakers answer "should I call at all right now."
 
-The mechanism, step by step.
+06.01 Distributed Systems Foundations already warned that a timeout is not proof the work failed. Circuit breakers inherit that ambiguity: opening the breaker is a load-shedding decision under uncertainty, not a declaration that B is dead forever.
 
-## Tradeoffs
+## Timeouts are budgets, not vibes
+
+Pick timeouts from the latency budget, not from folklore.
+
+- Work **backward from the client's SLO**. If the user-facing p99 budget is 300 ms and you have two sequential dependencies, each cannot honestly get a 500 ms timeout.
+- Separate **connect**, **request**, and **total** deadlines when the client library allows it — a hung TCP connect should not burn the whole budget the way a slow handler does.
+- Prefer **deadlines that propagate** (a remaining budget header or context deadline) over stacked fixed timeouts, so a deep call chain cannot accumulate "500 ms each" into multi-second waits.
+- Size retries with **backoff and a retry budget** (02.09): a timeout without a retry policy is incomplete; retries without a budget recreate the thundering herd.
+
+Order-of-magnitude anchors help interviews: same-datacenter RPC often lives in the low single-digit to tens of milliseconds when healthy; cross-region hops commonly cost tens to a couple hundred milliseconds. A timeout just above the healthy p99 plus a little headroom is a starting point — not a number copied from another company's blog.
+
+## Circuit breaker states
+
+Most breakers are a small state machine:
+
+<Steps>
+  <Step title="Closed — calls flow">
+    Failures and timeouts are counted (consecutive failures, or a failure-rate window). Below threshold, the dependency is treated as healthy.
+  </Step>
+  <Step title="Open — calls short-circuit">
+    Once the threshold trips, subsequent calls fail immediately (or hit a fallback) without touching the network. The sick dependency stops receiving traffic from this client. After a configured open duration, the breaker moves to half-open.
+  </Step>
+  <Step title="Half-open — probe">
+    A limited number of trial calls are allowed through. If they succeed, the breaker closes; if they fail, it opens again. This avoids flipping open forever and avoids dumping the full load the instant the cool-down ends.
+  </Step>
+</Steps>
+
+Breakers are usually **per dependency** (and often per endpoint or per shard), not one global switch for the whole process. A payment service being down should not open the breaker for the read-only profile store.
+
+| Control | Protects | Typical mis-tune |
+| --- | --- | --- |
+| Timeout | Thread/connection pools from unbounded waits | Too long → cascades; too short → false failure under load |
+| Retry | Transient blips | Unbounded retries → amplify outage |
+| Circuit breaker | Caller and callee from sustained failure | Too sensitive → flap; too dull → cascade anyway |
+| Bulkhead / pool limit | One dependency exhausting all workers | Shared pools across dependencies |
+| Load shed (02.13) | Overload admission | Shedding the wrong priority traffic |
+
+<Callout type="gotcha">
+Failing open with an empty fallback can look like success to metrics while serving wrong answers — cached emptiness, default permissions, zero balances. Pair breakers with explicit degraded-mode behavior and alerts on open state duration, not only on error rate.
+</Callout>
+
+## What the breaker cannot do
+
+It cannot make B correct. It cannot replace idempotency on the write path. It cannot save you if the "fallback" is another call into the same failing cluster. And a breaker that keys only on HTTP 5xx will miss the slow-B failure mode unless timeouts (or hedged-request failure) count as failures too — latency-induced cascades are the usual reason you wanted the breaker.
+
+Bulkheads — separate thread pools, connection pools, or containers per dependency — complement breakers: even with a slow call that has not yet tripped the breaker, a dedicated pool caps how much of A B can consume. Timeouts + pools + breakers + retry budgets are one design; any one alone is a partial fix.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Trip breakers and fail fast when"
+  againstTitle="Keep calling (with care) when"
+  forItems={[
+    "Error rate or timeout rate on a dependency is already high enough that more calls only deepen B's overload",
+    "A's thread or connection pool is approaching exhaustion waiting on B — protecting A matters for the rest of the site",
+    "A safe fallback exists: stale cache, default read, queue-for-later, or a clear user-visible degrade",
+    "The dependency is non-critical on this path — search suggestions should not take down checkout",
+    "You need a cool-down window so autoscaling and operators can stabilize B without a retry storm",
+  ]}
+  againstItems={[
+    "Failures are rare single blips; a breaker would flap open on noise and create self-inflicted outages",
+    "The path is a critical write with no safe fallback — fail fast without a queue may lose money or durable intent",
+    "Partial success matters and you can shed load more selectively (02.13 Load Shedding) than a binary open switch",
+    "You have not yet fixed timeout and pool sizing — a breaker papering over infinite waits hides the real bug",
+    "Multi-tenant traffic shares one breaker key and one noisy neighbor would black-hole everyone else",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Describe the cascade in one breath: "B slows, A waits, retries multiply, A falls over." Then place three controls: timeout from the SLO budget, retry with backoff and a budget, breaker that opens on timeout/error rate and serves a named fallback. Mention bulkheads if they ask how one dependency cannot consume all workers. Name the failure mode: breakers that ignore slowness, or fallbacks that look healthy while wrong. Tie it to partial failure (06.01) — open means "we stopped waiting," not "we know B rolled back."
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Timeouts bound a single attempt; without them, a slow dependency owns your thread pool and becomes your outage.",
+    "Circuit breakers stop calling a dependency after sustained failure so retries do not amplify the fire — fail fast or degrade until probes succeed.",
+    "Size timeouts from the client latency budget and prefer propagating deadlines over stacked fixed waits.",
+    "Count timeouts and latency failures toward the breaker trip — a breaker that only watches HTTP 5xx misses the common slow-death cascade.",
+    "Pair breakers with bulkheads (pool isolation), retry budgets, and explicit degraded-mode behavior — none of them replace the others.",
+    "A timeout still does not mean the remote work failed; breakers and retries on writes still need idempotency.",
+  ]}
+/>

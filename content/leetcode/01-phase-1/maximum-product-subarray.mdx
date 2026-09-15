@@ -1,0 +1,90 @@
+---
+title: "Maximum Product Subarray"
+number: "01.06"
+summary: "A negative flips min and max; track both running extremes so one sign change cannot hide the answer."
+status: published
+free: true
+difficulty: core
+estMinutes: 13
+tags: [array, dynamic-programming]
+updated: "2026-09-15"
+---
+
+## Sum was easy — product has a sign problem
+
+Find the contiguous subarray whose product is maximum. Unlike 01.05 Maximum Subarray, a negative number turns a running maximum into a running minimum. `[2, 3, −2, 4]` peaks at 6 from subarray `[2, 3]`, but `[−2, 3, −4]` needs the pair of negatives: product 24 from the whole array.
+
+Brute force over all subarrays is O(n²) — too slow at n = 2×10⁴. Kadane's extend-or-restart logic still applies, but the state at each index is not one number — it is **two**: the best product subarray ending here could be the largest or the smallest, because the smallest may become the largest after the next negative.
+
+## Track max and min ending here
+
+At each `nums[i]`, compute candidates: start fresh at `nums[i]`, extend the previous max, extend the previous min (the min captures "large negative waiting for another negative").
+
+```
+newMax = max(nums[i], prevMax * nums[i], prevMin * nums[i])
+newMin = min(nums[i], prevMax * nums[i], prevMin * nums[i])
+```
+
+Update global `maxProd` with `newMax`. Zeros reset the chain — both running extremes become 0 until the next element restarts.
+
+Example `[2, 3, −2, 4]`: after 3, max ending = 6. After −2, max ending = −2 (restart beats extend). After 4, max ending = 4. Global best stays 6.
+
+## Solution
+
+```ts
+function maxProduct(nums: number[]): number {
+  let maxEnding = nums[0];
+  let minEnding = nums[0];
+  let maxProd = nums[0];
+
+  for (let i = 1; i < nums.length; i++) {
+    const n = nums[i];
+    const candidates = [n, maxEnding * n, minEnding * n];
+    maxEnding = Math.max(...candidates);
+    minEnding = Math.min(...candidates);
+    maxProd = Math.max(maxProd, maxEnding);
+  }
+
+  return maxProd;
+}
+```
+
+Time **O(n)**, space **O(1)**.
+
+<Tradeoff
+  forTitle="Dual-track Kadane when"
+  againstTitle="Log-transform or prefix when"
+  forItems={[
+    "Integers include negatives and zeros — sign flips are the whole problem",
+    "O(n) single pass is required; O(n²) subarray enumeration fails",
+    "You need the maximum product, not sum — 01.05's one-track Kadane is insufficient",
+    "Values stay within normal integer range without overflow follow-up",
+    "Contiguous constraint is fixed",
+  ]}
+  againstItems={[
+    "All entries positive — maximum product subarray is the whole array or greedy scan without min tracking",
+    "Overflow follow-up — track log sums or use bigint, then exponentiate carefully",
+    "Non-contiguous maximum product subset — sort and take positives/evens of negatives",
+    "Need the actual subarray indices — same loop but store backpointers",
+    "Teaching brute force first on n ≤ 20 inputs",
+  ]}
+/>
+
+## In an interview
+
+Contrast with Maximum Subarray immediately — product is not sum, negatives swap roles. Example with two negatives producing large positive.
+
+State the invariant: `maxEnding` / `minEnding` are best and worst products among subarrays ending at i. Mention zero as hard reset.
+
+Follow-ups: return subarray bounds, handle overflow, all-zero edge. Bug: tracking only max and missing the path where prevMin × negative becomes the new max.
+
+<KeyTakeaways
+  items={[
+    "Maximum Product Subarray requires tracking both max and min products ending at each index because a negative flips them",
+    "Each step considers three choices: start at nums[i], extend max chain, extend min chain",
+    "O(n) time, O(1) space — Kadane-shaped but with paired state",
+    "Zeros break multiplicative chains; treat them like restart points",
+    "01.05 Maximum Subarray is the sum-only special case without min tracking",
+    "All-positive arrays degenerate to simple scanning — dual track is for mixed signs",
+  ]}
+/>

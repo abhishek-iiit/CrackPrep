@@ -1,0 +1,126 @@
+---
+title: "Snapshot Array"
+number: "02.33"
+summary: "Record only changed indices per snapshot so reads at past versions avoid copying the whole array."
+status: published
+free: true
+difficulty: deep
+estMinutes: 18
+tags: [design, array, hash-map]
+updated: "2026-09-15"
+---
+
+## Snapshots without copying 10⁵ slots every time
+
+Implement an array-like structure with `set(index, val)`, `snap()` returning a snapshot id, and `get(index, snap_id)` returning the value at that index **as of that snapshot**.
+
+The naive approach copies the entire array on every `snap()`. With length up to 5×10⁴ and many snapshots, that is O(n) per snap and O(n × snaps) memory — too slow and too large.
+
+Most indices do not change between snapshots. Only record **(snap_id, value)** pairs for indices that were actually written. Unchanged slots implicitly keep their value from the previous effective version. Reading walks a short change log for one index and picks the latest entry with `snap_id ≤ query`.
+
+## Lazy per-index version lists
+
+Keep `changes: Map<number, [number, number][]>` — for each index, a chronological list of `[snap_id, value]` written at or before that snap. Also track `snapId` (incremented on each `snap()`) and optionally a `defaults` array for indices never touched.
+
+- **set(index, val):** append `[snapId, val]` to `changes[index]` (create list if needed). Sets before the next snap use the current `snapId` — they belong to the version being built.
+- **snap():** return current `snapId`, then increment it. Future sets attach to the new version.
+- **get(index, snap_id):** binary search (or linear scan on short lists) the change list for the rightmost entry with `entry_snap ≤ snap_id`. If no entry, return 0 (initial default).
+
+<Steps>
+<Step title="set records (current snapId, value)">
+  Do not mutate a global array in place — append to the index's history.
+</Step>
+<Step title="snap freezes the current version id">
+  Return `snapId++` so subsequent sets tag a new generation.
+</Step>
+<Step title="get resolves the effective value at snap_id">
+  Floor search on that index's list; default 0 if never set before snap_id.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+class SnapshotArray {
+  private snapId = 0;
+  private changes = new Map<number, [number, number][]>();
+
+  constructor(length: number) {
+    // all indices start at 0; untouched indices need no storage
+  }
+
+  set(index: number, val: number): void {
+    if (!this.changes.has(index)) this.changes.set(index, []);
+    this.changes.get(index)!.push([this.snapId, val]);
+  }
+
+  snap(): number {
+    return this.snapId++;
+  }
+
+  get(index: number, snapId: number): number {
+    const history = this.changes.get(index);
+    if (!history) return 0;
+
+    let lo = 0;
+    let hi = history.length - 1;
+    let ans = 0;
+
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (history[mid][0] <= snapId) {
+        ans = history[mid][1];
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+
+    return ans;
+  }
+}
+```
+
+`set` is **O(1)** append. `snap` is **O(1)**. `get` is **O(log m)** where m is the number of writes to that index (often ≪ n). Space is **O(total writes)**, not O(n × snaps).
+
+<Callout type="tip">
+  The same lazy versioning idea appears in persistent data structures and copy-on-write file systems — only diffs are stored.
+</Callout>
+
+<Tradeoff
+  forTitle="Lazy change logs when"
+  againstTitle="Full copy on snap when"
+  forItems={[
+    "Most indices are unchanged between snapshots — sparse writes are the common case",
+    "snap() is called often and n is up to 5×10⁴",
+    "Reads target single indices at past versions, not full array reconstruction",
+    "Write history per index stays short relative to total snaps",
+    "Memory must scale with changes, not n × number of snapshots",
+  ]}
+  againstItems={[
+    "Every snap must materialize the full array for bulk export",
+    "Writes touch most indices every snap — copying is simpler and similarly expensive",
+    "get(snap) must return the entire array frequently — store full snapshots",
+    "Implementation time is limited and n · snaps is small enough to brute force",
+    "You need O(1) get and can pay O(n) snap with a 2D array preallocated",
+  ]}
+/>
+
+## In an interview
+
+Describe the API with snap ids: set at snap 0, snap returns 0, more sets, snap returns 1, get with snap_id reads historical state. Clarify default value is 0 and set only affects future snaps after the current snap id boundary.
+
+Explain why full copy fails at scale, then lazy per-index logs with floor binary search on snap_id. Call out that `set` tags the **current** snapId before increment.
+
+Follow-ups: persistent array with rollback, or merge snapshots. Bug to mention: incrementing snapId before recording a set would assign writes to the wrong version.
+
+<KeyTakeaways
+  items={[
+    "Snapshot Array avoids O(n) copy per snap by storing sparse (snap_id, value) histories per index",
+    "get(index, snap_id) is floor binary search on that index's write list",
+    "Unchanged indices cost zero storage until first set",
+    "snap() is O(1); cost moves to get proportional to writes on that index",
+    "The pattern generalizes to any versioned store with mostly unchanged slots",
+    "Default value 0 applies when an index has no history at or before snap_id",
+  ]}
+/>

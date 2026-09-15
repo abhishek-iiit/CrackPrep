@@ -1,32 +1,106 @@
 ---
 title: "Blocklist Versioned File Metadata"
 number: "13.11"
-summary: "Blocklist Versioned File Metadata — notes in progress."
-status: draft
+summary: "How an ordered list of block hashes plus a monotonic file version becomes the atomic publish unit for chunked sync — and why metadata, not bytes, defines the file."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [blocklist, versioning, metadata, file-sync]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The file the user sees is a pointer, not a blob
 
-What breaks without this, and the situation that forces the decision.
+Once content lives in content-addressed blocks (13.10 Fixed Block Chunking And Content Addressing), the thing named `budget.xlsx` in the namespace is metadata: a path, a version, size, timestamps, and an ordered **blocklist** — the sequence of block hashes that concatenate to the file bytes. Sync correctness hangs on that indirection. Bytes can land in any order, retry forever, and dedupe across the world; the moment a client is allowed to *see* a new version is the moment the metadata pointer swings atomically to a blocklist whose every hash is already durable.
 
-## How it works
+Get this wrong and you get torn reads: a reader assembles block 0 from version 5 and block 1 from version 6, or follows a hash the GC already deleted. The block store can be perfect and the product still corrupts files.
 
-The mechanism, step by step.
+## What the metadata record carries
 
-## Tradeoffs
+A practical versioned file record looks like this in spirit — field names vary, the roles do not:
+
+```text
+path:         /docs/budget.xlsx
+file_id:      f_9c2a…          # stable across renames if you support them
+version:      17               # monotonic per file_id
+size:         8432912
+mtime:        2026-09-15T08:01:12Z
+content_hash: sha256:…         # optional whole-file hash for quick equality
+blocks:       [h0, h1, h2, …]  # ordered blocklist
+state:        ready | uploading | tombstoned
+parent_version: 16             # for conditional commits / conflict detection
+```
+
+The blocklist may be inlined for short files or stored as its own content-addressed object when a file has tens of thousands of blocks — metadata rows should stay small enough to list directories cheaply. Directory listings return versions and hashes, not block payloads; that separation is what keeps reconcile chatty but light (13.09 Remote File Sync Design).
+
+## Publish protocol
+
+<Steps>
+  <Step title="Create an uploading version">
+    Client reserves version `n+1` in `uploading` state (or holds an upload lease) so concurrent writers conflict early instead of both assuming they own the next number.
+  </Step>
+  <Step title="Put all blocks">
+    Write content-addressed blocks until every hash in the prospective blocklist exists. This phase is idempotent and restartable; metadata still points at version `n` for readers.
+  </Step>
+  <Step title="Commit the blocklist">
+    Conditionally update metadata: only if `parent_version` still matches (compare-and-swap / `If-Match`). Set `blocks`, `size`, `content_hash`, flip `state` to `ready`, advance `version`. Losers of the CAS take the conflict path.
+  </Step>
+  <Step title="Readers pin a version">
+    Open/download captures `(file_id, version)` or the blocklist snapshot at open time so a concurrent commit does not change blocks mid-read.
+  </Step>
+</Steps>
+
+Tombstones are metadata too: a new version with `state: tombstoned` and empty blocks, retained until every client has seen the delete and GC can drop unreferenced blocks. Skipping tombstones resurrects files from stale writers.
+
+| Operation | Metadata effect | Block store effect |
+| --- | --- | --- |
+| First upload | version 1 → ready + blocklist | insert missing blocks |
+| Overwrite | version n+1 CAS from n | insert new hashes; old hashes linger until GC |
+| Append-friendly edit | new blocklist, mostly shared prefix hashes | only dirty/tail blocks written |
+| Delete | tombstone version | none until GC proves unreferenced |
+| Rename | path change, same file_id/version | none |
+
+<Callout type="warn">
+Never mutate a ready version's blocklist in place to "save a version number." In-place edits race with readers who already pinned that version and break any external etag or sharing link that assumed immutability. Always allocate a new version; GC cleans the old hashes later.
+</Callout>
+
+## Why versioning metadata beats versioning whole objects
+
+Object-storage versioning of a monolithic file gives you history but not cheap deltas. Blocklist versioning gives history *and* shared blocks across versions — version 18 might share 99% of hashes with version 17. Caching, CDN, and partial fetch all key off hashes; the metadata layer is the only place that knows order and membership.
+
+Snapshots of a folder are then a consistent cut of `(path → version)` references, not a freeze of the whole block store. That is how a sync product offers "restore this directory to Tuesday" without cloning every byte.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Versioned blocklist metadata when"
+  againstTitle="Monolithic per-file objects when"
+  forItems={[
+    "Files are chunked and multiple versions must share blocks for cost and speed",
+    "You need CAS/conditional commit so two writers cannot silently clobber without detection",
+    "Readers must never observe a partially uploaded new version",
+    "Directory reconcile should exchange compact version vectors / etags, not file bodies",
+    "Point-in-time restore of a tree is a metadata snapshot plus retained blocks",
+  ]}
+  againstItems={[
+    "Every object is small and replaced whole — object etags alone are enough",
+    "A single writer and whole-file puts already meet durability without a block layer",
+    "You cannot staff GC of unreferenced blocks or tombstone retention yet",
+    "The storage API is a black-box object store you do not control and cannot add block indexing to",
+    "Consistency requirements force wrapping an existing DB document model rather than a hash list",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Say the quiet part first: "The file is a versioned blocklist; blocks are immutable and content-addressed; publish is a compare-and-swap of metadata after all hashes exist." Walk a concurrent edit: both upload blocks, one CAS wins, the other gets a conflict and must rebase or produce a conflict copy. If asked how download stays consistent, pin the version at open. Tie GC to "blocks live as long as any ready or uploading version references them," and mention tombstones so deletes converge.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "With chunked storage, the authoritative file is versioned metadata plus an ordered blocklist of content hashes — not a single mutable blob",
+    "Readers must only follow ready versions whose blocks are all present; publish swings the pointer only after that invariant holds",
+    "Conditional commits on parent version detect concurrent writers; in-place mutation of a ready blocklist races readers and breaks immutability",
+    "Tombstone versions make deletes sync correctly; absence of a path is not a reliable signal under offline writers",
+    "Blocklists can be inlined or stored as blobs themselves so directory listings stay small while multi-GB files still version cheaply",
+    "Folder snapshots are consistent maps of path to file version; shared blocks across versions are what make history affordable",
+  ]}
+/>

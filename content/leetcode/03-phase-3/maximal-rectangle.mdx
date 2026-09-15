@@ -1,0 +1,124 @@
+---
+title: "Maximal Rectangle"
+number: "03.33"
+summary: "Treat each matrix row as a histogram base — stack the running column heights and reuse 02.41 Largest Rectangle in Histogram per row."
+status: published
+free: true
+difficulty: deep
+estMinutes: 19
+tags: [stack, matrix, monotonic-stack]
+updated: "2026-09-15"
+---
+
+## A 2D rectangle is a 1D histogram in disguise
+
+Given a binary matrix of `'0'` and `'1'`, find the largest rectangle containing only `'1'`s. In
+
+```
+1 0 1 0 0
+1 0 1 1 1
+1 1 1 1 1
+1 0 0 1 0
+```
+
+the answer is 6 — the block of ones in rows 2–3, columns 2–4.
+
+Brute force picks every top-left and bottom-right corner — O(m²n²) or O(m²n) with row min scans. Too slow for matrices up to 200×200.
+
+The reframe: fix a bottom row `r`. For each column `c`, `heights[c]` = number of consecutive `'1'`s ending at row `r` (reset to 0 on `'0'`). Any all-ones rectangle whose bottom edge is row `r` becomes a rectangle in that histogram. Run **02.41 Largest Rectangle in Histogram** on `heights` for each row.
+
+## Row-by-row histogram + monotonic stack
+
+Maintain `heights` length `n`. Scan rows top to bottom:
+
+- `'1'` → `heights[c]++`
+- `'0'` → `heights[c] = 0`
+
+After updating a row, compute max rectangle area in O(n) with a monotonic increasing stack (same sentinel trick as 02.41).
+
+<Steps>
+<Step title="Initialize heights[n] = 0 and global maxArea = 0">
+  Each column tracks streak height of ones ending at current row.
+</Step>
+<Step title="For each row, update heights from matrix cells">
+  Zero breaks the streak; one extends it.
+</Step>
+<Step title="Run largestRectangleArea(heights) and merge into maxArea">
+  Stack finds nearest smaller boundary per bar in linear time.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function maximalRectangle(matrix: string[][]): number {
+  if (matrix.length === 0) return 0;
+  const cols = matrix[0].length;
+  const heights = new Array(cols).fill(0);
+  let maxArea = 0;
+
+  for (const row of matrix) {
+    for (let c = 0; c < cols; c++) {
+      heights[c] = row[c] === "1" ? heights[c] + 1 : 0;
+    }
+    maxArea = Math.max(maxArea, largestRectangleArea(heights));
+  }
+  return maxArea;
+}
+
+function largestRectangleArea(heights: number[]): number {
+  const sentinel = [0, ...heights, 0];
+  const stack: number[] = [];
+  let maxArea = 0;
+
+  for (let i = 0; i < sentinel.length; i++) {
+    while (stack.length && sentinel[stack[stack.length - 1]] > sentinel[i]) {
+      const h = sentinel[stack.pop()!];
+      const left = stack.length ? stack[stack.length - 1] : -1;
+      maxArea = Math.max(maxArea, h * (i - left - 1));
+    }
+    stack.push(i);
+  }
+  return maxArea;
+}
+```
+
+Time **O(m · n)** — n stack work per row. Space **O(n)** for heights and stack.
+
+<Tradeoff
+  forTitle="Histogram per row + stack when"
+  againstTitle="Expand every cell as center when"
+  forItems={[
+    "Matrix is up to 200×200 — O(mn) with linear stack per row is the standard optimal approach",
+    "You already know 02.41 Largest Rectangle in Histogram — this problem is that algorithm m times",
+    "All-ones rectangles must align with histogram bases — the stack gives exact width at each height",
+    "Follow-ups include 03.34 Trapping Rain Water (1D elevation) and maximal square variants",
+    "Binary matrix input maps cleanly to non-negative integer heights",
+  ]}
+  againstItems={[
+    "Matrix is tiny — double loop on corners with O(n) row scan may be faster to implement",
+    "Interviewer only wants the O(n²) 'for each row, two arrays of left/right bounds' without stack",
+    "You need the rectangle coordinates, not just area — track indices during stack pop",
+    "Matrix is mostly zeros — skipping rows where heights are all zero saves constant factors only",
+    "03.45 Sum of Subarray Minimums is stack-adjacent but not a direct substitute",
+  ]}
+/>
+
+## In an interview
+
+Walk the 4×5 example; answer 6. Confirm `'1'`/`'0'` chars and rectangular (not necessarily square) output.
+
+Say: reduce 2D to 1D by cumulative column heights per row, then nearest-smaller-element stack from 02.41. Mention O(mn) total.
+
+Follow-ups: maximal square of ones, count rectangles, sparse matrix. Bug: forgetting to reset `heights[c]` to 0 on `'0'`, which lets a rectangle span a broken column.
+
+<KeyTakeaways
+  items={[
+    "Maximal Rectangle builds a histogram of consecutive ones per column for each row as the bottom edge",
+    "Largest area for row r equals largest rectangle in histogram of column streak heights — 02.41 machinery",
+    "Monotonic stack with sentinel zeros computes each row's histogram max in O(n)",
+    "Total time O(m·n), space O(n) beyond the matrix",
+    "A `'0'` in column c at row r zeroes heights[c] — the streak must be contiguous vertically",
+    "Same stack family as 02.41 and 02.39 Daily Temperatures; 03.34 Trapping Rain Water uses elevation, not binary histograms",
+  ]}
+/>

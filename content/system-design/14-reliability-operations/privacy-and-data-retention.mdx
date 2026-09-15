@@ -1,32 +1,85 @@
 ---
 title: "Privacy And Data Retention"
 number: "14.11"
-summary: "Privacy And Data Retention — notes in progress."
-status: draft
+summary: "How purpose limitation, minimization, and user rights shape what you store and how long you keep it — the compliance framing that retention engineering has to implement."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: intro
+estMinutes: 10
+tags: [privacy, retention, compliance, minimization]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Collecting everything "in case we need it" is a liability with a schema
 
-What breaks without this, and the situation that forces the decision.
+Privacy-aware retention starts before a lifecycle job: it starts with **why** a field exists. Purpose limitation says data collected for billing should not silently become an advertising dossier. Data minimization says you should not store precise GPS forever if city-level analytics would do. User rights — access, export, erasure — turn those principles into product features and operational deadlines. 14.10 Data Retention And Deletion is how deletion converges across stores; this lesson is how you decide *what* must exist, for *which* purpose, and for *how long*, including when "delete" means something weaker than physical destruction.
 
-## How it works
+Design interviews often skip this and draw a data lake that keeps raw events forever. That lake is a breach blast radius and a retention lawsuit waiting for a jurisdiction.
 
-The mechanism, step by step.
+## Map purpose to fields to clocks
 
-## Tradeoffs
+For each personal data category, write three things:
+
+1. **Purpose** — authentication, fraud, fulfillment, analytics, legal obligation.
+2. **Legal basis / necessity** — contractual need, consent, legitimate interest, statutory retention (you are not a lawyer; you are naming the design constraint the lawyer will refine).
+3. **Retention clock** — aligned to purpose end (subscription ends + N days), absolute maximum, or event-triggered (erase when user requests, subject to holds).
+
+When purposes disagree — fraud wants 2 years of payment tokens history, marketing wants the same email forever — **split the stores or fields**. One mutable user profile that every team dumps columns into makes purpose-based deletion impossible.
+
+| Request | What the system must do | Design implication |
+| --- | --- | --- |
+| Access / export | Produce personal data in a reasonable package | Inventory of stores; export job; rate limits against scraping |
+| Erasure | Stop processing and remove or anonymize where required | Tombstone pipeline (14.10); exceptions registry |
+| Restriction / hold | Limit processing without full erase | Flags that block secondary use |
+| Portability | Machine-readable export | Stable schemas, not only PDF dumps |
+
+## Anonymization is not a magic word
+
+Hashing an email with a static salt is pseudonymization — still personal data if someone can reverse it. Aggregation, dropping identifiers, and true k-anonymity-style releases are stronger but destroy joinability. Product analytics often needs a middle path: separate identity tables with short retention from event tables keyed by rotating pseudonymous ids. When erasure arrives, deleting the identity link renders historical events non-personal *if* no other quasi-identifiers re-identify — which is a higher bar than most teams assume. Be honest in designs: "we anonymize" needs a mechanism, not a hope.
+
+<Callout type="note">
+Backups and logs complicate erasure timelines. Policies usually allow residual copies until backup expiry if operationally unavoidable — but then backup retention *is* privacy retention, and access to restores must be controlled. Saying "we delete immediately everywhere" while keeping 30-day backups of full snapshots is a statement you should not make casually.
+</Callout>
+
+## Minimize at collection and at write
+
+- Do not log authorization headers, raw passwords, full card numbers, or plaintext tokens.
+- Prefer server-side derived signals over storing sensitive raw payloads.
+- Default analytics SDKs off for PII fields; allowlists beat blocklists.
+- Region-pin data when residency rules require it — privacy retention includes *where*.
+
+Security abuse prevention (14.12) often wants more retention; privacy wants less. The resolution is purpose-separated stores with independent clocks, not a single "keep forever for safety" lake.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Keep personal data longer when"
+  againstTitle="Minimize or erase sooner when"
+  forItems={[
+    "A statutory or contractual obligation explicitly requires a retention period",
+    "Fraud, security, or dispute resolution cannot operate without a defined historical window",
+    "The purpose is active and minimization would break the product the user still uses",
+    "Holds for litigation or investigation are in effect for specific records",
+    "Aggregates are insufficient and you have a documented necessity for identifiable history",
+  ]}
+  againstItems={[
+    "Purpose has ended — the contract finished, consent withdrawn, or feature deprecated",
+    "A less identifying substitute (aggregate, pseudonym with broken linkability) meets the need",
+    "Breach impact or regulatory exposure of the dataset outweighs speculative future analytics",
+    "You cannot name an owner or purpose for the field — that is a minimization candidate",
+    "Derived systems duplicated the data without a retention story — fix copies rather than extend them",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Show that retention is a privacy design, not only an ops job: "I bind fields to purposes and retention clocks, separate fraud history from marketing profiles, and implement erasure as a multi-store workflow with honest backup residual windows." Mention minimization at logging and collection. If asked about GDPR-style rights, describe export and erase as product requirements that need inventory — you cannot delete what you have not mapped.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Privacy retention starts with purpose limitation and minimization — why a field exists decides how long it may live",
+    "Conflicting purposes need separated data, not one mega-profile every team extends",
+    "Access, export, and erasure are product capabilities that require a data inventory across stores",
+    "Pseudonymization is not anonymization; erasure designs must say what becomes unlinkable and what does not",
+    "Backup and log residual copies are part of the privacy timeline — do not claim instant global erasure if snapshots linger",
+    "Security and analytics retention pressures are resolved with separate clocks and stores, not infinite unified history",
+  ]}
+/>

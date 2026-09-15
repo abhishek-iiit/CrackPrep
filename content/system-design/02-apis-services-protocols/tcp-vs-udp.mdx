@@ -1,32 +1,87 @@
 ---
 title: "TCP Vs UDP"
 number: "02.04"
-summary: "TCP Vs UDP — notes in progress."
-status: draft
+summary: "TCP and UDP disagree about whose job it is to notice a lost packet and fix it — the transport's, once, or the application's, only where it matters."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 15
+tags: [tcp, udp, transport, networking]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Reliability is work, and someone has to do it
 
-What breaks without this, and the situation that forces the decision.
+Every packet sent over IP can be lost, duplicated, or reordered, and IP itself does nothing about any of it — it's a best-effort delivery layer by design. TCP and UDP are the two answers to what happens next. TCP does the work: it detects loss, retransmits, puts bytes back in order, and slows down when the network is congested, so the application above it can treat the connection as a reliable, ordered stream. UDP does none of it — a datagram either arrives once, arrives more than once, arrives out of order, or doesn't arrive at all, and the application only finds out if it goes looking. Choosing between them is choosing who pays for correctness: the transport layer, once, in a way every application gets for free, or your own application, on its own terms, only where it actually matters.
 
-## How it works
+## What TCP actually does
 
-The mechanism, step by step.
+<Steps>
+  <Step title="Establish the connection">
+    A three-way handshake — SYN from the client, SYN-ACK from the server, ACK from the client — exchanges initial sequence numbers before either side sends application data. That's one full round trip spent before the first byte of payload goes anywhere, and if the connection also needs TLS, that's a further round trip on top under TLS 1.3, more under TLS 1.2, so a cold HTTPS connection can spend two round trips just getting set up. Over a cross-region path in the tens of milliseconds each way, that's on the order of 100 ms of pure setup latency before any real work starts — a ballpark to reason with, not a benchmark, since it moves with the actual path and whether TLS session resumption applies. It's exactly why keeping connections open — HTTP keep-alive, connection pooling, HTTP/2's single long-lived connection — matters as much as it does at scale.
+  </Step>
+  <Step title="Number every byte">
+    Each byte in the stream gets a sequence number. That's what lets the receiver detect a gap (a segment never arrived), detect a duplicate (the same segment arrived twice, maybe because a retransmission and the original both got through), and reassemble segments that arrived out of order back into the original byte order before handing them to the application.
+  </Step>
+  <Step title="Acknowledge and retransmit">
+    The receiver acknowledges data it has received; the sender starts a retransmission timer for anything unacknowledged, and resends it if the timer fires or enough duplicate acknowledgments arrive to signal a gap. The application never sees the gap or the retransmit — it sees a delayed, but complete and ordered, stream.
+  </Step>
+  <Step title="Control the flow and the congestion">
+    Two separate limits govern how fast data can move. Flow control is about the receiver: it advertises a window of how much unacknowledged data it can currently buffer, so a fast sender can't overrun a slow receiver. Congestion control is about the network in between: a new connection starts sending slowly (slow start) and ramps up until it detects loss, which it treats as a signal the network is saturated, then backs off and probes upward again. This is why a fresh, idle TCP connection is measurably slower than a long-lived one carrying the same workload — it hasn't earned its way up to the available bandwidth yet.
+  </Step>
+  <Step title="Tear down cleanly">
+    A four-way close (FIN, ACK, FIN, ACK) lets either side finish sending before the connection is released, so data in flight at close time isn't silently dropped.
+  </Step>
+</Steps>
 
-## Tradeoffs
+## What UDP does instead: almost nothing, on purpose
+
+A UDP datagram is a payload with an 8-byte header — source port, destination port, length, checksum — handed to IP with no handshake, no sequence numbers, no retransmission, and no congestion backoff. Send it and it's gone: the network either delivers it or it doesn't, and UDP itself will never tell you which. That absence is the entire feature. There's no connection state to establish, so the first packet you send can carry data, and there's no per-connection memory on either side to maintain.
+
+That fits two very different kinds of use case. The first is workloads where a single round trip with no persistent connection is the entire interaction — a DNS query is one request, one response, and retrying a lost one from scratch costs about the same as TCP would have cost to set up a connection in the first place, so DNS just doesn't bother with one. The second is workloads where TCP's own guarantees actively work against you: real-time audio and video, and multiplayer game state, where a packet that arrives late is often worse than a packet that never arrives at all — nobody wants last second's audio frame delivered in order; they want this second's frame, or silence. Those applications build exactly as much reliability as they need on top of UDP themselves — retransmitting only what still matters, tolerating loss for what doesn't — instead of getting TCP's all-or-nothing ordering by default.
+
+<Callout type="gotcha">
+TCP's ordering guarantee creates head-of-line blocking: if segment 5 is lost, segments 6 through 20 can already be sitting in the receiver's buffer, fully arrived, but the connection cannot hand any of them to the application until segment 5 is retransmitted and arrives. One lost packet stalls everything behind it on that connection, even data the application doesn't care about the order of. This is exactly the problem QUIC — the transport HTTP/3 runs on — was built to avoid: it runs over UDP and reimplements reliability itself, per stream, so loss on one stream doesn't stall the others multiplexed alongside it. 02.03 HTTP REST And gRPC covers HTTP/2's multiplexing, which still sits on top of one TCP connection and is still exposed to this stall; HTTP/3 moving to QUIC over UDP is the direct fix.
+</Callout>
+
+| Property | TCP | UDP |
+| --- | --- | --- |
+| Connection setup | Three-way handshake, ~1 RTT before data | None — first packet can carry data |
+| Ordering | Guaranteed, reassembled by sequence number | Not guaranteed — packets can arrive in any order |
+| Reliability | Lost segments detected and retransmitted | No detection, no retransmission — the app adds its own if needed |
+| Congestion control | Built in — slow start, backoff on loss | None — an application can flood the network unless it self-limits |
+| Header overhead | 20 bytes minimum | 8 bytes |
+| Behavior on loss | Stream stalls until the gap is retransmitted (head-of-line blocking) | The rest of the datagrams keep arriving; the lost one is just gone |
+| Typical fit | Web traffic, APIs, anything needing a complete and ordered result | DNS, real-time media, gaming, and custom protocols like QUIC that build their own partial reliability |
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Reach for TCP when"
+  againstTitle="Reach for UDP when"
+  forItems={[
+    "The application needs every byte, in order, or it's not useful — a file transfer, an API response, a database connection",
+    "You want congestion control and flow control handled for you rather than reimplemented per application",
+    "Connection setup cost is amortized over a long-lived connection, so the handshake is paid once, not per message",
+    "Debuggability and ubiquity matter — TCP is what every proxy, firewall, and load balancer already understands",
+  ]}
+  againstItems={[
+    "A late packet is worse than a lost one — real-time audio, video, or game state, where retransmitting stale data isn't useful",
+    "The interaction is a single request/response and a fresh handshake would cost as much as just resending — DNS is the canonical case",
+    "You need to multiplex several independent logical streams without one stalling on another's lost packet, and are willing to build that reliability yourself, or adopt QUIC, which already has",
+    "You control both ends and can implement exactly the amount of reliability the workload needs — no more, no less",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Name the actual tradeoff, not the protocol names: "I need ordered, complete delivery for this API, so TCP — the handshake cost is one round trip I pay once per connection, and I'd keep connections warm rather than reconnect per request." For a real-time feature, flip it explicitly: "video frames arriving out of order or slightly lost is fine, being delayed waiting for a retransmit is not, so this goes over UDP, and I build just enough of my own reliability — sequence numbers for detecting loss, no retransmission, forward error correction if loss gets bad." Naming head-of-line blocking as the reason a chat app's typing indicator shouldn't share a TCP connection with a large file upload is the kind of detail that shows you've actually hit this in practice.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "TCP does the work of reliability — sequencing, retransmission, flow control, and congestion control — so every application above it gets an ordered, complete byte stream for free",
+    "That work costs a handshake: about one round trip to establish the connection, plus another for TLS, before the first application byte moves",
+    "UDP does none of that work: a datagram can be lost, duplicated, or reordered, and the application only finds out if it checks",
+    "TCP's ordering guarantee causes head-of-line blocking — a single lost segment stalls everything behind it on that connection until it's retransmitted",
+    "UDP fits workloads where stale data is worse than missing data (real-time media) or where the interaction is one round trip and a fresh handshake wouldn't save anything (DNS)",
+    "QUIC, HTTP/3's transport, runs over UDP specifically to reimplement per-stream reliability without inheriting TCP's single-stream head-of-line blocking",
+  ]}
+/>

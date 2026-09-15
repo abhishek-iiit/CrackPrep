@@ -1,0 +1,107 @@
+---
+title: "Remove Nth Node From End of List"
+number: "01.44"
+summary: "Lead the fast pointer n+1 steps ahead so when fast hits null, slow sits just before the node to delete."
+status: published
+free: true
+difficulty: core
+estMinutes: 12
+tags: [linked-list, two-pointers]
+updated: "2026-09-15"
+---
+
+## The nth node from the end is one pass, not two
+
+Remove the nth node from the end of a singly linked list and return the head. List `1 → 2 → 3 → 4 → 5` with `n = 2` removes `4`, leaving `1 → 2 → 3 → 5`.
+
+Counting length first works: walk to count `L`, then walk `L - n` steps from the head and delete. That is two passes. The one-pass pattern keeps a **gap of n nodes** between two pointers so when the leading pointer reaches the end, the trailing pointer is immediately before the target.
+
+The edge case that breaks naive code: **removing the head** when `n` equals the list length. A dummy node before the real head gives you a stable "previous" pointer even when the deleted node is first.
+
+## Gap of n between slow and fast
+
+Place `slow` at a dummy whose `next` is `head`, and `fast` at `head`. Advance `fast` exactly `n` steps (not `n + 1` yet — the variant below uses `n + 1` on the dummy setup). When `fast` is `n` steps ahead, advance both until `fast.next` is null; `slow.next` is the node to remove.
+
+<Steps>
+<Step title="Dummy before head">
+  `dummy.next = head` handles deleting the first node without a separate branch.
+</Step>
+<Step title="Move fast n+1 steps from dummy">
+  Starting both at `dummy`, advance `fast` `n + 1` times. Now the gap from `slow` to `fast` spans `n + 1` nodes.
+</Step>
+<Step title="Walk until fast reaches end">
+  While `fast.next !== null`, move both forward. Skip `slow.next` by linking `slow.next = slow.next.next`.
+</Step>
+</Steps>
+
+Invariant: when `fast` reaches the last node, `slow` is the predecessor of the nth-from-end node.
+
+## Solution
+
+```ts
+class ListNode {
+  val: number;
+  next: ListNode | null;
+  constructor(val?: number, next?: ListNode | null) {
+    this.val = val ?? 0;
+    this.next = next ?? null;
+  }
+}
+
+function removeNthFromEnd(
+  head: ListNode | null,
+  n: number
+): ListNode | null {
+  const dummy = new ListNode(0, head);
+  let slow: ListNode = dummy;
+  let fast: ListNode = dummy;
+
+  for (let i = 0; i <= n; i++) {
+    fast = fast.next!;
+  }
+
+  while (fast !== null) {
+    slow = slow.next!;
+    fast = fast.next!;
+  }
+
+  slow.next = slow.next!.next;
+  return dummy.next;
+}
+```
+
+Time **O(L)** one pass, space **O(1)**. `L` is list length.
+
+<Tradeoff
+  forTitle="Two-pointer gap when"
+  againstTitle="Count length then delete when"
+  forItems={[
+    "Single pass is requested or lists are streamed without rewind",
+    "You already use a dummy node pattern elsewhere in linked-list problems",
+    "Same two-pointer skill applies to 01.41 cycle detection and middle-finding",
+    "n is valid per constraints and you want O(1) extra space",
+  ]}
+  againstItems={[
+    "Two passes are explicitly allowed and the code path must be obvious to junior readers",
+    "You need the length anyway for another computation on the same walk",
+    "Off-by-one bugs on gap sizing keep happening — counting is safer for you under time pressure",
+    "The structure is doubly linked and you can delete in O(1) with a tail pointer",
+  ]}
+/>
+
+## In an interview
+
+Restate with example: `n = 1` removes the tail; `n = length` removes the head. Confirm `n` is always valid (1 ≤ n ≤ length).
+
+Say you will use a dummy and maintain an `n + 1` gap so `slow` lands on the predecessor. Mention the two-pass alternative and why one pass is nicer.
+
+Bug to volunteer: advancing `fast` only `n` times (off-by-one), or forgetting dummy when head is removed. Follow-ups: remove nth from beginning; do it recursively; combine with finding the middle (01.45 Reorder List).
+
+<KeyTakeaways items={[
+  "An n+1 gap between slow and fast puts slow on the node before the nth-from-end when fast reaches null.",
+  "A dummy head before the real head makes removing the first node the same case as any other deletion.",
+  "Two passes — count L, then walk L−n — are simpler but touch the list twice.",
+  "Skip the target with slow.next = slow.next.next; do not lose the tail of the list.",
+  "Advance fast n+1 steps from dummy, not n, when slow starts at dummy.",
+  "One-pass two-pointer traversal is the same toolkit as 01.41 Detect Cycle and middle-finding in 01.45.",
+]} />

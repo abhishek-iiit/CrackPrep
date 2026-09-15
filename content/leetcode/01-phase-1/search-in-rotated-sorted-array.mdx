@@ -1,0 +1,113 @@
+---
+title: "Search in Rotated Sorted Array"
+number: "01.08"
+summary: "One half is always sorted — check which half, then test whether the target lies in that sorted range."
+status: published
+free: true
+difficulty: core
+estMinutes: 14
+tags: [binary-search, array]
+updated: "2026-09-15"
+---
+
+## Binary search on a broken circle
+
+Sorted distinct integers were rotated; given `target`, return its index or −1 in O(log n). `[4, 5, 6, 7, 0, 1, 2]` with target 0 → index 4.
+
+You cannot run standard binary search on the whole array — global monotonicity is gone. But at any `mid`, **at least one half** `[left..mid]` or `[mid..right]` is still sorted. Identify which half is sorted with one comparison to `nums[left]` or `nums[right]`, then ask whether `target` falls in that sorted half's value range. Discard the other half.
+
+This is 01.07 Find Minimum in Rotated Sorted Array's sibling: same rotation model, but now you search a key instead of the pivot.
+
+## Which half is sorted, and does target fit?
+
+Let `mid = left + (right - left) / 2`.
+
+If `nums[left] <= nums[mid]`, left half is sorted (note `<=` so `[3,1]` with left=mid still works). Target in `[nums[left], nums[mid])` → `right = mid - 1`; else → `left = mid + 1`.
+
+Otherwise right half is sorted. Target in `(nums[mid], nums[right]]` → `left = mid + 1`; else → `right = mid - 1`.
+
+Each step cuts search space in half — O(log n).
+
+<Steps>
+<Step title="Pick mid">
+  Standard binary search midpoint.
+</Step>
+<Step title="Identify sorted half">
+  Compare nums[left] to nums[mid] to know if left segment is sorted.
+</Step>
+<Step title="Range-check target in sorted half">
+  If yes, discard the other half; if no, discard the sorted half.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function search(nums: number[], target: number): number {
+  let left = 0;
+  let right = nums.length - 1;
+
+  while (left <= right) {
+    const mid = left + Math.floor((right - left) / 2);
+    if (nums[mid] === target) return mid;
+
+    if (nums[left] <= nums[mid]) {
+      // left half sorted
+      if (nums[left] <= target && target < nums[mid]) {
+        right = mid - 1;
+      } else {
+        left = mid + 1;
+      }
+    } else {
+      // right half sorted
+      if (nums[mid] < target && target <= nums[right]) {
+        left = mid + 1;
+      } else {
+        right = mid - 1;
+      }
+    }
+  }
+
+  return -1;
+}
+```
+
+Time **O(log n)**, space **O(1)**.
+
+<Tradeoff
+  forTitle="Sorted-half binary search when"
+  againstTitle="Find pivot then search when"
+  forItems={[
+    "Single rotation, distinct values, O(log n) search required",
+    "You want one unified loop without two-phase pivot find + standard search",
+    "Interview pattern pairs directly with 01.07 minimum-finding variant",
+    "Target is arbitrary — not only the minimum element",
+    "n up to 5000 makes log n the expected complexity class",
+  ]}
+  againstItems={[
+    "Many queries on the same rotated array — find rotation index once O(log n), then binary search each query",
+    "Duplicates pollute sorted-half detection — need separate duplicate-handling variant",
+    "Teaching clarity: 01.07 pivot find is easier to derive first, then search second half",
+    "Array not rotated — plain binary search is simpler to write",
+    "Need insertion position for missing target — standard lower_bound after pivot",
+  ]}
+/>
+
+## In an interview
+
+Restate rotation model, distinct values, return index or −1. Connect to 01.07: same geometry, different goal.
+
+Before coding, say: one half always sorted; check membership in sorted range; discard half each step.
+
+Follow-ups: duplicates allowed (cannot always tell which half is sorted — linear shrink when equal), find minimum, search in 2D matrix (02.43 Search a 2D Matrix). Bug: using strict `<` on wrong boundary and dropping the target when it equals `nums[left]` or `nums[right]`.
+
+<KeyTakeaways
+  items={[
+    "Search in Rotated Sorted Array keeps O(log n) by identifying which half remains sorted at each mid",
+    "After identifying the sorted half, a range check tells you whether target can live there",
+    "Use <= on the left-vs-mid comparison so two-element segments do not mis-classify",
+    "01.07 Find Minimum in Rotated Sorted Array finds the pivot; this problem searches an arbitrary key in the same structure",
+    "Two-phase 'find min index then binary search' also works but one loop is cleaner under time pressure",
+    "Duplicate values break the sorted-half claim — treat equality as a special case and shrink boundaries",
+  ]}
+/>

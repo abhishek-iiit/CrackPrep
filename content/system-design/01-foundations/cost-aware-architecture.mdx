@@ -1,32 +1,69 @@
 ---
 title: "Cost-Aware Architecture"
 number: "01.12"
-summary: "Cost-Aware Architecture — notes in progress."
-status: draft
+summary: "Every box on an architecture diagram carries a recurring bill, and the biggest costs — idle compute, cross-zone egress — are usually the least visible one."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 14
+tags: [cost, cloud-infrastructure, capacity-planning]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The diagram doesn't show the invoice
 
-What breaks without this, and the situation that forces the decision.
+A box labeled "cache" or "read replica" or "cross-region replication" describes a capability. It says nothing about what that capability costs to run, every month, whether or not it is being fully used — and that omission is exactly why architecture decisions routinely surprise the team that has to pay for them. Cost-aware architecture treats the monthly bill as a real constraint on the design, alongside latency and availability, rather than something to look at after the system is built and the invoice arrives.
 
-## How it works
+This is not the same claim as "always pick the cheapest option." A cache that costs a few thousand dollars a month and saves the database tier from needing several more read replicas is a good trade; naming that comparison explicitly is the actual skill. The failure mode this lesson is about is not spending money — it is spending money nobody looked at, on capacity nobody is using, moving data across a boundary nobody priced.
 
-The mechanism, step by step.
+## Where the money actually goes
 
-## Tradeoffs
+- **Idle compute.** A fleet sized for peak traffic and left running at that size around the clock pays for capacity it uses a few hours a day. A workload with a sharp daily peak — most consumer traffic has one — spends most of its day well under the provisioned ceiling. Autoscaling, or a serverless execution model that bills per request instead of per hour, converts that idle capacity into money not spent; the cost is a slower cold-start path and less predictable per-request latency, which is why it's a tradeoff and not a strict improvement.
+- **Data egress.** Moving data out of a cloud provider's network, and even between availability zones within one region, is usually priced per byte, while traffic that stays inside one zone is often free or far cheaper. This is the cost most likely to be invisible at design time, because nothing about a diagram showing one service calling another indicates whether the two are in the same zone. A design that fans one request out to ten backend calls, each crossing a zone boundary, pays that per-byte cost ten times over, multiplied by every request the system serves. At a few cents per gigabyte it looks negligible per call and stops looking negligible at a billion calls a day; treat any specific per-gigabyte figure as an estimate to verify against current pricing, since it varies by provider and changes over time, but the order of magnitude — small per call, large in aggregate — is the durable fact.
+- **Storage tiering.** Object storage in a "hot", always-available tier typically costs meaningfully more per gigabyte per month than a "cold" or archive tier built for infrequent access, often by something like an order of magnitude — again, an estimate to verify, not a quoted price. Data that is written once and rarely read, like old logs or order history past a return window, costs real money every month it sits in the hot tier for no reason. 04.14 Hot And Cold Storage Archival covers the mechanics of moving it.
+- **The managed-service premium.** A managed database or queue costs more per unit of throughput than the same software self-hosted on raw compute, and that premium buys something real: someone else patches it, backs it up, and pages on its behalf. Cost-aware architecture does not mean always self-hosting to save the premium — it means naming the premium and deciding on purpose whether the operational relief is worth it at the team's current size, rather than defaulting to managed everywhere out of habit.
+- **Redundancy for availability.** A hot standby replica, a multi-region deployment, or synchronous cross-region replication are all durability and availability decisions with a direct cost multiplier attached — 01.05 Availability Durability Consistency And Cost frames the same tradeoff from the reliability side. Doubling infrastructure for a hot standby is sometimes exactly the right call and sometimes a target being met for a system that never needed that target in the first place.
+
+<Callout type="note">
+Cost is a non-functional requirement, not an afterthought bolted onto one — see 01.03 Non-Functional Requirements. "This must run under a stated monthly figure at a stated scale" is exactly as legitimate a constraint to ask for or state as a latency target, and it changes the design the same way a latency target does: it rules out options, the same way a strict p99 latency target rules out a synchronous call to a slow downstream.
+</Callout>
+
+## Pricing a decision before making it
+
+The habit worth building is small: before adding a component, sketch the monthly cost at the scale you actually expect, using the same numbers 01.06 Back-Of-The-Envelope Capacity Planning teaches you to gather anyway. A cross-region replica that looks obviously worth it in the abstract can look different once it's priced: if steady-state traffic is a few thousand requests a second and each replicated write moves a couple of kilobytes across a region boundary, that is on the order of megabytes per second of cross-region traffic — a very different monthly figure at a few cents per gigabyte than the same replication scheme would cost two orders of magnitude higher in traffic. Neither number tells you whether to do it — that still depends on what the replica buys in availability or latency — but not having the number means the decision is being made blind.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Weigh cost explicitly when"
+  againstTitle="Cost can wait when"
+  forItems={[
+    "Traffic has a sharp daily or seasonal peak, so always-on provisioning at peak size wastes real money most hours of the day",
+    "The design fans a single request out across multiple cross-zone or cross-region calls, where per-byte transfer costs compound with request volume",
+    "Data has a clear point where it stops being accessed often, making storage tiering a real lever rather than a marginal one",
+    "A redundancy or consistency target is being proposed without anyone having named what it costs to run continuously",
+    "The system is already at a scale where a percentage-point difference in unit cost is a meaningful line item",
+  ]}
+  againstItems={[
+    "The system is pre-scale and the entire monthly bill is small next to the cost of engineering time spent optimizing it",
+    "The team does not yet know its real traffic pattern, so any cost model built now is a guess dressed as a number",
+    "The choice under discussion is dominated by a correctness or availability requirement that isn't up for negotiation regardless of price",
+    "Switching to a cheaper option later is genuinely low-cost and reversible, so there's no urgency to optimize the first version",
+    "The premium for a managed service buys operational relief the team currently cannot staff for on its own",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Naming a cost constraint out loud is a legitimate move, not a hedge: "at the scale we discussed, I'd expect cross-region replication to move traffic continuously in the megabytes-per-second range, which is worth pricing before committing to synchronous replication rather than an async approach." That sentence does two things at once — it shows the back-of-envelope instinct from 01.06 Back-Of-The-Envelope Capacity Planning, and it treats cost as a real design input instead of an afterthought raised only if asked.
 
-<KeyTakeaways items={["", "", ""]} />
+Interviewers rarely expect an exact dollar figure. What they are checking for is whether a design decision with an obvious recurring cost — always-on redundant infrastructure, chatty cross-zone calls, everything kept in the hottest storage tier forever — gets named as a cost decision at all, or sails past as if capability were the only axis that mattered.
+
+<KeyTakeaways
+  items={[
+    "Every architecture decision has a recurring dollar cost attached, and the diagram that shows the capability rarely shows the bill",
+    "Idle compute provisioned for peak and left running around the clock is one of the most common invisible costs in a design",
+    "Cross-zone and cross-region data transfer is priced per byte and easy to multiply unintentionally through fan-out, chatty service calls, or replication",
+    "Storage tiering — moving rarely-read data to a cheaper archive tier — is one of the highest-leverage, lowest-risk cost levers available",
+    "Cost is a non-functional requirement like latency or availability, and stating a cost ceiling explicitly is a legitimate design constraint, not a cop-out",
+    "The goal is not the cheapest option by default — it's naming the tradeoff between what a component costs and what it buys, the same way you would for latency or durability",
+  ]}
+/>

@@ -1,32 +1,90 @@
 ---
 title: "Live Reactions High Throughput Design"
 number: "10.13"
-summary: "Live Reactions High Throughput Design — notes in progress."
-status: draft
+summary: "Absorb bursts of likes, emojis, and live-reaction taps by aggregating on the hot path, fan-out summaries to viewers, and reconciling durable counts off the request timeline."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 14
+tags: [reactions, realtime, counters, fanout]
+updated: "2026-09-15"
 ---
 
-## The problem
+## A stadium of taps is still a hot counter problem
 
-What breaks without this, and the situation that forces the decision.
+Live streams, premieres, and match threads turn reactions into a firehose: thousands of users mash the same heart on the same content id within the same second. Each tap wants two things — a durable-ish total that goes up, and a realtime animation or ticker for everyone watching. Treating each tap as `UPDATE reactions SET count = count + 1` plus a fan-out write to every viewer re-creates the collapse from 10.01 Counting At Scale, then multiplies it by the audience size.
 
-## How it works
+The design that works looks like view counting (10.02) with a louder read path: **aggregate first**, **broadcast summaries**, **persist asynchronously**, and accept that the emoji rain on screen is best-effort while the badge count converges.
 
-The mechanism, step by step.
+## Split ingest, aggregate, and broadcast
 
-## Tradeoffs
+<Steps>
+  <Step title="Accept reactions on a narrow write API">
+    Client sends `{content_id, reaction_type, user_id, client_event_id}`. Validate auth and basic rate limits here. Do not open a transaction that updates the global counter and notifies all viewers inline.
+  </Step>
+  <Step title="Deduplicate and buffer in a hot store">
+    Use an idempotency key (`client_event_id` or `(user, content, reaction, window)`) so retries do not double-count. Increment a Redis (or in-memory shard) counter per `(content_id, reaction_type)`, optionally sharded like 10.02 when a single key saturates. For "one like per user" semantics, maintain a membership structure per content — exact set if audience is bounded, or accept approximate constraints carefully; Bloom filters (04.13) can reject definite duplicates but cannot alone enforce "exactly once like" under false positives.
+  </Step>
+  <Step title="Flush aggregates to durable storage on a timer">
+    Every 100–500 ms, or every N increments, write rolled-up deltas to the database or append a compact aggregate event. This is batching (02.10) applied to social chrome. Crashes lose at most one flush window of reactions unless you also log per-tap events for rebuild (10.07).
+  </Step>
+  <Step title="Fan out summaries, not each tap, to viewers">
+    Live clients subscribe to a channel for `content_id`. Publish `{reaction_type, delta}` or a full snapshot of counts at a capped rate (for example 10–20 Hz). The UI animates locally between summaries. Publishing every single tap to ten thousand watchers turns one hot write into ten thousand hot writes — aggregate before fan-out.
+  </Step>
+  <Step title="Keep analytics sketches on a side path if needed">
+    Unique reactors via HyperLogLog (10.04), hottest content via Count-Min Sketch and top-K (10.08, 10.09), minute buckets for charts (10.06). None of these belongs on the click's critical path beyond a cheap counter bump.
+  </Step>
+</Steps>
+
+<Callout type="gotcha">
+Per-user reaction identity ("did I already like this?") and global counts are different data. Global counts want sharding and aggregation; per-user state wants keys partitioned by user or by `(user, content)`. Mixing them into one row per content guarantees both contention and incorrect toggle behavior under concurrency.
+</Callout>
+
+## Throughput math that interviews expect
+
+Order-of-magnitude: 50,000 taps/second on one live content id cannot mean 50,000 durable row updates. At 20 Hz broadcast of aggregated deltas, each viewer receives 20 messages/second regardless of tap rate — the broadcast cost scales with `viewers × refresh_hz`, while ingest cost scales with `taps` into a buffered counter. That decoupling is the architecture. If animation richness requires sampling individual taps for a "reaction rain," sample (10.10 Reservoir Sampling) a tiny subset of events for visual flair instead of streaming every tap to every client.
+
+| Concern | Technique |
+| --- | --- |
+| Hot global counter | Shard + batch flush |
+| Idempotent taps | Client event ids / short membership window |
+| Live audience updates | Aggregated pub/sub at capped Hz |
+| Unique reactors | HLL or exact set by product requirement |
+| Abuse / spam taps | Rate limits, anomaly heavy hitters on user keys |
+| Durable truth | Append events or reconciled counters off-path |
+
+Reactions that must be money-accurate (paid stickers, charity tallies) fall back toward the impression-settlement mindset in 10.03: append events, settle later, do not let the firework animation be the ledger.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Aggregate-then-broadcast live reactions when"
+  againstTitle="Persist and fan out per tap when"
+  forItems={[
+    "Tap rates can spike far beyond what a single durable row or per-tap fan-out can sustain",
+    "Viewers care about lively feedback more than unit-accurate mid-stream totals",
+    "A short loss window on crash or a second of count lag is acceptable for social chrome",
+    "Audience size is large enough that per-tap messages would dominate bandwidth",
+    "Analytics can ride side-path sketches and buckets rather than the click latency budget",
+  ]}
+  againstItems={[
+    "Each reaction is a paid or contractual event that must be audited per tap",
+    "Audience and rate are small enough that simple exact updates are clearer and cheap",
+    "Product requires strong read-your-writes on the global count inside the same request",
+    "You must show every individual reactor identity in realtime without sampling",
+    "There is no pub/sub or buffer tier — only a database — and volume still fits it",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Start with load: "Live reactions concentrate writes on one content id, so I buffer increments, shard if needed, flush aggregates, and fan out rate-limited summaries to viewers instead of one message per tap per watcher." Call out idempotency keys, the split between per-user like state and global counts, and where HLL or CMS might sit for unique reactors or abuse. The follow-up is usually consistency: say the animation is best-effort, the badge converges within a flush interval, and money-grade reactions need an event log.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Live reactions fail when every tap updates one durable row and fans out to every viewer — aggregate on ingest and broadcast summaries at a capped rate",
+    "Hot counters for reaction totals use the same batch-and-shard toolkit as view counting; per-user like state must be keyed separately",
+    "Idempotency keys prevent retry double-counts; Bloom filters can help cheap duplicate checks but do not replace exact like toggles when false positives matter",
+    "Fan-out cost should scale with viewers × update frequency, not with raw tap rate — sample taps only if the UI needs individual animation events",
+    "Side-path sketches (HLL, CMS, time buckets) handle unique reactors and analytics without sitting on the click critical path",
+    "Paid or audited reactions need append-and-settle semantics; firework animations should not be the system of record",
+  ]}
+/>

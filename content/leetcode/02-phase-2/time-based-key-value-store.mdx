@@ -1,0 +1,112 @@
+---
+title: "Time Based Key-Value Store"
+number: "02.32"
+summary: "Append-only timestamped values per key turn get-at-time into binary search on a sorted history list."
+status: published
+free: true
+difficulty: core
+estMinutes: 14
+tags: [design, binary-search, hash-map]
+updated: "2026-09-15"
+---
+
+## Reads are historical, writes are append-only
+
+Implement a key-value store where `set(key, value, timestamp)` stores `value` at `timestamp`, and `get(key, timestamp)` returns the value with the **largest stored timestamp ≤ query timestamp**. If none exists, return `""`.
+
+Timestamps for a given key are strictly increasing on each `set` — you never overwrite history, you append. That means each key's timeline is a sorted list of `(timestamp, value)` pairs. A `get` is not a hash lookup — it is "rightmost record still valid at this time," which is binary search on that list.
+
+Scanning the full history per get is O(number of sets for that key). With up to 10⁵ operations, you want **O(log k)** per get where k is the history length for one key.
+
+## Per-key sorted timelines
+
+Use `Map<string, [number, string][]>` — each key maps to an append-only array of `[timestamp, value]`.
+
+- **set:** push the new pair; monotonic timestamps keep the array sorted.
+- **get:** binary search for the rightmost timestamp ≤ `timestamp`. Standard "last true in sorted array" pattern: if `mid` is valid, record answer and search right; else search left.
+
+<Steps>
+<Step title="Store history per key">
+  `store.get(key)?.push([timestamp, value])` — no sorting step needed on insert.
+</Step>
+<Step title="Binary search on get">
+  Find the largest index `i` where `history[i][0] <= timestamp`.
+</Step>
+<Step title="Return value or empty string">
+  If no such index exists, return `""`.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+class TimeMap {
+  private store = new Map<string, [number, string][]>();
+
+  set(key: string, value: string, timestamp: number): void {
+    if (!this.store.has(key)) this.store.set(key, []);
+    this.store.get(key)!.push([timestamp, value]);
+  }
+
+  get(key: string, timestamp: number): string {
+    const history = this.store.get(key);
+    if (!history || history.length === 0) return "";
+
+    let lo = 0;
+    let hi = history.length - 1;
+    let ans = "";
+
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (history[mid][0] <= timestamp) {
+        ans = history[mid][1];
+        lo = mid + 1; // seek a newer valid timestamp
+      } else {
+        hi = mid - 1;
+      }
+    }
+
+    return ans;
+  }
+}
+```
+
+`set` is **O(1)** amortized append. `get` is **O(log k)** per key history. Space **O(total sets)** across all keys.
+
+<Tradeoff
+  forTitle="Append + binary search when"
+  againstTitle="Full scan or tree when"
+  forItems={[
+    "Timestamps per key arrive strictly increasing — the history stays sorted for free",
+    "Gets dominate and histories can grow long for hot keys",
+    "You need exact floor-timestamp lookup, not range aggregation",
+    "String values are immutable snapshots; no in-place mutation of past records",
+    "Operation count up to 10⁵ makes O(k) scan per get risky",
+  ]}
+  againstItems={[
+    "Timestamps are not monotonic — you need insertion into sorted order or a tree map",
+    "You need TTL expiry and deletion of old entries — append-only lists grow forever",
+    "Queries are \"any value in [t1, t2]\" — interval trees or bucketed time indexes fit better",
+    "k stays tiny (under 20) and code clarity beats log k",
+    "Memory must be minimized and you can afford recomputing from a single current value",
+  ]}
+/>
+
+## In an interview
+
+Restate with an example: set `foo` at t=1 and t=4, get at t=3 returns the t=1 value, get at t=5 returns the t=4 value. Confirm timestamps increase on each set for the same key.
+
+Explain append-only storage and binary search for floor timestamp before coding. Mention empty key and query before first set — return `""`.
+
+Follow-ups: delete old versions, many keys with sparse history (same structure still works), or concurrent writes (out of scope unless asked). The common bug is searching for exact match instead of floor — use `<=` and bias right when equal.
+
+<KeyTakeaways
+  items={[
+    "Monotonic timestamps per key make each key's history a naturally sorted array",
+    "get-at-time is floor binary search: largest stored timestamp not after the query",
+    "set is O(1) append; get is O(log k) where k is that key's history length",
+    "Append-only design matches audit logs and config versioning — past states stay readable",
+    "Scanning the list works for tiny k but binary search is the intended scale",
+    "Return empty string when the key is unknown or all timestamps are after the query",
+  ]}
+/>

@@ -1,0 +1,113 @@
+---
+title: "Binary Tree Level Order Traversal"
+number: "02.14"
+summary: "BFS with a queue groups nodes by depth — snapshot queue size each round to split output levels."
+status: published
+free: true
+difficulty: core
+estMinutes: 13
+tags: [binary-tree, bfs, queue]
+updated: "2026-09-15"
+---
+
+## Breadth-first, but bucketed by depth
+
+Return the values of a binary tree level by level, left to right within each level. For `[3,9,20,null,null,15,7]` the answer is `[[3], [9,20], [15,7]]`.
+
+DFS with a depth parameter can collect nodes into buckets — that works and is O(n). The canonical interview answer is **BFS with a queue**: process nodes in arrival order, which naturally respects level order if you cut the queue into generations.
+
+The trap is mixing levels: enqueueing children into the same processing batch as their parent without a boundary. You need either to record `levelSize = queue.length` before dequeuing, or to use a sentinel/null marker between levels. The size snapshot is cleaner and avoids null checks in the output.
+
+## Queue snapshot per level
+
+Start with root in the queue. While the queue is non-empty, read its current length `k` — that is exactly the node count at this level. Dequeue `k` nodes, collect their values, enqueue their non-null children. Append one inner array per round.
+
+<Steps>
+<Step title="Seed the queue with root">
+  If root is null, return an empty array — no levels to emit.
+</Step>
+<Step title="While queue not empty">
+  Let `k = queue.length`. This is the level width for this iteration only.
+</Step>
+<Step title="Process k nodes">
+  Dequeue, record value, enqueue left and right if present. Push the k values as one level.
+</Step>
+</Steps>
+
+DFS alternative: `dfs(node, depth)` appends to `result[depth]`. Same O(n) time; BFS uses O(w) queue space where w is max width (up to n/2 on a last level of a perfect tree).
+
+## Solution
+
+```ts
+class TreeNode {
+  val: number;
+  left: TreeNode | null;
+  right: TreeNode | null;
+  constructor(val?: number, left?: TreeNode | null, right?: TreeNode | null) {
+    this.val = val ?? 0;
+    this.left = left ?? null;
+    this.right = right ?? null;
+  }
+}
+
+function levelOrder(root: TreeNode | null): number[][] {
+  if (root === null) return [];
+
+  const result: number[][] = [];
+  const queue: TreeNode[] = [root];
+
+  while (queue.length > 0) {
+    const levelSize = queue.length;
+    const level: number[] = [];
+
+    for (let i = 0; i < levelSize; i++) {
+      const node = queue.shift()!;
+      level.push(node.val);
+      if (node.left) queue.push(node.left);
+      if (node.right) queue.push(node.right);
+    }
+
+    result.push(level);
+  }
+
+  return result;
+}
+```
+
+Time **O(n)**. Space **O(w)** for the queue, w = maximum level width — O(n) on a wide bottom level.
+
+<Tradeoff
+  forTitle="BFS with level-size snapshot when"
+  againstTitle="DFS with depth buckets when"
+  forItems={[
+    "You need strict level boundaries in the output — the problem statement asks for grouped levels",
+    "Tree width is moderate; queue memory is acceptable",
+    "Follow-up is zigzag level order — same BFS skeleton, reverse every other row",
+    "You are teaching traversal order before 02.15 serialization (level-order encoding)",
+    "Iterative code avoids recursion stack on deep skewed trees",
+  ]}
+  againstItems={[
+    "You only need a flat preorder/inorder/postorder list — DFS is simpler",
+    "Memory is tight and max width ≈ n/2 — DFS buckets use O(h) stack plus output",
+    "Problem is right-side view or max per level — still BFS but only last node per level matters",
+    "Using shift() on a large array hurts in JS — use index pointer on a ring buffer in production",
+    "Interviewer wants recursive structure to mirror tree definition — DFS with depth index is fine",
+  ]}
+/>
+
+## In an interview
+
+Example: single node → `[[3]]`, empty → `[]`. Confirm children order is left then right within a level.
+
+Explain the snapshot trick: "I read queue length before processing so children enqueued this round wait for the next level." That separates generations without a null sentinel.
+
+Bug: dequeuing until queue empty in one inner loop without fixing k — you swallow the whole tree into one level. Follow-ups: bottom-up level order; zigzag; average of each level; right-side view (last node per level).
+
+<KeyTakeaways items={[
+  "Level-order traversal is BFS; snapshot queue.length each round to bound one level.",
+  "Enqueue children while processing a level — they belong to the next snapshot, not the current one.",
+  "O(n) time, O(w) extra space where w is max width (up to n/2 on a perfect tree's last row).",
+  "DFS with a depth index produces the same grouping if you prefer recursion.",
+  "Empty tree returns [] — do not push an empty level for a missing root.",
+  "Zigzag and right-view variants reuse this skeleton with minor per-level tweaks.",
+]} />

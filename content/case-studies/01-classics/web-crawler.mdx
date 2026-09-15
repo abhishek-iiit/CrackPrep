@@ -1,0 +1,155 @@
+---
+title: "Web Crawler"
+number: "01.07"
+summary: "A polite, distributed fetch pipeline where the frontier, deduplication, and robots.txt dominate the design conversation."
+status: published
+free: true
+difficulty: deep
+estMinutes: 22
+tags: [crawler, frontier, politeness]
+updated: "2026-09-15"
+---
+
+## Why interviewers ask for a web crawler
+
+Search engines, price monitors, and archivers share one shape: discover URLs, fetch politely, deduplicate, extract links, repeat — at billions of pages without melting target sites or your own storage. The prompt tests distributed queues, bloom filters, per-host rate limiting, and the difference between "fetch everything" and "fetch safely." It is write-heavy on the frontier and read-heavy on the dedup check — opposite ratios in different subsystems.
+
+## Clarify: scope, politeness, and freshness
+
+**Functional:**
+
+- Seed URLs only, or discover entire web?
+- What to extract — HTML only, PDFs, images?
+- Store full page content or just URLs + metadata?
+- Re-crawl frequency — once, daily, based on change detection?
+- Respect robots.txt and nofollow — always?
+- JavaScript-rendered pages — in or out of scope?
+
+**Non-functional:**
+
+- Crawl rate — pages per second cluster-wide?
+- Per-domain politeness — max 1 req/s per host? Configurable?
+- Duplicate detection — exact URL only or canonical URL normalization?
+- Storage retention — how long to keep raw HTML?
+- Distributed — multiple datacenters?
+
+**Out of scope:** ranking/indexing (search indexer is downstream), CAPTCHA solving, login walls.
+
+Spoken script:
+
+> "I'll crawl HTML from seed URLs, respect robots.txt, one fetch per second per host, store raw HTML in object storage, URL frontier in a priority queue, dedup with a Bloom filter plus URL DB — no JS rendering."
+
+## Capacity: fetch rate, storage, and frontier size
+
+Assumptions.
+
+| Assumption | Value |
+| --- | --- |
+| Crawl throughput target | 1 billion pages / month |
+| Average page size | 50 KB HTML |
+| Unique URLs discovered | 10× fetched (many duplicates filtered) |
+| Per-host default rate | 1 request / second |
+| Average links per page | 30 |
+| Bloom filter false positive rate | 1% |
+
+**Fetch rate:** 1B / (30 × 86,400) ≈ **400 pages/s** cluster-wide — needs hundreds of worker machines if each host allows 1 req/s and pages spread across ~400k active domains (rough order-of-magnitude).
+
+**Egress/storage ingest:** 400 × 50 KB = **20 MB/s** raw HTML → **~52 TB/month** if every byte is stored — often compress (3×) → **~17 TB/month** in object store.
+
+**Dedup structure:** 1B URLs × 64-bit hash ≈ **8 GB** minimum for a set — Bloom filter at 1% FPR: ~10 bits per URL → **~1.25 GB** in memory per billion URLs (order-of-magnitude; see system-design Bloom filter lessons for exact bit math).
+
+**Frontier queue depth:** Spikes when a popular page links to millions — priority and per-domain caps prevent one site filling the queue.
+
+## High-level design: scheduler, fetchers, storage
+
+| Component | Role |
+| --- | --- |
+| URL frontier | Priority queues partitioned by domain |
+| Scheduler | Picks next URL respecting politeness and priority |
+| Fetcher workers | HTTP GET, follow redirects (cap at 5), stream body |
+| Robots cache | robots.txt parsed per domain, cached 24 h |
+| Dedup | Bloom filter (fast negative) + URL seen store (exact) |
+| Content store | Object storage for HTML; DB for url, fetched_at, checksum |
+| Link extractor | Parse HTML, normalize URLs, enqueue new links |
+
+<Steps>
+<Step title="Enqueue seed URLs">
+
+Normalize URL (lowercase host, strip fragment, default scheme). Check Bloom filter — if maybe seen, confirm in URL DB. Insert into frontier queue for domain with priority score (PageRank, depth, recency).
+
+</Step>
+<Step title="Scheduler picks work">
+
+For each domain, enforce token bucket at configured rate (often 1/s). Pop highest-priority URL from that domain's queue. Assign to fetcher worker.
+
+</Step>
+<Step title="Fetch and process">
+
+Worker checks robots.txt rules for path. HTTP GET with timeout and size cap (e.g. 5 MB). Store body to object storage. Record URL in DB and Bloom filter. Extract links; for each, normalize and enqueue if allowed and not deduped.
+
+</Step>
+</Steps>
+
+## Deep dive: politeness, dedup, and failure
+
+### Per-host politeness
+
+Central mistake: unbounded parallel fetch to one domain. Use a **domain queue** + **rate limiter** (01.02 Rate Limiter token bucket per hostname). Scheduler only dispatches when the domain's token is available. Backoff on 429/503 with Retry-After. Separate crawl-delay from robots.txt.
+
+### URL normalization and dedup
+
+`http://Example.com/page#section` and `http://example.com/page` should collide. Steps: punycode host, remove default port, resolve relative links, optional trailing-slash policy. **Bloom filter** for "definitely not seen" — on positive, check **exact URL hash in DB**. False positive skips a page (~1% with tuned filter) — acceptable or use counting Bloom filter.
+
+### Frontier priority
+
+Breadth-first for discovery; PageRank or sitemap priority for production search. **Separate queues per domain** so one viral domain does not starve others. Cap queue size per domain (drop or spill to disk).
+
+### Handling duplicates and redirects
+
+301/302: store redirect mapping; optionally enqueue target if policy allows. Duplicate content (mirrors): checksum comparison — same hash, skip re-store. Soft 404 pages still consume fetch budget — detect thin content heuristically if asked.
+
+### Worker failure
+
+At-least-once fetch: URL may be processed twice if worker dies after fetch before ack. Dedup on URL idempotently; object store overwrite by content hash is safe.
+
+<Callout type="warn">
+Crawling without per-host limits is how you get blocked and how you DDoS small sites. The politeness layer is not optional polish — it is core architecture.
+</Callout>
+
+## Tradeoffs
+
+<Tradeoff
+  forTitle="Distributed priority frontier when"
+  againstTitle="Single BFS queue when"
+  forItems={[
+    "Billions of URLs and thousands of domains — fairness requires per-domain queues",
+    "Politeness mandates independent rate limits per host",
+    "Priority differs by PageRank, freshness, or sitemap hints",
+    "Workers scale horizontally; scheduler assigns by domain token",
+    "One hot domain must not exhaust global fetch capacity",
+  ]}
+  againstItems={[
+    "Small bounded crawl — millions of pages, dozens of domains",
+    "Interview time box — BFS from seeds proves link extraction",
+    "Uniform politeness — global QPS cap without per-host state",
+    "Prototype where scheduler complexity outweighs scale needs",
+    "All seeds same domain — single queue suffices",
+  ]}
+/>
+
+## In an interview
+
+Open with politeness: "I'll cap each domain at one request per second and partition the frontier by hostname." Draw seeds → frontier → scheduler → fetcher → {storage, link extractor → frontier}.
+
+Follow-ups: detect infinite URL spaces (calendar pagination — max depth or URL pattern denylist), DNS failures (cache negative), and distributed Bloom filter (partition by hash of URL, or one big filter per datacenter with duplicate fetch cost). Volunteer: "Bloom false positive means we skip a unseen URL — tune bits per URL or confirm positives in DB; the failure mode is incomplete crawl, not crash."
+
+<KeyTakeaways
+  items={[
+    "Declare robots.txt, per-host rate limits, and JS rendering scope in the first three minutes",
+    "Partition the URL frontier by domain with per-domain token buckets — politeness is architectural, not a config tweak",
+    "Dedup with normalized URLs: Bloom filter for fast rejection, exact store on positive — ~1 GB Bloom per billion URLs at 1% FPR",
+    "Store HTML in object storage; metadata and link graph in DB — 400 fetches/s × 50 KB is ~20 MB/s ingest",
+    "Link extraction feeds the frontier; cap per-domain queue depth to prevent one site dominating",
+    "Fetch is at-least-once — idempotent dedup and content-hash storage absorb worker retries",
+  ]}
+/>

@@ -1,32 +1,122 @@
 ---
 title: "Geohash Prefix Spatial Index"
 number: "12.02"
-summary: "Geohash Prefix Spatial Index — notes in progress."
-status: draft
+summary: "Encode lat/lon as a Base32 string so nearby points share a prefix — then use an ordinary B-tree or sorted-set range scan as a spatial index."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 14
+tags: [geohash, indexing, geospatial]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The trick: make "near" look like "starts with the same characters"
 
-What breaks without this, and the situation that forces the decision.
+Databases are excellent at prefix and range queries on strings and integers. They are mediocre at "all rows within 1.5 km of this point" unless you give them a geography type and a specialised index. Geohash is the bridge: a hierarchical encoding of latitude and longitude into a short Base32 string such that **points that are geographically close usually share a long common prefix**.
 
-## How it works
+Once locations are strings like `9q8yyk` and `9q8yym`, "roughly the same neighbourhood" becomes `WHERE geohash LIKE '9q8yy%'`, or a lexicographic range over a sorted set. You did not invent a new index type. You reused one the database already has, at the cost of a known set of edge cases around cell boundaries.
 
-The mechanism, step by step.
+## How the encoding works
 
-## Tradeoffs
+Geohash interleaves the bits of latitude and longitude — roughly, each step bisects the remaining latitude range or longitude range, alternating — and packs the bits into Base32 characters (the alphabet drops letters that are easy to misread: no `a`, `i`, `l`, or `o`).
+
+Each extra character is more precision: the cell gets smaller. Order-of-magnitude cell sizes, useful as a reasoning aid rather than a surveyor's table:
+
+| Precision (chars) | Cell edge (ballpark) | Typical use |
+| --- | --- | --- |
+| 4 | ~40 km | Country / large-region bucketing |
+| 5 | ~5 km | City district |
+| 6 | ~1.2 km | Neighbourhood / wide nearby radius |
+| 7 | ~150 m | Street-level / tight nearby |
+| 8 | ~40 m | Building / parking-spot scale |
+| 9 | ~5 m | Fine positioning |
+
+Exact metres vary with latitude — cells shrink east–west as you move toward the poles — so treat the table as an order-of-magnitude guide when picking a precision for a radius, not as a constant you hard-code into an SLO.
+
+A point's geohash at precision `p` is the cell that contains it. All points inside that cell share that exact `p`-character string. Points in adjacent cells share a shorter prefix — or, at boundaries, may share almost nothing useful at the precision you chose, which is why neighbour expansion exists.
+
+## Indexing and querying with prefixes
+
+### Write path
+
+On insert or location update, compute `geohash = encode(lat, lon, precision)` at the precision you have chosen for the product's default radius (or store a longer hash and truncate at query time). Persist it as a column, a document field, or a member score/key in a sorted structure. Secondary attributes — cuisine, open-now, driver status — sit beside it so filters can combine.
+
+### Read path
+
+<Steps>
+  <Step title="Encode the query point at the chosen precision">
+    Same function, same precision as the index. You now have the centre cell id.
+  </Step>
+  <Step title="Expand to neighbours">
+    Compute the 8 surrounding cells (or use a library's neighbour helper). A query near a cell edge otherwise misses entities that are geographically closer than ones inside the centre cell. Nine cells is the common default for a single precision.
+  </Step>
+  <Step title="Fetch by equality or prefix">
+    For fixed precision: `WHERE geohash IN (...)`. For variable precision stored as a longer string: prefix match on each neighbour stem. In Redis-less designs this is a B-tree probe per cell; in search indexes it is a terms query on the geohash field.
+  </Step>
+  <Step title="Exact-distance filter and rank">
+    Haversine (or a cheaper equirectangular approximation inside a city) drops false positives from the cell covering. Sort by distance or a composite score. This is the same second pass as in 12.01 Nearby Geospatial Search System Design — geohash only supplies candidates.
+  </Step>
+</Steps>
+
+```text
+query (lat, lon), radius R
+  cell  = geohash(lat, lon, p)          # e.g. 9q8yyk
+  cells = {cell} ∪ neighbours(cell)     # up to 9 cells
+  cand  = index.lookup(cells)           # prefix / IN query
+  hits  = [e for e in cand if dist(e, q) ≤ R]
+  return top_k(hits)
+```
+
+## Precision is the main design knob
+
+Pick `p` so that a cell is **smaller than or comparable to** the search radius, not vastly larger. If cells are much larger than `R`, most candidates fail the distance filter and you have rebuilt a sequential scan one district at a time. If cells are much smaller than `R`, you must cover a ring of many cells — dozens or hundreds — and the `IN` list becomes the bottleneck.
+
+A practical approach: choose `p` from the median query radius, store geohashes at that precision (or longer), and for outlier large-radius queries either bump to a coarser prefix or accept a wider neighbour ring. Multi-precision indexes — storing precision 5 and 7 for every entity — trade write amplification and storage for flexible query radii; they are worth it when the product genuinely has both "nearby coffee" and "hotels within 30 km".
+
+## The failure modes that are specific to geohash
+
+**Cell-edge under-recall.** Without neighbours, recall depends on where the user stands relative to an invisible grid. Always expand.
+
+**Longitude wrap and poles.** Neighbour logic must handle the antimeridian (±180°) and should treat polar regions as a special case — cells become pathological, and many consumer apps simply clamp the service region.
+
+**Prefix ≠ distance.** Two hashes that share no long prefix can still be close across a cell boundary; two that share a prefix can still be almost a full cell-diagonal apart. Never skip the exact-distance pass for user-visible radius guarantees.
+
+**Z-order discontinuities.** Because geohash is a space-filling curve, a small geographic step sometimes flips many bits. That is exactly why neighbour tables exist instead of "take prefix ± 1".
+
+<Callout type="note">
+Geohash is not the only cell system. H3 (hexagonal hierarchical cells) and S2 (cube-sphere cells) solve the same indexing problem with different neighbour shapes and area distortion profiles — 12.03 Geospatial Grid Systems H3 S2 Geohash compares them. Geohash wins when you want something you can explain on a whiteboard, store in a plain string column, and query with `LIKE` or a terms facet. It loses when you need roughly equal-area cells worldwide or hex-neighbour traversal as a first-class primitive.
+</Callout>
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Use a geohash prefix index when"
+  againstTitle="Prefer another geo approach when"
+  forItems={[
+    "You already have a B-tree, document index, or sorted string keys and want spatial queries without a GIS extension",
+    "Query radii cluster around one or two scales, so a single precision (or two) stays honest",
+    "You need a portable encoding — the same hash works in Postgres, Elasticsearch, and application memory",
+    "Whiteboard clarity matters: prefix sharing is easy to explain and defend in an interview",
+    "Approximate area distortion at your latitudes is acceptable for candidate generation",
+  ]}
+  againstItems={[
+    "You need true spherical geometry, complex polygons, or distance joins inside the database — use PostGIS / geography types",
+    "Global equal-area cells or hex rings are load-bearing (density maps, fair partitioning) — prefer H3 or S2",
+    "The hot path is pure radius queries at very high QPS on live entities — Redis GEO (12.04) may fit better as the serving layer",
+    "Radii vary wildly per request and multi-precision storage is operationally painful for your team",
+    "You require exact polygonal geofences as the primary query — cell prefixes only prefilter; see 12.05 and 12.06",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Draw the four-step loop: encode, neighbours, lookup, exact filter. State the precision and why it matches the radius ("precision 6, about 1 km cells, for a 1.5 km radius with neighbour expansion"). Mention cell-edge bias before the interviewer does. If they ask how you would shard, geohash prefixes are also partition keys — nearby entities tend to land on the same shard, which is good for query locality and bad for hot cities unless you add a secondary salt or split dense cells.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Geohash interleaves lat/lon bits into a Base32 string so geographic proximity usually becomes string-prefix proximity",
+    "Index and query by cell id or prefix, then always exact-distance filter — the hash only produces candidates",
+    "Query the centre cell plus its neighbours; skipping neighbours causes silent under-recall at boundaries",
+    "Precision is a latency knob tied to search radius: too coarse wastes work on false candidates, too fine explodes the cell list",
+    "Prefix equality is not distance; Z-order jumps and antimeridian edges are expected, not bugs in your math",
+    "Geohash is the pragmatic string-column spatial index; H3/S2 and Redis GEO are alternatives when its distortions or API shape do not fit",
+  ]}
+/>

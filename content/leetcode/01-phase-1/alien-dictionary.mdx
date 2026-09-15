@@ -1,0 +1,127 @@
+---
+title: "Alien Dictionary"
+number: "01.32"
+summary: "Lexicographic order is a directed graph over characters — build edges from adjacent words, then topological sort or detect a cycle."
+status: published
+free: true
+difficulty: deep
+estMinutes: 18
+tags: [topological-sort, graph, string]
+updated: "2026-09-15"
+---
+
+## Order hides in the first mismatch
+
+You are given sorted alien words and must recover the character ordering. `["wrt", "wrf", "er", "ett", "rftt"]` implies `t` before `f` (from `wrt` vs `wrf`), `w` before `e` (from `wrf` vs `er`), and so on. The output is any valid permutation of the alphabet consistent with those constraints — or `""` if none exists.
+
+Comparing every pair of words is O(k² · L) and redundant. Adjacent words in the sorted list already encode every constraint: if word `i` comes before word `i+1` in a valid ordering, the first position where they differ reveals one directed edge in the alphabet graph. The hard parts are extracting edges correctly and detecting when constraints contradict (a cycle).
+
+## Build the graph from adjacent pairs
+
+Compare each adjacent pair `(words[i], words[i+1])` character by character until a mismatch at index `j`: add edge `wordA[j] → wordB[j]`. If one word is a prefix of the other and the shorter word is **longer** (e.g. `"abc"` before `"ab"`), the input is invalid — return `""` immediately.
+
+Collect all characters that appear (including those never involved in an edge). Run Kahn's topological sort: in-degree count per node, queue nodes with in-degree 0, append to result, decrement neighbors. If the result length is less than the number of unique characters, a cycle exists.
+
+<Steps>
+<Step title="Validate prefix violations">
+For each adjacent pair, if `words[i].startsWith(words[i+1])` and `words[i].length > words[i+1].length`, return `""`.
+</Step>
+<Step title="Extract edges">
+Scan left to right until characters differ; record directed edge once per ordered pair (use a set of edges to avoid duplicate in-degree bumps).
+</Step>
+<Step title="Topological sort">
+BFS from in-degree 0 nodes. Cycle ⟺ sorted order includes fewer characters than the alphabet set.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function alienOrder(words: string[]): string {
+  const adj = new Map<string, Set<string>>();
+  const indeg = new Map<string, number>();
+
+  const addChar = (c: string) => {
+    if (!adj.has(c)) {
+      adj.set(c, new Set());
+      indeg.set(c, 0);
+    }
+  };
+
+  for (const w of words) {
+    for (const c of w) addChar(c);
+  }
+
+  for (let i = 0; i < words.length - 1; i++) {
+    const a = words[i];
+    const b = words[i + 1];
+    if (a.length > b.length && a.startsWith(b)) return "";
+
+    let j = 0;
+    while (j < a.length && j < b.length && a[j] === b[j]) j++;
+    if (j < a.length && j < b.length) {
+      const from = a[j];
+      const to = b[j];
+      if (!adj.get(from)!.has(to)) {
+        adj.get(from)!.add(to);
+        indeg.set(to, indeg.get(to)! + 1);
+      }
+    }
+  }
+
+  const queue: string[] = [];
+  for (const [c, d] of indeg) if (d === 0) queue.push(c);
+
+  const order: string[] = [];
+  while (queue.length) {
+    const c = queue.shift()!;
+    order.push(c);
+    for (const nxt of adj.get(c)!) {
+      indeg.set(nxt, indeg.get(nxt)! - 1);
+      if (indeg.get(nxt) === 0) queue.push(nxt);
+    }
+  }
+
+  return order.length === indeg.size ? order.join("") : "";
+}
+```
+
+Let **C** be unique characters and **E** edges. Building the graph is O(total word length); topological sort is O(C + E). Space O(C + E).
+
+<Callout type="warn">
+The prefix rule is easy to skip: `"abc"` listed before `"ab"` looks like a valid sorted pair but is impossible in any total order. Check it before you ever add an edge.
+</Callout>
+
+<Tradeoff
+  forTitle="Adjacent-word graph + topo sort when"
+  againstTitle="Compare-all-pairs when"
+  forItems={[
+    "Words are given in sorted order — adjacent pairs are sufficient for all constraints",
+    "You need to detect invalid input (cycles or prefix violations) and return empty string",
+    "Alphabet size is bounded by characters that appear — graph stays small",
+    "This is the standard follow-up to 01.28 Course Schedule on a implicit graph",
+    "Interview expects O(total length of words) not O(k² · L)"
+  ]}
+  againstItems={[
+    "Words are not guaranteed sorted — you would need every pair or a different input model",
+    "k is tiny (under 10 words) and clarity beats optimization",
+    "You only need to know if an order exists, not produce one — cycle detection alone suffices with less bookkeeping",
+    "Character set is fixed and tiny (26 letters) — O(26²) brute force is acceptable",
+    "Problem variant gives explicit precedence pairs instead of words — build graph directly from pairs"
+  ]}
+/>
+
+## In an interview
+
+Clarify: output any valid order; invalid constraints return `""`; characters not in any edge still appear in the output. Work the small example on the board. Say: model characters as nodes, first mismatch between adjacent words gives a directed edge, then topological sort — same family as 01.28 Course Schedule.
+
+Follow-ups: multiple valid orders (any topo order is fine), detect cycle vs missing characters, stream words one at a time. Mention the prefix invalid case before coding it — interviewers often use `"abc", "ab"` as a trap.
+
+<KeyTakeaways items={[
+  "Sorted adjacent words encode all lexicographic constraints; the first differing character yields one directed edge.",
+  "Prefix violation — longer word before its proper prefix — makes any total order impossible.",
+  "Topological sort on the character graph produces a valid alphabet; fewer than |Σ| nodes in the output means a cycle.",
+  "Deduplicate edges before incrementing in-degree, or the same pair of words can inflate in-degree incorrectly.",
+  "Time is linear in total characters for graph build plus O(C + E) for Kahn's algorithm.",
+  "Same graph template applies to task schedulers and course prerequisites — only the edge source changes."
+]} />

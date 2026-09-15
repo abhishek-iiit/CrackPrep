@@ -1,0 +1,160 @@
+---
+title: "Merge BSTs to Create Single BST"
+number: "03.50"
+summary: "Leaf-insert each tree into one candidate root, then validate with bounds — duplicate roots or failed validation means impossible."
+status: published
+free: true
+difficulty: deep
+estMinutes: 21
+tags: [binary-tree, bst, hash-map]
+updated: "2026-09-15"
+---
+
+## Merging inorder lists is not enough — shape must stay a BST
+
+Given `n` BST roots, can you combine them into **one** valid BST by picking one tree as the overall root and attaching every other tree at a **leaf** of the growing structure? Return the merged root or `null` if impossible.
+
+Each input is a valid BST. Attachments happen only at null child slots during a walk from the global root — you cannot rewiring internal nodes. The result must be a single BST, not a forest.
+
+Trying every attachment permutation is factorial. Two structural filters cut the search space:
+
+1. **Root uniqueness** — the global root's value must appear as a root value in exactly one input tree. If two trees share the same root value, no merge works.
+2. **Leaf insert by BST order** — to attach tree `T`, walk from the merge root comparing values; the first null left or right child slot is the only valid attachment point for that shape.
+
+After all insertions, run **02.18 bounds validation**. Insertion can succeed locally yet produce a globally invalid tree if values overlap across subtrees.
+
+## Pick candidate root, insert, validate
+
+Count root-value frequencies. For each tree whose root value appears once, try it as the global root: leaf-insert every other tree, validate, return on success. Snapshot and restore original `left`/`right` pointers between attempts so failed merges do not corrupt the input forest.
+
+<Steps>
+<Step title="Count root values">
+  Build frequency map over `tree.val` for each root in the input array.
+</Step>
+<Step title="Try each unique-root candidate">
+  Skip trees whose root value frequency is not exactly 1.
+</Step>
+<Step title="Leaf-insert every other tree">
+  Walk BST order; attach at first null child. Fail if values equal during walk.
+</Step>
+<Step title="Bounds-validate and restore on failure">
+  02.18 strict DFS; restore pointer snapshot before the next candidate.
+</Step>
+</Steps>
+
+<Callout type="gotcha">
+  Equal values during insert (`tree.val === cur.val`) mean the attachment point is wrong — return false immediately. Strict BST inequality matches 02.18.
+</Callout>
+
+## Solution
+
+```ts
+class TreeNode {
+  val: number;
+  left: TreeNode | null;
+  right: TreeNode | null;
+  constructor(val?: number, left?: TreeNode | null, right?: TreeNode | null) {
+    this.val = val ?? 0;
+    this.left = left ?? null;
+    this.right = right ?? null;
+  }
+}
+
+function canMerge(trees: TreeNode[]): TreeNode | null {
+  const freq = new Map<number, number>();
+  for (const t of trees) freq.set(t.val, (freq.get(t.val) ?? 0) + 1);
+
+  const snap = trees.map((t) => [t.left, t.right] as const);
+
+  function restore(): void {
+    for (let i = 0; i < trees.length; i++) {
+      trees[i].left = snap[i][0];
+      trees[i].right = snap[i][1];
+    }
+  }
+
+  function insert(root: TreeNode, tree: TreeNode): boolean {
+    let cur: TreeNode | null = root;
+    while (cur) {
+      if (tree.val < cur.val) {
+        if (cur.left) cur = cur.left;
+        else {
+          cur.left = tree;
+          return true;
+        }
+      } else if (tree.val > cur.val) {
+        if (cur.right) cur = cur.right;
+        else {
+          cur.right = tree;
+          return true;
+        }
+      } else return false;
+    }
+    return false;
+  }
+
+  function validate(node: TreeNode | null, lo: number, hi: number): boolean {
+    if (node === null) return true;
+    if (node.val <= lo || node.val >= hi) return false;
+    return (
+      validate(node.left, lo, node.val) &&
+      validate(node.right, node.val, hi)
+    );
+  }
+
+  for (const cand of trees) {
+    if (freq.get(cand.val) !== 1) continue;
+    restore();
+    let ok = true;
+    for (const t of trees) {
+      if (t === cand) continue;
+      if (!insert(cand, t)) {
+        ok = false;
+        break;
+      }
+    }
+    if (ok && validate(cand, -Infinity, Infinity)) return cand;
+  }
+
+  restore();
+  return null;
+}
+```
+
+Time **O(n² × h)** in worst case — n candidates, n inserts, h walk each. Space **O(n)** for snapshots and recursion.
+
+<Tradeoff
+  forTitle="Unique-root + leaf insert when"
+  againstTitle="Flatten inorder rebuild when"
+  forItems={[
+    "Problem restricts attachments to leaf slots — insert walk matches the rule directly",
+    "Root value frequency filters impossible merges before expensive validation",
+    "02.18 bounds validation is the final correctness gate after construction",
+    "Input trees are small (n ≤ 10) — trying each unique candidate is feasible",
+    "Pointer snapshot restore avoids cloning entire trees between attempts",
+  ]}
+  againstItems={[
+    "Arbitrary merge positions allowed — need different construction (not leaf-only)",
+    "Many trees with duplicate root values — early exit null without trying insert",
+    "You need the merge sequence, not just the tree — track attachment order",
+    "All values unique and sorted — single inorder concat rebuilds one BST",
+    "Online merge stream — incremental insert without full recomputation from scratch",
+  ]}
+/>
+
+## In an interview
+
+Clarify: one global root chosen from input, other trees attach only at leaves. State the unique-root filter — duplicate root values kill the merge immediately.
+
+Walk a tiny example: root 5, attach tree rooted at 2 at left leaf, tree rooted at 7 at right leaf. Mention validate at the end — insert can look fine locally and still fail globally.
+
+Bug: mutating trees across failed candidates without restore — second attempt sees corrupted pointers. Follow-ups: return attachment order; merge without leaf-only restriction.
+
+<KeyTakeaways items={[
+  "Merge BSTs: global root must be the tree whose root value appears exactly once among all roots.",
+  "Leaf-insert walks BST order and attaches at the first null child — equal values during walk mean failure.",
+  "Always bounds-validate the merged tree with 02.18 strict min/max DFS after insertion.",
+  "Snapshot and restore left/right pointers between candidate attempts — failed merges mutate links.",
+  "Return null if no candidate passes insert plus validation.",
+  "02.18 Validate BST and 03.46 Largest BST Subtree share the same bounds logic for correctness checks.",
+]} />

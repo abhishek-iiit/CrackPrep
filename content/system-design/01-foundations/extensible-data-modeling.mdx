@@ -1,32 +1,83 @@
 ---
 title: "Extensible Data Modeling"
 number: "01.11"
-summary: "Extensible Data Modeling — notes in progress."
-status: draft
+summary: "The attribute nobody scoped on day one still needs a home on day two; the choice is how much of that flexibility the database enforces versus the app."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 14
+tags: [data-modeling, schema-design, nosql]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The column you didn't create is the one next quarter needs
 
-What breaks without this, and the situation that forces the decision.
+A schema is a bet about which attributes matter, made before the product has finished discovering what it is. A product catalog launches with a name, a price, a description — and six months later, one category needs a screen size and a refresh rate, another needs a sleeve length and a fabric, and a third needs neither but wants a battery capacity. Add a column per attribute and the table accretes hundreds of mostly-null columns, one per category that ever needed a distinguishing feature, and every row wastes storage on columns it will never populate. The rigid schema was the right choice for the four fields everyone agreed on at launch; it is the wrong shape for the long tail of fields that show up one category at a time, forever.
 
-## How it works
+Extensible data modeling is the general problem of designing storage that can absorb attributes you did not know about at design time, without a migration and a deploy for every new one, while giving up as little as possible of what a rigid schema buys for free: type checking, indexing, and constraints the database itself enforces.
 
-The mechanism, step by step.
+## The spectrum, from rigid to unstructured
 
-## Tradeoffs
+| Approach | Flexibility | Queryability | Type safety | Join/read cost |
+| --- | --- | --- | --- | --- |
+| Fixed columns, one per attribute | Lowest — every new field is a migration | Best — native indexes, native types | Enforced by the database | Cheapest |
+| A JSON/JSONB column for variable attributes | High — no migration to add a field | Workable with expression or GIN indexes, but easy to under-index | Weak — the database checks the JSON is valid JSON, rarely that a field is the right type | One column read, application does the rest |
+| Entity-Attribute-Value (one row per attribute) | Highest — a new attribute is just a new row, no schema change at all | Poor — every query is a self-join or a pivot | None at the database level | A query touching five attributes is a five-way join or five round trips |
+| Discriminator / single-table-per-type | Moderate — new types share the base columns, add a type-specific side table or JSON blob | Good for the shared columns, same tradeoff as above for the variable part | Enforced for the shared columns only | Cheap for shared fields, extra join for type-specific ones |
+
+Moving down this table trades enforcement the database gives you for free — a `NOT NULL`, a foreign key, a type the engine rejects a bad write against — for flexibility the application has to enforce instead, in code, which is optional in a way a constraint is not.
+
+A JSON or JSONB column is usually where teams land first, because most relational engines support it natively and it requires no new infrastructure: category-specific attributes go into one `attributes` column, the universal fields stay as real columns, and adding a new attribute is a write, not a migration. A relational engine can often index into a JSON column's fields with a GIN index or an expression index, which recovers some of the query performance a dedicated column would have had — but only for the fields you thought to index, and usually only found out you needed after a slow query told you so.
+
+<Callout type="warn">
+Moving an attribute into a JSON column also moves its validation out of the database. A `screen_size` column typed as an integer physically cannot hold a string like "15 in" — the write fails at the database. A `screen_size` key inside a JSON blob can hold anything the application forgot to check, and a bad value written today does not surface as an error today. It surfaces weeks later, as a parsing exception or a silent bad render in whatever code path first tries to treat that field as a number. The database will not catch it for you; something in the write path has to.
+</Callout>
+
+Entity-attribute-value tables push flexibility to its limit — a table of entity, attribute name, and value triples can represent literally any attribute on any entity with zero schema changes, ever. The cost is on the read side, and it is severe: a query that wants five attributes of one entity is a five-way self-join, or five separate lookups, on a table with no useful way for the query planner to estimate how selective any of it is. EAV shows up in some of the oldest extensible systems for exactly this reason — maximal flexibility — and it is also the pattern most commonly regretted once query volume grows, because the flexibility that made writes trivial makes reads expensive in a way that does not show up until the table is large enough to matter.
+
+## What actually changes the calculus
+
+Two questions decide where on that spectrum a given system should sit:
+
+- **How often do new attributes actually show up, and does the shape need to be queried by them, or just displayed?** An attribute that only needs to render on a detail page can live in a JSON blob with no index at all. An attribute that needs to be filtered or sorted on — laptops under 14 inches — needs an index, which pushes back toward either a real column or an indexed JSON path.
+- **Who is allowed to add a new attribute, and how often?** If a human developer adds a new field a few times a year, a migration (03.12 Schema Evolution) might genuinely be cheap enough — modern engines increasingly support adding a nullable column as effectively a metadata change, without a full table rewrite, though changing an existing column's type usually still is one. If attributes are defined by end users or added dynamically by a workflow at runtime, no migration process can keep up, and that is the actual case for JSON or EAV.
+
+<Callout type="tip">
+When only a handful of attributes vary and the set of possible attributes is known even if not every row uses them, a wide table with mostly-null columns is often underrated. Nulls cost little in most storage engines, the columns stay indexable and type-checked, and the pattern only becomes wrong when the number of possible attributes climbs into the hundreds — at that point JSON or a side table for type-specific attributes is worth the migration effort to get there.
+</Callout>
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Reach for a flexible model (JSON or EAV) when"
+  againstTitle="Keep it in typed columns when"
+  forItems={[
+    "New attributes are added by end users, config, or a workflow at runtime — no deploy-and-migrate cycle can keep pace",
+    "Most of the variable attributes are read and displayed, not filtered or aggregated at query time",
+    "The set of possible attributes is open-ended and growing across many categories or tenants, not a small fixed list",
+    "You can accept validation moving into application code, and you actually have a place in the write path to enforce it",
+    "The team would rather absorb read-side complexity later than block feature work on a migration today",
+  ]}
+  againstItems={[
+    "Attributes need to be filtered, sorted, or aggregated at scale — an indexed real column will always beat a JSON path index on that",
+    "Correctness matters enough that you want the database itself, not application code, to reject a malformed write",
+    "The attribute set is small and known, even if some rows leave some columns null",
+    "New attributes are added by developers on a normal release cadence, where a migration is a minor cost, not a blocker",
+    "The team has already been burned by an EAV table that turned every report into a multi-way self-join",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Name the actual variable before picking a structure: how often new attributes appear, and who adds them, decides more of this than any abstract preference for SQL or NoSQL. A strong answer sounds like: "Most products share four or five universal fields, which I'd keep as real typed columns since they're always filtered on. Category-specific attributes vary too much to model as columns, so I'd put those in a JSON column with an index on the two or three fields users actually filter by, and validate the shape in the write path since the database won't."
 
-<KeyTakeaways items={["", "", ""]} />
+If pushed on EAV, it is fine to say plainly that it is rarely the first choice — name the read-side join cost as the reason, rather than dismissing it without explaining why.
+
+<KeyTakeaways
+  items={[
+    "A rigid schema enforces types and constraints for free but requires a migration for every new attribute, which does not scale to attributes that appear one category or one tenant at a time",
+    "A JSON column trades that enforcement for flexibility — writes no longer need a migration, but validation and much of the query optimization move into application code",
+    "Indexing into a JSON column recovers some query performance, but only for the specific fields you thought to index",
+    "Entity-attribute-value modeling maximizes write-side flexibility at the cost of read-side joins that do not scale — a query for five attributes becomes a five-way join",
+    "The decisive questions are how often new attributes appear and who defines them, and whether they need to be queried or only displayed",
+    "A wide table with mostly-null columns is a reasonable middle ground while the attribute set is still small, and only becomes the wrong shape once it grows into the hundreds",
+  ]}
+/>

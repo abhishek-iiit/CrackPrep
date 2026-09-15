@@ -1,32 +1,98 @@
 ---
 title: "Metadata DB For Object Storage"
 number: "07.17"
-summary: "Metadata DB For Object Storage — notes in progress."
-status: draft
+summary: "Object bytes scale with disks; object metadata scales with key cardinality — and the metadata database is usually what breaks first under small-object storms."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 15
+tags: [object-storage, metadata, databases, scaling]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The catalog is smaller than the data and harder than the data
 
-What breaks without this, and the situation that forces the decision.
+Petabytes of object payloads are an operational problem with a known shape: add disks, replicate, scrub. Billions of object *records* — one row per key version with ACLs, encryption material, size, checksum, and partition locator — are a different shape. Every `PUT`, `HEAD`, `GET`, and `LIST` touches that catalog. When the average object is 10 KB, metadata operations per second track byte ingest far more closely than when the average object is 100 MB. Teams that provision storage nodes for bandwidth and forget to provision the metadata DB for QPS discover the limit as elevated 5xx on PUT, not as full disks.
 
-## How it works
+07.14 S3-Style Object Storage Architecture treated the metadata plane as one box. This lesson is what that box must do, why it is not "just put keys in Redis," and how its failure modes show up in the API the client sees.
 
-The mechanism, step by step.
+## What belongs in the metadata record
 
-## Tradeoffs
+A minimal current-version record carries:
+
+- **Identity** — bucket id, object key, version id / generation
+- **Locator** — partition id (resolved via 07.16 Partition Manager And Map Table), sometimes a generation-specific chunk list for multipart
+- **Content facts** — size, content type, content encoding, checksum / ETag
+- **Control facts** — owner, ACL or policy pointer, encryption params, storage class, retention / legal hold
+- **Lifecycle** — creation time, delete marker, expiration time, restore status for archived classes
+
+The bytes themselves are not here. Pointers are. That split is what lets you move a partition's disks without rewriting the meaning of "this key exists."
+
+Listing is a metadata query: given a bucket and a prefix (and a delimiter for pseudo-folders), return the next page of keys in order. That requirement — **ordered scan by key within a bucket** — is why many object stores back metadata with a range-friendly store (a sorted KV, an LSM, a relational table clustered on `(bucket, key, version)`) rather than a pure hash map. 07.15 Range Partitioning vs Consistent Hashing for Storage applies inside the metadata plane too: hash shards spread load; range order within a shard keeps prefix LIST cheap.
+
+## Hot paths and why LIST hurts
+
+| API | Metadata work | Sensitive to |
+| --- | --- | --- |
+| `HEAD` / `GET` | Point lookup by `(bucket, key)` | Lookup latency, cache hit rate |
+| `PUT` | Insert or new version + commit after data durability | Write QPS, transaction / consensus latency |
+| `DELETE` | Delete marker or version tombstone | Same as PUT; plus later GC of bytes |
+| `LIST` | Range scan + pagination | Key cardinality under a prefix, fan-out across metadata shards |
+
+`LIST` is the operation that surprises people who treated metadata like a cache. A prefix with tens of millions of keys, listed frequently, becomes a sustained scan workload on the metadata store. Delimiter listing ("folder" views) adds merge logic across common prefixes. This is why API design discourages chatty list-polling and why inventory reports and S3 Inventory-style batch exports exist — to take listing off the live metadata path.
+
+<Callout type="gotcha">
+Caching object metadata at the frontend helps GET/HEAD for hot keys and does nothing good for LIST correctness if you serve a stale page as authoritative. Cache current-version records with TTLs and invalidation on write; treat LIST as a query against the system of record, or against a deliberately refreshed secondary index.
+</Callout>
+
+## Scaling the metadata plane
+
+Three levers show up in real systems:
+
+**Shard by bucket or by key hash.** One giant unsharded table eventually contends on write locks or compaction. Sharding by bucket isolates noisy neighbors; sharding by hash of `(bucket, key)` spreads a single huge bucket. The LIST-over-prefix case wants keys that share a prefix to co-locate on one shard when possible — which fights pure random hashing and pushes designs toward range shards per bucket or hierarchical directories.
+
+**Keep the working set of hot records in memory.** Frontends and a metadata cache tier absorb repeated HEAD traffic for popular objects. The durability of the record still lives in the metadata DB; the cache is not the source of truth for existence after a write.
+
+**Separate "current version" from "version history."** Many workloads only need the latest version on the hot path. Storing every historical version in the same hot table inflates space and scan cost. Cold version history can live in a slower tier as long as a `GET` with version id can still find it.
+
+The metadata DB is often a consensus-backed KV or a carefully operated relational cluster because losing it loses the namespace even if every disk still holds bytes. Orphan recovery can rebuild *candidates* from the data plane; it cannot rebuild ACLs, encryption keys, or which version was current without metadata or an out-of-band backup of that metadata.
+
+## Consistency with the data plane
+
+07.14 fixed the commit order: durable bytes first, then metadata publish. The metadata DB therefore implements the visibility transition — from "not yet an object" to "current version." Transactions or compare-and-swap on `(bucket, key)` prevent two concurrent PUTs from both believing they won without a defined version ordering. Conditional writes (`If-Match`, `If-None-Match`) are metadata CAS operations; the data plane never interprets HTTP preconditions.
+
+Delete markers and multipart manifests are metadata state machines. A multipart upload in progress is a set of part records plus an upload id; `CompleteMultipartUpload` is the metadata transaction that installs the final object pointer. Until that transaction commits, there is no user-visible key — only billable orphaned parts if the client abandons the upload.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Push hard on a dedicated metadata DB when"
+  againstTitle="Keep metadata co-located or minimal when"
+  forItems={[
+    "Object counts reach hundreds of millions or more, or small-object PUT rates dominate over GB/s of payload",
+    "LIST by prefix and versioning are product requirements, not optional admin tools",
+    "You need independent scaling and failure domains from the storage nodes",
+    "Conditional writes, strong current-version semantics, and ACL checks must be correct under concurrency",
+    "You must restore the namespace from backups even if disk contents are only partially readable",
+  ]}
+  againstItems={[
+    "Object counts stay modest and a single primary database already stores pointers beside application rows",
+    "The product never lists by prefix and only fetches by exact key",
+    "You outsource the entire object API to a managed service and only store keys in your app DB",
+    "Operational cost of a second strongly consistent store exceeds the value of separating planes",
+    "Immortal local files with filesystem metadata are enough and you are not building a multi-tenant object service",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Say out loud that metadata QPS, not disk capacity, bounds small-object workloads: "a million 10 KB PUTs a second is a million metadata commits — that is a database problem wearing an object-storage costume." Sketch the record contents and the LIST-as-range-scan requirement. Pre-empt the failure question: if metadata is lost but disks remain, you have unreclaimable anonymous bytes, not a usable bucket.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "The metadata DB is the system of record for existence, versioning, ACLs, checksums, and partition locators — not for payload bytes",
+    "Small-object workloads stress metadata QPS long before they stress aggregate disk bandwidth",
+    "LIST is a range query over keys; designs that only optimize point lookup leave listing as the surprise bottleneck",
+    "Sharding, hot-record caching, and cold version history are the usual scale levers inside the metadata plane",
+    "Visibility is a metadata commit that must follow data durability; conditional PUTs are compare-and-swap on metadata",
+    "Losing metadata loses the namespace even when disks still hold data — back it up with the same seriousness as the bytes",
+  ]}
+/>

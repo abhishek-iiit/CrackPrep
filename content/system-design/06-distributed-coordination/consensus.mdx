@@ -1,32 +1,106 @@
 ---
 title: "Consensus"
 number: "06.06"
-summary: "Consensus — notes in progress."
-status: draft
+summary: "Consensus lets a majority of nodes agree on one value and one log order despite crashes and flaky networks — the mechanism behind etcd, ZooKeeper, and Raft groups."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: deep
+estMinutes: 22
+tags: [consensus, raft, paxos, quorum]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Agreeing on one thing when nobody sees the whole room
 
-What breaks without this, and the situation that forces the decision.
+Three replicas each hold a copy of a configuration key. A client asks to set it to `B`. One replica is slow, one has not seen the previous value `A` yet, and a network blip drops a reply. Without a rule for how they agree, you get split brains: two nodes believe different "current" values, both willing to serve them, and every higher-level guarantee — a single leader, a linearizable read, a lock that only one holder owns — collapses into whichever replica you happened to ask.
 
-## How it works
+Consensus is that rule. In the classic problem statement, every correct process eventually decides the same value, and the value decided was proposed by someone — agreement, validity, and termination under the failure model you are willing to assume. In production systems the problem is almost never "agree on one integer once." It is "agree on a growing sequence of operations" — a replicated log — so that every replica applies the same commands in the same order. Raft, Multi-Paxos, Zab (ZooKeeper), and the guts of etcd and Consul are all answers to that log problem.
 
-The mechanism, step by step.
+You reach for consensus when the alternative is two truths. You avoid it when eventual convergence or a single primary with async replicas already matches the invariant, because consensus turns every write into a majority round trip and stalls the minority side of a partition on purpose (06.04 CAP And PACELC).
 
-## Tradeoffs
+## What safety actually requires
+
+Most practical consensus algorithms assume crash faults (nodes stop or restart; they do not invent Byzantine lies) and an asynchronous network that can delay or drop messages arbitrarily. Under pure asynchrony, FLP says deterministic consensus cannot guarantee termination — which is why real systems add elections, randomized timeouts, or weak timing assumptions to make progress probable while keeping safety absolute.
+
+The load-bearing safety idea is the **majority quorum**. With `2f + 1` voting members, any two majorities intersect in at least one node. If a value (or log entry) is stored on a majority, a later majority — even after failures and a leadership change — must overlap that set and therefore cannot decide a conflicting value without seeing the prior one. That intersection is why three voters tolerate one failure, five tolerate two, and adding a sixth non-voting learner helps reads or catch-up without changing the fault budget.
+
+| Cluster voters | Majority | Failures tolerated | Typical use |
+| --- | --- | --- | --- |
+| 3 | 2 | 1 | Single AZ control plane, cheap HA |
+| 5 | 3 | 2 | Cross-AZ metadata, etcd/ZK production default territory |
+| 7 | 4 | 3 | Rare — more coordination cost than most control planes want |
+
+Durability of a decision means "on disk on a majority," not "acked by the leader's memory." A leader that acknowledges before a majority has persisted the entry is volunteering to lose acknowledged writes on a crash — the classic bug when someone "optimizes" Raft.
+
+## Raft as the mental model worth carrying
+
+Paxos is the historical foundation; Raft is the algorithm most engineers can replay under pressure because it separates leader election, log replication, and safety into named pieces. The sketch below is Raft-shaped; Multi-Paxos implements the same majority-log idea with different vocabulary.
+
+<Steps>
+  <Step title="Elect a leader for a term">
+    Nodes start as followers. If a follower hears no heartbeat before its election timeout — randomized, often on the order of 150–300 ms in textbook Raft, tuned higher under real GC and network jitter — it becomes a candidate, increments its term, and requests votes. A node grants a vote to at most one candidate per term, and only if the candidate's log is at least as up-to-date as its own. A candidate that collects a majority becomes leader for that term and starts heartbeats. Two candidates splitting the vote simply time out and retry; randomization makes split votes uncommon rather than impossible.
+  </Step>
+  <Step title="Clients write only through the leader">
+    The leader appends the command to its log as a new entry (term + index), then parallel-replicates AppendEntries to followers. Followers append if the previous index/term matches their log — the consistency check that prevents holes and divergent histories from being papered over.
+  </Step>
+  <Step title="Commit on majority persistence">
+    When a majority has stored the entry, the leader marks it committed, applies it to its state machine, and returns success to the client. Followers learn the commit index on subsequent heartbeats and apply in order. Until majority persistence, the entry is tentative — a leadership change can still overwrite it if it never reached a majority.
+  </Step>
+  <Step title="New leaders must preserve committed history">
+    On winning an election, a leader's log is already at least as complete as a majority's (vote rule). It then forces followers to align with its log, deleting conflicting suffix entries on followers that had followed a defeated candidate. Committed entries never conflict across terms because any committed entry sat on a majority that the new leader's vote quorum had to intersect.
+  </Step>
+  <Step title="Serve linearizable reads carefully">
+    A stale leader that has been partitioned away may not know it is deposed. Reading from its local state without checking can return values that a new majority has already overwritten. Practical systems either fence reads through a round of heartbeats / ReadIndex against a quorum, or route linearizable reads through the same lease/term machinery that proves leadership is still live. Followers can serve sequential or eventual reads cheaply; that is a different promise (06.02 Consistency Models).
+  </Step>
+</Steps>
+
+<Callout type="warn">
+A minority partition that still believes it is leader will accept client writes into an unreplicated log and then lose them when the partition heals — unless clients and the API fence on term numbers or use linearizable read checks. Consensus safety protects the majority's log; it does not protect clients that trust a silent, minority "leader" without verifying.
+</Callout>
+
+## Where consensus shows up in a design
+
+- **Control planes:** etcd for Kubernetes, ZooKeeper for legacy Hadoop/Kafka controller ballots, Consul's Raft layer — small keys, high correctness, modest throughput.
+- **Shard primaries:** many databases run a Raft group *per shard* or per range (CockroachDB, TiKV, Spanner's Paxos groups) so data plane capacity scales out while each key's order is still majority-agreed.
+- **Config and membership:** "which nodes are in the cluster" and "where is the primary for range R" are themselves consensus-backed values so discovery cannot split (06.12 Metadata Service And Node Discovery).
+- **Not the data plane for bulk ingest:** agreeing on every clickstream event through a five-node quorum is how you invent a latency and throughput ceiling. Use consensus for the pointer, the offset, or the leader; use logs and replication for the bytes (06.03 Replication, 08.02 Task Queue Vs Event Stream).
+
+The operational failure mode is not exotic: disk full on two of five voters, a slow follower delaying commit, or an election flap under prolonged GC that looks like a network partition. It presents as write timeouts and leadership thrash — p99 commit latency climbing while CPU looks fine — not as a clean exception titled "consensus failed."
+
+## Consensus is not replication, and not a lock
+
+Async primary–replica replication can lose acknowledged writes if the primary dies before a replica catches up; consensus will not acknowledge until a majority has the entry. A distributed lock (06.08 Distributed Locks And Leases) *uses* consensus or a consensus-backed store to decide the lock holder; the lock API is a lease and a fencing token, not the log itself. Leader election (06.07 Leader Election) is often one application of consensus — or a lighter gossip/race with weaker guarantees — depending on whether two leaders at once is a disaster or a brief annoyance.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Pay for consensus when"
+  againstTitle="Skip consensus when"
+  forItems={[
+    "Exactly one system of record for a key or config must survive node loss without split brain — metadata, membership, shard leaders",
+    "Clients require linearizable reads/writes and can afford majority RTT on the path (same region: often sub-millisecond to a few milliseconds)",
+    "You need an ordered operations log that every replica applies identically — the replicated state machine pattern",
+    "Losing an acknowledged write on failover is unacceptable, so async replication's window is too wide",
+    "The working set is small (control plane) or sharded into many independent consensus groups so load spreads",
+  ]}
+  againstItems={[
+    "The data can converge eventually and conflicts are rare or mergeable — full quorum on every write is pure cost",
+    "Throughput targets are hundreds of thousands of writes per second on one key space that cannot be sharded into separate groups",
+    "Cross-region majority would add tens to hundreds of milliseconds per write and the product cannot pay it",
+    "A single primary with acknowledgements to one local standby already meets the durability bar you actually have",
+    "The team cannot yet operate quorum loss, member replacement, and election tuning — consensus outages are sharp and total for the key range",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Introduce it by the invariant: "This metadata cannot have two values after a failover, so I put it in a Raft/etcd group of five across AZs — writes need three acknowledgements." Sketch majority intersection in one sentence if asked why three nodes tolerate one failure. Name the client-visible failure mode — minority leader, election timeout under load — before being asked. If the interviewer pushes "why not Paxos," say Raft is the teachable decomposition of the same majority-log idea; do not pretend you have reinvented Multi-Paxos on the whiteboard unless they want that depth. Tie CAP explicitly: consensus chooses CP under partition — the minority stops writing — and Else→C under health — you always pay quorum latency.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Consensus makes a majority of nodes decide the same value (usually the next log entry) so replicas share one history despite crashes and lost messages.",
+    "With 2f+1 voters, any two majorities intersect — that intersection is why committed entries survive leadership changes and why three nodes tolerate one failure.",
+    "Raft-shaped systems elect a leader per term, replicate log entries, and commit only after majority persistence; safety lives in the majority, not in the leader alone.",
+    "Linearizable reads from a leader still need a quorum check or lease proof — a partitioned ex-leader can serve stale state without noticing.",
+    "Use consensus for control planes, membership, and per-shard ordering; do not push bulk data-plane ingest through a single quorum group.",
+    "Consensus is the CP / Else→C choice: minority partitions refuse progress on purpose, and healthy-path writes always pay majority round trips.",
+  ]}
+/>

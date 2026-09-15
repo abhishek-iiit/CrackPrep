@@ -1,32 +1,69 @@
 ---
 title: "Consistent Hashing Load Balancing"
 number: "02.07"
-summary: "Consistent Hashing Load Balancing — notes in progress."
-status: draft
+summary: "Applying the consistent-hashing ring to backend selection keeps a key on the same server across pool changes, at the cost of fairness under a hot key."
+status: published
 free: true
 difficulty: core
 estMinutes: 12
+tags: [consistent-hashing, load-balancing, caching, sharding]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Sticky routing that survives the pool changing size
 
-What breaks without this, and the situation that forces the decision.
+Plain hash-based routing — `hash(key) % N` across N backends — works fine right up until N changes. Add or remove one backend and the modulus changes for almost every key at once, so nearly the entire pool's worth of routing decisions flips simultaneously: every warm cache goes cold and every pinned connection gets rerouted, all at the same moment a backend was probably added specifically to relieve load. 04.07 Consistent Hashing covers the ring mechanism that fixes this — mapping both keys and nodes onto the same hash space so adding or removing a node remaps only the keys immediately adjacent to it, roughly a 1/N slice rather than nearly everything. This lesson isn't about that mechanism again; it's about what changes when you apply it specifically to picking a backend for a request, rather than picking a shard for a piece of data.
 
-## How it works
+## Why a load balancer would want this at all
 
-The mechanism, step by step.
+Three concrete situations, not one:
 
-## Tradeoffs
+- **Warm-cache locality.** A fleet of app servers each keep a local, in-process cache. Route requests for the same key randomly across the fleet and that cache is effectively fragmented N ways — a given key's data is cached on whichever instance last happened to serve it, which for the next request is a coin flip, so the *effective* hit rate for local caching collapses toward zero as N grows. Route consistently by key instead, and every repeat request for that key lands on the same instance, so its local cache actually accumulates hits instead of getting diluted across the fleet.
+- **Affinity for connection-heavy or stateful protocols.** A long-lived WebSocket connection, an in-memory session, or a per-tenant connection pool held open to a downstream service are all expensive to tear down and recreate on every request. Consistent routing means a given client or tenant reliably finds the instance already holding that state.
+- **Sharded backend pools.** Sometimes the backends genuinely aren't interchangeable — each owns a specific shard of a stateful service or a cache tier — and routing by key isn't an optimization, it's a correctness requirement: the request has to reach the instance that owns the data.
+
+## What's different about doing this at the load-balancing layer
+
+The ring's nodes are server instances here, not storage partitions, and that changes a few things in practice rather than in theory.
+
+Instance counts in a load-balanced pool are often small — tens of backends, not the hundreds of shards a storage system might partition across — so virtual nodes matter more, not less. With few physical points on the ring, a plain one-point-per-node mapping can land unevenly by pure chance; the usual fix, giving each physical backend many virtual points spread around the ring, is what actually delivers a roughly even split, and it needs more virtual points per node at low node counts to smooth out the same amount of variance a larger cluster gets from fewer. This is normally implemented in a routing library or the load balancer itself rather than by hand at the call site.
+
+Failure handling also looks different from the storage case. When a backend is removed — deliberately scaled down, or ejected by a health check — only the keys mapped to its slice of the ring, its virtual points and whichever real node picks them up next going clockwise, lose their warm state. Everyone else's routing is untouched. That's the entire improvement over `% N`: instead of the whole fleet cold-starting at once, roughly 1/N of keys cold-start, and the rest keep hitting a warm instance through the change.
+
+<Callout type="warn">
+Consistent hashing guarantees placement stability, not load fairness. It says "this key always goes to the same backend," not "load stays even across backends" — and a genuinely hot key (a viral post, a popular product page) still sends a disproportionate share of traffic to whichever single instance owns it, no matter how well-distributed the ring is. 04.06 Hot Partitions covers the same problem on the storage side; here the fix has the same shape — detect the hot key and give it special-case handling, replicate it across several backends, or bypass affinity for it specifically, rather than expecting the ring to self-correct, because it structurally can't.
+</Callout>
+
+There's a second, subtler cost when consistent hashing is combined with active health-check ejection: a backend that's flapping — failing and passing checks repeatedly rather than staying cleanly up or down — gets added to and removed from the ring on every flap. Every removal cold-starts its slice of keys, and every re-addition re-attracts them, so a flaky-but-technically-alive backend produces a steady trickle of cache-cold requests for exactly the keys it owns — worse than if it had just stayed down and let its neighbor absorb the load once.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Route with consistent hashing when"
+  againstTitle="Route with round robin or least connections when"
+  forItems={[
+    "Backends hold per-key state — a local cache, a pinned connection, an in-memory counter — that's expensive to lose on every request",
+    "The pool resizes routinely (autoscaling, rolling deploys) and you need bounded remapping rather than a fleet-wide cache flush on every change",
+    "Warm-cache locality measurably improves hit rate enough to be worth the added routing complexity",
+    "Backends genuinely own disjoint shards of data, and routing by key is a correctness requirement rather than an optimization",
+  ]}
+  againstItems={[
+    "Requests are uniform and backends are fully stateless and interchangeable, so there's no locality to preserve",
+    "Traffic includes hot keys that would concentrate disproportionate load on a single backend if pinned there",
+    "Even load distribution matters more than key locality — CPU-bound, uniform-cost work is a better fit for least connections",
+    "The backend pool is stable enough in size that plain modulus hashing's remap-everything cost rarely triggers",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Introduce it by what it buys, not by the ring: "I want the same request key to keep landing on the same backend so its local cache stays warm across requests, and I want that to survive the pool being resized — that's consistent hashing, and I'd size virtual nodes for how few physical backends this pool actually has." Then name the cost before being asked: a hot key still overloads whichever single backend owns it, because the ring guarantees stability of placement, not fairness of load, and you'd pair it with hot-key detection rather than expect the routing scheme to fix itself.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Plain hash(key) % N routing remaps nearly every key when N changes; consistent hashing bounds that remap to roughly the fraction of keys owned by the node that changed",
+    "At the load-balancing layer, the ring's nodes are server instances, and small instance counts make virtual nodes more important, not less, for an even split",
+    "The main use cases are warm local-cache locality, affinity for stateful or connection-heavy protocols, and genuinely sharded backend pools where routing by key is required, not optional",
+    "Removing a backend under consistent hashing only cold-starts the slice of keys it owned, unlike modulus hashing, which cold-starts effectively everyone at once",
+    "Consistent hashing guarantees placement stability, not load fairness — a hot key still overloads its one assigned backend regardless of how even the ring's distribution is",
+    "Combining consistent hashing with a flapping health check produces a steady trickle of cold-cache requests for the flapping backend's keys, worse than a clean removal",
+  ]}
+/>

@@ -1,0 +1,93 @@
+---
+title: "Coin Change"
+number: "01.17"
+summary: "Unbounded knapsack on amount: dp[a] = min coins to make a, updated by every coin — BFS also works, DP is cleaner."
+status: published
+free: true
+difficulty: core
+estMinutes: 14
+tags: [dp, bfs]
+updated: "2026-09-15"
+---
+
+## Greedy fails when denominations lie
+
+Given coin denominations and a target `amount`, return the **fewest** number of coins that sum to `amount`, or `-1` if impossible. Each coin value can be used unlimited times.
+
+`coins = [1, 2, 5]`, `amount = 11` → **3** coins (`5 + 5 + 1`). Greedy "always take the largest coin that fits" works for US change but breaks on arbitrary systems: `coins = [1, 3, 4]`, `amount = 6`. Greedy picks `4 + 1 + 1` = three coins; optimal is `3 + 3` = two.
+
+The problem is **unbounded knapsack** on the amount axis: for each sub-amount, try every coin and keep the minimum. No sorting trick saves you — you need a table.
+
+## dp[amount] = minimum coins to make amount
+
+**Invariant:** after processing all coins against all amounts up to `a`, `dp[a]` is the best known coin count for sum `a`, or infinity if unreachable.
+
+Transition: for each coin `c` and each amount `a` from `c` to `target`, `dp[a] = min(dp[a], dp[a - c] + 1)`. You must use coin `c` at least once when stepping from `a - c`.
+
+Initialize `dp[0] = 0` (zero coins make zero). Everything else starts at `Infinity`. If `dp[amount]` is still infinity, return `-1`.
+
+For `coins = [1,2,5]`, `amount = 11`: fill forward — dp[5]=1, dp[10]=2, dp[11]=min(dp[10]+1, dp[9]+1, …)=3.
+
+<Steps>
+<Step title="Allocate dp[0..amount]">Fill with Infinity; dp[0] = 0.</Step>
+<Step title="For each coin c">Outer loop over coins (order does not affect final min for unbounded use).</Step>
+<Step title="For a from c to amount">Relax: dp[a] = min(dp[a], dp[a - c] + 1).</Step>
+<Step title="Return dp[amount] or -1">Infinity means unreachable.</Step>
+</Steps>
+
+BFS on amount (each edge adds one coin) also finds minimum steps — same asymptotics, different framing. DP is usually easier to code without a queue.
+
+## Solution
+
+```ts
+function coinChange(coins: number[], amount: number): number {
+  const dp = new Array<number>(amount + 1).fill(Infinity);
+  dp[0] = 0;
+
+  for (const coin of coins) {
+    for (let a = coin; a <= amount; a++) {
+      dp[a] = Math.min(dp[a], dp[a - coin] + 1);
+    }
+  }
+
+  return dp[amount] === Infinity ? -1 : dp[amount];
+}
+```
+
+Time **O(amount × coins.length)**. Space **O(amount)**.
+
+## Bottom-up DP versus BFS
+
+<Tradeoff
+  forTitle="1D DP when"
+  againstTitle="BFS on amount when"
+  forItems={[
+    "You want the standard unbounded-knapsack template — one array, nested loops",
+    "Follow-up may ask for the actual coin combination — DP backpointers drop out naturally",
+    "Amount is up to 10⁴ and coin count is modest — the table fits comfortably",
+    "You are building toward change-making with limited coin counts (2D knapsack variant)",
+  ]}
+  againstItems={[
+    "You think of amounts as states in a shortest-path graph — BFS matches that mental model",
+    "Coins are huge but amount is small — same complexity, pick whichever you write faster",
+    "You need the count of ways to make change (not minimum coins) — similar loop, different aggregation",
+    "Greedy is correct for the given coin system — say so, then still show DP for the general case",
+  ]}
+/>
+
+## In an interview
+
+Restate with the greedy counterexample `[1,3,4]` amount 6. Define `dp[a]` = min coins for amount `a`. Recurrence: try every coin, take min of `1 + dp[a - coin]`. Initialize infinity, dp[0]=0.
+
+Follow-ups: return the actual coins used, count number of combinations (order matters vs not — two different DPs), or bounded coin supply (0/1 knapsack per coin).
+
+Bug to name: initializing dp[0] to Infinity, or returning 0 when amount is unreachable instead of -1.
+
+<KeyTakeaways items={[
+  "Minimum coins for amount a: dp[a] = min(dp[a], dp[a - coin] + 1) over all coins — unbounded knapsack.",
+  "Greedy fails on arbitrary denominations; always cite a counterexample before coding DP.",
+  "Initialize dp[0] = 0, rest Infinity; answer -1 if dp[amount] stays Infinity.",
+  "Time O(amount × |coins|), space O(amount).",
+  "BFS from 0 to amount with coin edges is an equivalent shortest-path formulation.",
+  "01.20 Word Break and coin change share the same 'fill dp by trying extensions' shape on a 1D axis.",
+]} />

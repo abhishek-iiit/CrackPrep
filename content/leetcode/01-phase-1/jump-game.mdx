@@ -1,0 +1,80 @@
+---
+title: "Jump Game"
+number: "01.26"
+summary: "You do not need the minimum jumps — track the farthest index reachable with one greedy pass."
+status: published
+free: true
+difficulty: core
+estMinutes: 12
+tags: [greedy, array]
+updated: "2026-09-15"
+---
+
+## Can you reach the last index?
+
+Each element is a non-negative jump length from that index. Start at index `0`. Return whether you can reach the last index. `[2,3,1,1,4]` → true; `[3,2,1,0,4]` → false — you land on index 3 with jump length 0 and stall.
+
+Trying every jump length at every index is exponential. DP marking reachable indices works in **O(n²)** worst case when many positions offer large jumps. The question is only **reachability**, not path count or minimum jumps — that distinction matters.
+
+## Greedy: farthest reachable
+
+Track `farthest`, the maximum index reachable from any position up to the current scan. Scan left to right. If `i > farthest`, you are in a dead zone — return false. Otherwise update `farthest = max(farthest, i + nums[i])`. If `farthest >= n-1`, return true early.
+
+The invariant: after processing index `i`, `farthest` is the furthest index reachable using only steps from indices `0..i`. You never need to know *how* you got there.
+
+<Callout type="tip">
+Jump Game II asks for the **minimum** number of jumps. Same scan, but track the end of the current jump "layer" and increment a jump counter when you pass it — still O(n), different bookkeeping.
+</Callout>
+
+## Solution
+
+```ts
+function canJump(nums: number[]): boolean {
+  let farthest = 0;
+
+  for (let i = 0; i < nums.length; i++) {
+    if (i > farthest) return false;
+    farthest = Math.max(farthest, i + nums[i]);
+    if (farthest >= nums.length - 1) return true;
+  }
+  return true;
+}
+```
+
+Time **O(n)**, space **O(1)**. One pass, no auxiliary array.
+
+<Tradeoff
+  forTitle="Greedy farthest when"
+  againstTitle="DP or BFS when"
+  forItems={[
+    "The question is yes/no reachability only — Jump Game I, not minimum jumps",
+    "You want O(n) time and O(1) space with a single forward scan",
+    "Jump lengths are non-negative — farthest only moves forward",
+    "Input length up to 10^4 makes O(n²) DP uncomfortable",
+    "The same scan pattern extends to Jump Game II with a layer counter"
+  ]}
+  againstItems={[
+    "You must count the number of ways to reach the end — DP or combinatorics on positions",
+    "Each jump has a cost and you need minimum cost — Dijkstra or weighted DP",
+    "Jump lengths can be negative — greedy breaks; cycle detection is required",
+    "You need the actual sequence of landing indices — backtrack from a dp table",
+    "The graph is implicit with arbitrary edges, not array-index jumps — run BFS on the graph"
+  ]}
+/>
+
+## In an interview
+
+Clarify: start at 0, each step uses `nums[i]` as max jump length, goal is last index. Walk `[3,2,1,0,4]` — at index 3 you cannot proceed. Propose farthest tracking before coding.
+
+Follow-ups: **Jump Game II** (minimum jumps), **Jump Game III** (can reach any zero?), or "what if you can jump backward?" Greedy fails on backward jumps — that becomes graph reachability.
+
+Bug to name: checking `i + nums[i] >= n-1` only at the end without verifying `i <= farthest` — you might evaluate an unreachable index.
+
+<KeyTakeaways items={[
+  "Jump Game I is reachability — maintain farthest index reachable from the prefix 0..i.",
+  "If current index i exceeds farthest, you are stuck; otherwise extend farthest with i + nums[i].",
+  "O(n) time, O(1) space; no dp table needed for the boolean question.",
+  "Jump Game II adds minimum jumps by counting layers when the scan crosses a moving boundary.",
+  "O(n²) forward DP (mark reachable) works but is slower; greedy is the intended optimal path.",
+  "Non-negative jumps only — negative jumps change the problem to general graph cycle/reachability."
+]} />

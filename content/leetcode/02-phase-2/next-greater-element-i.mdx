@@ -1,0 +1,97 @@
+---
+title: "Next Greater Element I"
+number: "02.38"
+summary: "One decreasing stack pass over nums2 builds a map from each value to its next greater element."
+status: published
+free: true
+difficulty: intro
+estMinutes: 12
+tags: [stack, monotonic-stack, hash-map]
+updated: "2026-09-15"
+---
+
+## Subset queries against a fixed catalog
+
+`nums1` is a subset of values in `nums2`. For each value in `nums1`, find the **next greater element** to its right in `nums2` — the first value in `nums2` after its position that is strictly larger. If none exists, use `-1`.
+
+Brute force: for each query, locate it in `nums2` and scan right — O(n × m). The queries share one backbone array; process `nums2` once with a stack and answer all queries from a map.
+
+This is the gentle introduction to monotonic stack before 02.39 Daily Temperatures and 02.37 Online Stock Span.
+
+## One pass on nums2, map answers
+
+Walk `nums2` left to right. Maintain a stack of values waiting for a greater neighbor (decreasing stack). When `nums2[i]` is greater than stack top, pop and record `nextGreater[popped] = nums2[i]`. Push `nums2[i]`.
+
+After the pass, map each `nums1[j]` to `nextGreater.get(nums1[j]) ?? -1`.
+
+Example: `nums2 = [4, 1, 2, 5, 3]`. When 5 arrives, it resolves 1→5 and 2→5. Final map: 4→5, 1→5, 2→5, 5→none, 3→none.
+
+<Steps>
+<Step title="Scan nums2 with a decreasing stack">
+  Stack holds values whose next greater is not yet seen.
+</Step>
+<Step title="Resolve on a larger arrival">
+  While top < current, pop and assign answer[current value for popped].
+</Step>
+<Step title="Answer nums1 from the map">
+  O(1) lookup per query element.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function nextGreaterElement(nums1: number[], nums2: number[]): number[] {
+  const nextGreater = new Map<number, number>();
+  const stack: number[] = [];
+
+  for (const x of nums2) {
+    while (stack.length > 0 && stack[stack.length - 1] < x) {
+      nextGreater.set(stack.pop()!, x);
+    }
+    stack.push(x);
+  }
+
+  return nums1.map((v) => nextGreater.get(v) ?? -1);
+}
+```
+
+Processing `nums2` is **O(n)** — each element pushed and popped once. Answering `nums1` is **O(m)**. Space **O(n)** for the map and stack.
+
+<Tradeoff
+  forTitle="Monotonic stack + map when"
+  againstTitle="Per-query scan when"
+  forItems={[
+    "Many queries share one source array — preprocess once, answer cheaply",
+    "nums2 length up to 10³–10⁴ makes repeated right-scans O(n × m)",
+    "You need the classic next-greater pattern for harder variants (02.39, circular, indices)",
+    "Values are unique in nums2 — map keyed by value is unambiguous",
+    "One left-to-right pass matches the 'first greater to the right' definition exactly",
+  ]}
+  againstItems={[
+    "m = 1 and n is small — locate and scan right is simpler",
+    "You need index-based answers in nums2, not values — store indices on the stack instead",
+    "Duplicates in nums2 break value-keyed maps — use index stack and binary search variant",
+    "nums2 is static but queries are online with changes — structure needs updates",
+    "Circular next greater (III) needs modulo indexing — different stack setup",
+  ]}
+/>
+
+## In an interview
+
+Restate with `nums1 = [4,1,2]`, `nums2 = [1,3,4,2]`: 4→-1, 1→3, 2→-1. Confirm strictly greater, first to the right, -1 if missing.
+
+Explain decreasing stack: elements wait until a bigger value resolves them. Mention preprocessing nums2 before touching nums1.
+
+Follow-ups: return indices, 02.39 Daily Temperatures (distance not value), circular array. Bug: scanning nums1 first without building the map — recomputes the same rightward walk repeatedly.
+
+<KeyTakeaways
+  items={[
+    "Next Greater Element I preprocesses nums2 once with a decreasing monotonic stack",
+    "When a larger value arrives, it becomes the answer for all smaller stacked values popped",
+    "Map value → next greater, then answer nums1 in O(m) with lookups",
+    "Total time O(n + m); each nums2 element enters and leaves the stack at most once",
+    "Gateway problem to 02.39 Daily Temperatures and 02.37 Online Stock Span",
+    "Stack holds unresolved values; unresolved values left at end have no next greater (-1)",
+  ]}
+/>

@@ -1,0 +1,102 @@
+---
+title: "Mediator"
+number: "03.04"
+summary: "When many widgets talk to many widgets, a mediator recentralises coordination so components speak to one hub instead of an N² web."
+status: published
+free: true
+difficulty: core
+estMinutes: 13
+tags: [behavioral, coupling, ui]
+updated: "2026-09-15"
+---
+
+## The dialog where everything references everything
+
+A flight booking dialog: selecting a departure city filters arrival cities, toggles date pickers, recalculates price, enables the pay button, and clears seat selection when the route changes. Wire each control directly to every other control and you get sixteen bidirectional dependencies for four fields. Add a hotel bundle checkbox and the graph explodes — each new widget must import half the dialog.
+
+That N² coupling is the problem Mediator solves. Controls stop calling each other. They notify a **mediator** ("departure changed to SFO"), and the mediator decides which other controls update. Components stay dumb about their siblings; all interaction policy lives in one place.
+
+Chat rooms, air-traffic control metaphors, and frontend state machines are the same shape: many actors, one coordinator who knows the rules.
+
+## Colleagues, mediator, and notification flow
+
+- **Mediator** — defines a notify interface; holds or looks up colleagues; encodes coordination rules.
+- **Colleague** — UI control, device, or service that talks only to the mediator, never directly to other colleagues.
+- **Client** — constructs colleagues, registers them with the mediator, wires events inward.
+
+<Steps>
+<Step title="Colleague emits an event to the mediator">
+A dropdown fires `mediator.notify(this, { type: 'departureChanged', city: 'SFO' })`. It does not know the arrival list exists.
+</Step>
+<Step title="Mediator applies coordination rules">
+The mediator updates allowed arrivals, clears incompatible dates, disables checkout until the form is valid — whatever the product rules say.
+</Step>
+<Step title="Mediator pushes updates to affected colleagues">
+Colleagues expose setter-style methods the mediator calls. One-way data flow variants (Redux dispatch) are Mediator with immutable state: actions in, reducer decides, subscribers refresh.
+</Step>
+</Steps>
+
+```typescript
+interface Mediator {
+  notify(sender: Colleague, event: string, payload?: unknown): void;
+}
+
+class BookingDialog implements Mediator {
+  constructor(
+    private departure: CitySelect,
+    private arrival: CitySelect,
+    private price: PriceLabel
+  ) {
+    this.departure.setMediator(this);
+    this.arrival.setMediator(this);
+  }
+  notify(sender: Colleague, event: string, payload?: unknown) {
+    if (event === "departureChanged") {
+      this.arrival.setOptions(routesFrom(payload as string));
+      this.price.clear();
+    }
+  }
+}
+```
+
+<Callout type="gotcha">
+The mediator class becomes a god object if every new feature adds another branch to one 800-line `notify` switch. Split by subdomain (pricing mediator vs validation mediator) or replace stringly events with typed action objects before the file becomes unmergeable.
+</Callout>
+
+## Mediator vs Observer
+
+03.06 Observer broadcasts "something changed" to many subscribers who each decide their own reaction — decoupled, but coordination logic scatters across subscribers. Mediator **centralises** the reaction: one place knows "when A changes, update B and C." Use Observer when subscribers are independent; use Mediator when the joint behaviour is the product rule and must stay consistent.
+
+Redux, Vuex, and Elm architecture are Mediator plus immutable state: components dispatch; the store mediates; views re-render.
+
+<Tradeoff
+  forTitle="Reach for Mediator when"
+  againstTitle="Avoid Mediator when"
+  forItems={[
+    "Many objects interact in specific, documented ways and direct references would create a dense dependency web",
+    "Interaction rules change often and you want one module to edit instead of N pairwise links",
+    "Components should be reusable in isolation — a date picker that does not import a price label",
+    "You are modelling a dialog, wizard, or control panel where cross-field validation is the core complexity",
+    "A central event hub with typed actions is already how the team thinks — Mediator names what you are doing"
+  ]}
+  againstItems={[
+    "Only two objects interact — pass a callback or reference and skip the hub",
+    "Subscribers are genuinely independent — 03.06 Observer's broadcast model is simpler and scales better horizontally",
+    "The mediator file is already a bottleneck every team fights over — micro-frontends or bounded contexts may fit better",
+    "Coordination is trivial and the indirection makes debugging harder ('who cleared my field?')",
+    "Real-time peer-to-peer sync between equals (multiplayer cursors) needs direct or CRDT channels, not a single mediator"
+  ]}
+/>
+
+## In an interview
+
+Frame it as taming N² UI coupling: "I would route all control events through a dialog mediator so adding a hotel bundle does not touch the date picker code." Expect Mediator vs Observer — centralised reaction vs distributed. Ask whether state is mutable objects or a single store. Name the failure mode: the mediator god class, and the debugging story when notify order matters but is implicit.
+
+<KeyTakeaways items={[
+  "Mediator encapsulates how a set of objects interact, replacing many-to-many references with many-to-one through a coordinator.",
+  "Colleagues never reference each other directly — they notify the mediator, which applies product rules and updates whoever needs it.",
+  "The pattern trades scattered coupling for concentrated coupling — the mediator module must stay bounded and splittable.",
+  "Redux-style unidirectional data flow is Mediator with immutable state: dispatch in, reducer coordinates, views update.",
+  "Choose Mediator over 03.06 Observer when coordinated multi-object reactions are the rule, not independent reactions to one event.",
+  "Stringly typed notify switches do not scale — typed events or action objects keep the hub maintainable."
+]} />

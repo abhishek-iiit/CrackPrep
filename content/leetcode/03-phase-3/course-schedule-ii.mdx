@@ -1,0 +1,111 @@
+---
+title: "Course Schedule II"
+number: "03.25"
+summary: "01.28 asks whether you can finish — this variant returns a valid take order via Kahn topological sort, or [] when prerequisites form a cycle."
+status: published
+free: true
+difficulty: core
+estMinutes: 14
+tags: [topological-sort, graph, bfs]
+updated: "2026-09-15"
+---
+
+## An order, not just a yes
+
+There are `numCourses` labeled `0 … numCourses-1` and prerequisite pairs `[a, b]` meaning take `b` before `a`. Return **any** valid ordering to finish all courses. If impossible (cycle), return `[]`.
+
+01.28 Course Schedule returns a boolean — same graph, same cycle test. Here you must **emit** the order. DFS post-order topological sort works but is easier to mishandle (cycle detection mid-recursion). **Kahn's algorithm** — repeatedly take nodes with in-degree 0 — mirrors "take whatever course has no unmet prerequisites" and fails cleanly when the queue runs dry before all courses are scheduled.
+
+The traps: `[a, b]` direction (`b` is prerequisite of `a`); returning a partial order when a cycle exists; off-by-one on course labels.
+
+## Kahn's topological sort
+
+Build adjacency list and in-degree array from prerequisites. Enqueue every course with in-degree 0. Dequeue to `order`, decrement in-degree of neighbors, enqueue newly freed courses. If `order.length < numCourses`, a cycle exists — return `[]`.
+
+The invariant: when a course enters `order`, all its prerequisites are already in `order`.
+
+<Steps>
+<Step title="Build graph: pre → course">
+For `[course, pre]`, edge `pre → course`, increment `indeg[course]`.
+</Step>
+<Step title="Seed queue with in-degree 0 courses">
+These can be taken immediately.
+</Step>
+<Step title="Process queue, append to order">
+Decrement neighbor in-degrees; enqueue at 0.
+</Step>
+<Step title="Compare order length to numCourses">
+Mismatch means cycle — return `[]`.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function findOrder(numCourses: number, prerequisites: number[][]): number[] {
+  const indeg = new Array(numCourses).fill(0);
+  const adj: number[][] = Array.from({ length: numCourses }, () => []);
+
+  for (const [course, pre] of prerequisites) {
+    adj[pre].push(course);
+    indeg[course]++;
+  }
+
+  const queue: number[] = [];
+  for (let i = 0; i < numCourses; i++) {
+    if (indeg[i] === 0) queue.push(i);
+  }
+
+  const order: number[] = [];
+  while (queue.length) {
+    const u = queue.shift()!;
+    order.push(u);
+    for (const v of adj[u]) {
+      indeg[v]--;
+      if (indeg[v] === 0) queue.push(v);
+    }
+  }
+
+  return order.length === numCourses ? order : [];
+}
+```
+
+Time **O(V + E)** for V courses and E prerequisites. Space **O(V + E)** for adjacency and in-degree storage.
+
+<Tradeoff
+  forTitle="Kahn BFS topo sort when"
+  againstTitle="DFS post-order topo sort when"
+  forItems={[
+    "You need an explicit order, not just cycle detection — Kahn produces one directly",
+    "Same pattern as 01.28 Course Schedule and 01.32 Alien Dictionary",
+    "Cycle detection is a single length check — no three-color DFS state to explain",
+    "Parallel 'available courses' interpretation is intuitive in interviews",
+    "Sparse prerequisite graphs — O(V+E) either way, Kahn is less recursion depth",
+  ]}
+  againstItems={[
+    "Problem asks for lexicographically smallest order — min-heap on in-degree 0 queue",
+    "You need all topological orderings — neither single Kahn nor single DFS suffices",
+    "Graph is deep and stack overflow is a concern in Python — iterative DFS or Kahn preferred anyway",
+    "03.26 Parallel Courses III adds weighted longest path on the DAG — topo order + DP extends this",
+    "Online insertion of edges — dynamic cycle detection, not static topo sort",
+  ]}
+/>
+
+## In an interview
+
+Example: `numCourses = 4`, prereqs `[[1,0],[2,0],[3,1],[3,2]]` → one valid order `[0,1,2,3]` or `[0,2,1,3]`. Confirm pair direction and that any valid order works.
+
+Say: DAG scheduling, Kahn's algorithm, if processed count < n then cycle. Connect to 01.28 Course Schedule as the boolean version.
+
+Follow-ups: lexicographic smallest order (priority queue), count orderings, minimum semesters (03.26). Bug: reversing edge direction so prerequisites point the wrong way.
+
+<KeyTakeaways
+  items={[
+    "Course Schedule II is topological sort on a prerequisite DAG — output order or [] on cycle",
+    "Kahn's algorithm: repeatedly dequeue in-degree 0 nodes; fewer than n processed ⟺ cycle",
+    "Edge direction: [course, pre] means pre must appear before course in the output",
+    "01.28 Course Schedule uses the same graph; the only change is recording order vs returning false",
+    "O(V+E) time and space — standard for sparse prerequisite lists up to 2000 courses",
+    "03.26 Parallel Courses III layers longest-path DP on top of this topo processing",
+  ]}
+/>

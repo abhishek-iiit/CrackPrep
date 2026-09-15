@@ -1,32 +1,131 @@
 ---
 title: "Video Transcoding Pipeline"
 number: "13.05"
-summary: "Video Transcoding Pipeline — notes in progress."
-status: draft
+summary: "Turn one uploaded mezzanine into multi-bitrate renditions and packaging artifacts via an async worker pipeline — because sync encode in the upload request will never fit the latency budget."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: deep
+estMinutes: 18
+tags: [video, transcoding, pipelines]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Upload finished is not "ready to play"
 
-What breaks without this, and the situation that forces the decision.
+A phone uploads an H.264/HEVC file at whatever resolution and bitrate the camera chose. Players on other phones, smart TVs, and throttled networks cannot all consume that file safely. You need **renditions** — multiple resolutions and bitrates — and usually **packaging** into HLS or DASH segments with a manifest. That work is CPU-heavy (often GPU-heavy), measured in minutes for long form, and must not sit inside the upload HTTP request.
 
-## How it works
+A **transcoding pipeline** is an asynchronous job system: ingest event → validate → encode ladder → package → publish → notify. The design questions are queueing, idempotency, worker isolation, and what "done" means for the product.
 
-The mechanism, step by step.
+## Pipeline stages
 
-## Tradeoffs
+<Steps>
+  <Step title="Ingest trigger">
+    Object-created event or `upload complete` API (13.04) enqueues a job `{videoId, sourceKey}`. Status becomes `processing`.
+  </Step>
+  <Step title="Probe and validate">
+    `ffprobe`-style inspection: codec, resolution, duration, audio. Reject or route on policy (max duration, banned codecs, missing audio). Store probe metadata on the video row.
+  </Step>
+  <Step title="Choose an encoding ladder">
+    Map source resolution to a set of output rungs — e.g. 360p, 480p, 720p, 1080p — each with target video bitrate and audio bitrate. Do not invent rungs above the source; upscaling burns CPU for no quality. Short-form social often uses a shorter ladder than premium long-form.
+  </Step>
+  <Step title="Transcode renditions">
+    Workers (FFmpeg, media services, GPU fleet) produce one output per rung, writing to object storage. Parallelise across rungs; optionally chunk long GOP segments for horizontal scale on a single title.
+  </Step>
+  <Step title="Package for ABR">
+    Slice into HLS/DASH segments, write playlists/manifests, optionally generate thumbnails and a poster frame. 13.06 covers how the player picks among rungs.
+  </Step>
+  <Step title="Publish atomically">
+    Write manifests to a publish prefix, update DB `status=ready` with the playback URL only when required rungs succeeded. Partial failure should not flip ready with a broken master playlist.
+  </Step>
+  <Step title="Notify and clean up">
+    Webhook/push to the owner; optional delete or glacier the mezzanine per retention; emit metrics (queue lag, encode minutes, failure rate).
+  </Step>
+</Steps>
+
+## Job system requirements
+
+Transcoding is the poster child for a **work queue**, not a cron loop:
+
+- **Idempotent jobs** keyed by `videoId` + source version so duplicate S3 events do not double-spend GPU.
+- **Visibility timeout / lease** long enough for the worst encode (or heartbeat renewals) — 06.08-style lease thinking applies; a 30-second queue timeout on a 20-minute encode is a thundering retry storm.
+- **Priority lanes** — short social clips ahead of 2-hour uploads if that matches product UX.
+- **Dead letter** for poison files after N attempts; surface `failed` to the user with a reason class.
+- **Autoscaling on queue depth and encode-minutes**, not on HTTP QPS.
+
+CPU workers are fine for modest volume; GPU workers change the unit economics for high-throughput H.264/HEVC. Managed encoding APIs trade margin for ops. The architecture diagram stays the same; the worker image changes.
+
+## Ladder design (order-of-magnitude)
+
+A social-video starting point to reason with — not a universal standard:
+
+| Rung | Typical peak bitrate (ballpark) | Why it exists |
+| --- | --- | --- |
+| 360p | ~0.5–0.8 Mbps | Bad networks, low-end devices |
+| 480p | ~1–1.5 Mbps | Default mobile |
+| 720p | ~2–3 Mbps | Mainstream |
+| 1080p | ~4–6 Mbps | Wi-Fi / large screens |
+
+Audio often sits around 96–128 kbps AAC stereo for this class of content. Premium VOD uses higher bitrates, more rungs, and per-title encoding where complexity analysis sets bitrate per title. Say when you are using a template ladder versus per-title; both are valid at different scales.
+
+## Capacity sketch that sizes the worker pool
+
+Encode cost is roughly proportional to **pixels × duration × codec complexity**, not to upload QPS. A ballpark to reason with, not a benchmark: a 60-second 1080p social clip might burn on the order of tens of CPU-seconds to a few CPU-minutes per rung depending on preset (ultrafast vs slow) and whether you use hardware encode. Four rungs in parallel on one machine contend for memory and scratch disk; many shops run **one rung per job** and fan out four jobs per title so autoscaling stays simple.
+
+If you ingest 10,000 one-minute videos a day and each needs ~2 encode-minutes of fleet time across the ladder, that is ~20,000 encode-minutes a day ≈ 14 encode-minutes a minute average — a handful of busy workers at average load, and several times that at the evening peak. The spike shape matters more than the daily total: a viral moment that dumps a day of uploads into an hour will back up the queue unless you either shed priority (defer long-form) or burst the fleet.
+
+Thumbnails and posters are cheap compared to video rungs but still belong on the checklist for `ready` if the product UI requires them. Generate a poster frame at a fixed timestamp (or at an energy peak) and a sprite sheet for hover previews as separate small jobs so a slow sprite does not block the first playable rung under progressive publish.
+
+Mezzanine retention is a cost dial: keep the original for re-laddering when you change presets, or delete after successful publish and accept that a ladder change means re-upload. Studios keep mezzanines; ephemeral social apps often lifecycle them to cold storage after N days.
+
+## Failure modes that page people
+
+- **Queue lag** — uploads succeed but "processing" spins for hours; users re-upload; lag worsens. Publish lag SLO separately from upload SLO.
+- **Thundering retries** — worker crashes at 99% without checkpointing; whole title restarts. Prefer resumable chunked encodes for long form.
+- **Disk fill on workers** — temp files from FFmpeg; always bound scratch and clean on exit.
+- **Ready with missing audio / one broken rung** — master playlist references 404 segments; player fails mysteriously. Gate readiness on a checklist.
+- **Codec licensing / patent surface** — know what your stack is allowed to ship; this is a business constraint, not only a technical one.
+
+<Callout type="gotcha">
+Marking the video playable as soon as the first 360p rung finishes improves time-to-first-play and is a valid progressive-publish strategy — but the master playlist and API must advertise only rungs that exist. Shipping a static full ladder manifest while higher rungs are still encoding produces mid-session failures when the player tries to upshift.
+</Callout>
+
+## Where this sits relative to neighbours
+
+- **13.04** delivers the mezzanine to the bucket.
+- **13.05** (this lesson) produces the ladder and packages it.
+- **13.06** decides which rung the player fetches at runtime and how CDN edges cache segments.
+- **13.07** (later) adds signed playback and DRM when the threat model requires it.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Run an async transcoding pipeline when"
+  againstTitle="Serve the upload as-is (or a single re-encode) when"
+  forItems={[
+    "Clients span networks and devices that cannot share one bitrate safely",
+    "You need HLS/DASH packaging, thumbnails, or standardised codecs from arbitrary phone uploads",
+    "Encode time exceeds any interactive request budget — minutes, not milliseconds",
+    "Volume justifies a worker fleet or managed encoder with queue-based autoscaling",
+    "Product requires ready/failed states, retries, and priority between content types",
+  ]}
+  againstItems={[
+    "Internal tools where every viewer can handle the source file and volume is tiny",
+    "Live streaming (different pipeline — ingest, transmux, low-latency path; see later live lessons)",
+    "You only ever need one small preview and can generate it with a cheap synchronous tool under a few seconds",
+    "Budget cannot support encode-minutes and you accept progressive download of a single compressed file",
+    "Legal/codec constraints block the outputs you would need for a multi-device ladder",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Walk upload → queue → probe → parallel ladder → package → atomic ready. Mention idempotency, long leases, and queue-lag as the operational failure. Offer progressive publish of lower rungs if time-to-first-play matters. Tie ABR playback to 13.06. Do not pretend FFmpeg flags are the system design — the queue and state machine are.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Transcoding is an async pipeline with explicit processing/ready/failed states — never part of the upload request",
+    "Probe first, then encode a ladder capped by source resolution; package into HLS/DASH for ABR clients",
+    "Jobs must be idempotent with leases long enough for worst-case encode, plus DLQ for poison media",
+    "Gate ready on a rendition checklist so manifests never reference missing segments",
+    "Queue lag is the user-visible failure mode; scale on depth and encode-minutes",
+    "Progressive publish of lower rungs is fine when the playlist only advertises rungs that exist",
+  ]}
+/>

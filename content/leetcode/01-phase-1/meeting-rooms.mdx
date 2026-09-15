@@ -1,0 +1,84 @@
+---
+title: "Meeting Rooms"
+number: "01.38"
+summary: "Sort by start and compare neighbors — overlap anywhere means one person cannot attend all meetings."
+status: published
+free: true
+difficulty: intro
+estMinutes: 9
+tags: [intervals, sorting, greedy]
+updated: "2026-09-15"
+---
+
+## Can one person attend everything?
+
+Each meeting is `[start, end]`. Given `[[0,30],[5,10],[15,20]]`, meetings 2 and 3 overlap with meeting 1 — return **false**. For `[[7,10],[2,4]]`, no overlap after sorting — return **true**.
+
+You do not need to merge intervals or count rooms. You only need to know whether **any** two intervals intersect. After sorting by start, an overlap exists iff some interval starts before the previous one ends.
+
+## Sort and scan neighbors
+
+Sort by `start`. For `i` from 1 to n−1, if `intervals[i][0] < intervals[i-1][1]`, two meetings conflict — return false. If the loop completes, return true.
+
+Why `<` and not `<=`? Back-to-back meetings `[0,10]` and `[10,20]` share an endpoint; one person can leave one and enter the other — no conflict. LeetCode uses half-open semantics in spirit: touching ends are allowed.
+
+<Steps>
+<Step title="Sort by start">
+Order meetings chronologically by start time.
+</Step>
+<Step title="Compare adjacent pairs">
+Only sorted neighbors can overlap — if none of them conflict, the set is conflict-free.
+</Step>
+<Step title="Early exit on conflict">
+First `start < prevEnd` proves attendance is impossible.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function canAttendMeetings(intervals: number[][]): boolean {
+  intervals.sort((a, b) => a[0] - b[0]);
+
+  for (let i = 1; i < intervals.length; i++) {
+    if (intervals[i][0] < intervals[i - 1][1]) return false;
+  }
+  return true;
+}
+```
+
+Time **O(n log n)** for sort, **O(n)** scan. Space **O(1)** beyond sort.
+
+<Tradeoff
+  forTitle="Sort + adjacent check when"
+  againstTitle="Sweep line / min-heap when"
+  forItems={[
+    "Question is boolean — any overlap at all, not how many rooms",
+    "n is modest and a simple sort answers the whole problem",
+    "Warm-up before 01.39 Meeting Rooms II in the same interview arc",
+    "Input is a flat list of intervals with no preprocessing structure",
+    "You want the minimum code path to validate a personal calendar"
+  ]}
+  againstItems={[
+    "You need the minimum number of concurrent rooms — 01.39 heap or chronoline sweep",
+    "Meetings arrive online and the set changes every query — maintain a balanced structure",
+    "You must list all conflicting pairs, not just detect existence",
+    "Timestamps are integers in [0, 10⁶] — difference array or bucket scan can avoid sort",
+    "Weighted meetings where overlap cost varies — not a pure interval overlap question"
+  ]}
+/>
+
+## In an interview
+
+Restate: one person, can they attend all meetings? Empty list returns true. Sort by start, walk adjacent pairs. O(n log n). This is the gateway to 01.39 — say so explicitly if time remains.
+
+Follow-ups: return the conflicting pair, merge overlapping meetings (01.36), minimum rooms (01.39). Clarify touching endpoints: `[1,2]` and `[2,3]` should return true. Bug: using `<=` on the end comparison and rejecting valid back-to-back schedules.
+
+<KeyTakeaways items={[
+  "After sorting by start, only adjacent intervals can overlap — compare each pair once.",
+  "Conflict exists when `currentStart < previousEnd`; equal start and end (back-to-back) is fine.",
+  "This is detection only — no merge, no room count — the simplest interval scan.",
+  "Time O(n log n), space O(1) extra; same sort key as 01.36 but a weaker question.",
+  "01.39 Meeting Rooms II asks how many rooms when overlap is allowed but parallelized.",
+  "01.37 Non-overlapping Intervals removes meetings; this problem only checks feasibility."
+]} />

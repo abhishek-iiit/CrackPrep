@@ -1,0 +1,99 @@
+---
+title: "Graph Valid Tree"
+number: "01.33"
+summary: "A tree on n nodes has exactly n−1 edges and no cycles — check both, not just connectivity."
+status: published
+free: true
+difficulty: core
+estMinutes: 13
+tags: [graph, union-find, dfs]
+updated: "2026-09-15"
+---
+
+## Tree means connected and acyclic
+
+Given `n` nodes labeled `0 … n-1` and an edge list, decide if the graph is a **tree**. For `n = 5`, edges `[[0,1],[0,2],[0,3],[1,4]]` form a tree; adding `[1,2]` creates a cycle and fails.
+
+Two facts characterize a tree on `n` nodes: exactly **n − 1** edges, and **one** connected component with no cycles. Checking only connectivity misses extra edges that close a loop. Checking only `|E| = n - 1` misses disconnected graphs with the right edge count. You need both — or one algorithm that detects a cycle while confirming a single component.
+
+## Union-Find or DFS
+
+**Union-Find:** If an edge connects two nodes already in the same component, a cycle exists — return false. After processing all edges, exactly one root remains (or `find(0)` reaches everyone). Also reject upfront if `edges.length !== n - 1`.
+
+**DFS/BFS:** Build adjacency list, run from node 0, track visited count and parent to skip the undirected back-edge. Valid iff visited count equals `n` and there is no cycle.
+
+<Steps>
+<Step title="Quick reject on edge count">
+If `edges.length !== n - 1`, return false immediately — too many edges means a cycle; too few means disconnected.
+</Step>
+<Step title="Union adjacent nodes">
+For each edge `[u, v]`, if `find(u) === find(v)`, cycle detected. Else `union(u, v)`.
+</Step>
+<Step title="Confirm one component">
+After all unions, every node should share the same root — with n−1 successful merges, connectivity is automatic if acyclic.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function validTree(n: number, edges: number[][]): boolean {
+  if (edges.length !== n - 1) return false;
+
+  const parent = Array.from({ length: n }, (_, i) => i);
+
+  const find = (x: number): number => {
+    if (parent[x] !== x) parent[x] = find(parent[x]);
+    return parent[x];
+  };
+
+  const union = (a: number, b: number): boolean => {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra === rb) return false; // cycle
+    parent[ra] = rb;
+    return true;
+  };
+
+  for (const [u, v] of edges) {
+    if (!union(u, v)) return false;
+  }
+  return true;
+}
+```
+
+Time **O(n · α(n))** — effectively linear for interview sizes. Space **O(n)** for the parent array.
+
+<Tradeoff
+  forTitle="Union-Find when"
+  againstTitle="DFS/BFS when"
+  forItems={[
+    "Input is an edge list, not an adjacency matrix — UF merges edges as they arrive",
+    "You only need valid/invalid, not the tree structure or traversal order",
+    "Same code extends to dynamic connectivity problems later in the graph unit",
+    "Edge count check plus cycle detection is a compact two-line story",
+    "n up to 10⁵ — path compression keeps merges fast"
+  ]}
+  againstItems={[
+    "You must also print the tree, run LCA, or return a parent array — DFS builds adjacency for free",
+    "Graph is already an adjacency list in memory — DFS avoids rebuilding structure",
+    "You need to detect *where* the cycle is, not just that one exists",
+    "Recursive DFS on a tree is the prelude to tree DP on the same node labels",
+    "Interviewer asks for iterative explicit stack to avoid recursion depth limits"
+  ]}
+/>
+
+## In an interview
+
+State the definition: connected, acyclic, n nodes ⇒ n−1 edges. Ask if `n = 0` or `n = 1` with no edges (valid tree). Propose edge-count guard first — it eliminates half the bad cases in one comparison — then Union-Find for cycle detection.
+
+Follow-ups: directed tree (different problem), find the redundant edge, build adjacency and run BFS. Name the bug: skipping the edge-count guard — with fewer than n−1 edges the graph cannot connect all nodes; with n−1 edges but a cycle, Union-Find catches the first redundant edge that closes the loop.
+
+<KeyTakeaways items={[
+  "A tree on n labeled nodes has exactly n − 1 edges; fewer or more edges cannot form a tree.",
+  "Acyclicity is equivalent to 'no edge connects two nodes already in the same component' during union.",
+  "Edge-count rejection is O(1) and catches disconnected graphs before any traversal.",
+  "Union-Find with path compression handles up to 10⁵ nodes; DFS/BFS is equally valid with O(n) space for adjacency.",
+  "Do not confuse with directed acyclic graph — this problem is undirected.",
+  "01.34 Connected Components and 01.28 Course Schedule reuse the same adjacency and visit patterns on different predicates."
+]} />

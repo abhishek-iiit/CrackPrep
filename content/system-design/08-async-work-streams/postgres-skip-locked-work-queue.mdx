@@ -1,32 +1,94 @@
 ---
 title: "Postgres SKIP LOCKED Work Queue"
 number: "08.06"
-summary: "Postgres SKIP LOCKED Work Queue — notes in progress."
-status: draft
+summary: "How SELECT ... FOR UPDATE SKIP LOCKED turns a plain table into a concurrent-safe work queue, and the throughput ceiling where it stops being one."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 15
+tags: [postgres, queues, locking, concurrency]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The problem: a queue is just a table, until two workers reach for the same row
 
-What breaks without this, and the situation that forces the decision.
+A job queue needs exactly three operations: insert a row of pending work, let one worker claim it, let that worker mark it done. Postgres already has the table and the row lock; the only open question is whether "let exactly one worker claim it" can be made safe without standing up a separate queue product next to the database.
 
-## How it works
+The naive version fails immediately. `SELECT` the oldest pending row, then `UPDATE` it to mark it claimed. Between those two statements, a second worker's `SELECT` can see the same row as still pending — nothing has committed yet — and both workers act on it. The job runs twice, and if the job charges a card or sends an email, twice is a real bug, not a rounding error. The fix is a lock. The obvious lock, `FOR UPDATE`, fixes correctness and introduces a stall.
 
-The mechanism, step by step.
+## FOR UPDATE, NOWAIT, and the case SKIP LOCKED actually solves
 
-## Tradeoffs
+`SELECT ... FOR UPDATE` takes an exclusive row lock on whatever rows the query returns, and any other transaction that tries to lock the same row blocks until the first one commits or rolls back. That's correct — no two workers can ever claim the same row — but if ten workers all run `SELECT ... FOR UPDATE ... ORDER BY created_at LIMIT 1` at once, they don't get ten distinct rows. They contend for the same top-of-queue row, and nine of them sit blocked waiting for the tenth to finish, exactly the serialization a queue is supposed to avoid.
+
+`NOWAIT` swaps the block for an immediate error instead: a worker that can't get the lock gets a `55P03` back on the spot rather than waiting. That avoids the stall but pushes the problem into the application, which now has to catch the error and retry — and under real contention, many workers retry at once, which is its own thundering herd of round trips that mostly fail again.
+
+`SKIP LOCKED` does the third thing: it filters locked rows out of the candidate set entirely and returns whatever's left. Ten workers running the same query concurrently don't queue behind each other and don't error — each one locks a distinct row (or rows) in a single round trip, because the rows any of them has already locked simply aren't candidates for anyone else.
+
+| Clause | Behavior when a candidate row is already locked |
+| --- | --- |
+| `FOR UPDATE` | Blocks until the lock is released |
+| `FOR UPDATE NOWAIT` | Raises an error immediately |
+| `FOR UPDATE SKIP LOCKED` | Silently excludes the row and returns the next unlocked one |
+
+<Steps>
+  <Step title="Claim: lock and mark inside one short transaction">
+    `BEGIN; SELECT id FROM jobs WHERE status = 'pending' ORDER BY priority DESC, created_at FOR UPDATE SKIP LOCKED LIMIT n; UPDATE jobs SET status = 'processing', locked_by = $worker, locked_at = now() WHERE id = ANY($ids); COMMIT;` — because SKIP LOCKED only filters rows locked by other still-open transactions, concurrent workers running this exact query each land on a disjoint set of rows without any of them waiting on another.
+  </Step>
+  <Step title="Do the work outside the transaction">
+    The claiming transaction commits immediately, which releases the row lock right away. The actual job — an email send, a video encode, a webhook call — runs with no lock held at all, so a slow job never blocks another worker's claim query. This is the detail that makes the pattern safe to use for jobs of wildly different durations.
+  </Step>
+  <Step title="Acknowledge or requeue">
+    On success, `UPDATE jobs SET status = 'done'`. On failure, either put the row back to `pending` with an incremented attempt counter, or move it to a dead-letter status once attempts exceed a limit — the same retry shape as any other queue.
+  </Step>
+  <Step title="Recover from a worker that never acknowledges">
+    A worker that crashes mid-job never issues the final `UPDATE`, so the row sits in `processing` forever unless something notices. The standard fix is a visibility timeout: a periodic reaper resets any row whose `locked_at` is older than the job's expected runtime back to `pending` — functionally a lease expiring. That reclaimed row might genuinely still be running elsewhere by the time it's reclaimed, which is exactly why 02.09 Retries Timeouts And Idempotency isn't optional here — it's the reason this whole pattern is safe to run twice.
+  </Step>
+</Steps>
+
+## What SKIP LOCKED is actually skipping
+
+A row is filtered out when another still-open transaction holds a conflicting lock on it — an explicit `FOR UPDATE`, or an in-flight update. Skipped rows aren't necessarily stuck; they're being processed, or about to be, by whoever holds them. Whether your own transaction's snapshot can even see the row at all is a separate question, resolved by MVCC visibility before locking is considered — see 03.07 MVCC. Ordering matters too: `ORDER BY priority DESC, created_at LIMIT n` still has to sort candidates before SKIP LOCKED filters them, so this needs a supporting index — typically a partial index on the pending rows only (`WHERE status = 'pending'`) — or the claim query degrades into a sequential scan under load, which defeats the entire point.
+
+<Callout type="gotcha">
+Every claim is an `UPDATE`, and Postgres never modifies a tuple in place — it writes a new row version and marks the old one dead. A queue table processing thousands of jobs an hour rewrites its entire row set every few minutes. If autovacuum doesn't keep pace, the SKIP LOCKED scan itself starts walking past a growing pile of dead tuples to find live ones, and the queue that was supposed to be fast gets slower over the course of the day with no code change and no obvious cause. Tune autovacuum aggressively on this specific table, or periodically delete or archive completed rows instead of letting them accumulate indefinitely.
+</Callout>
+
+## Where a table stops being a queue
+
+The strongest reason to reach for this pattern in the first place is transactional enqueue: `INSERT INTO orders ...` and `INSERT INTO jobs (kind, payload) VALUES ('send_confirmation', ...)` commit in the same transaction, so there is no window where the order exists but the job doesn't, or vice versa. A separate broker can't give you that without an outbox pattern of its own — this is the point where the design earns its place rather than being "Postgres because we already run Postgres."
+
+That guarantee has a ceiling. A single Postgres primary can sustain, order-of-magnitude, tens of thousands of simple writes a second under favorable conditions — this is a ballpark to reason with, not a benchmark, since it moves with hardware, WAL settings, and transaction size. The queue table doesn't get that budget to itself: it shares the primary's WAL, connection pool, and vacuum cycles with whatever business data lives in the same database, and every claim costs at least one `UPDATE` and its WAL record. At real production concurrency — hundreds of workers, thousands of sustained jobs a second — the queue table becomes the busiest table on the primary, and it's usually vacuum falling behind, not raw throughput, that shows up first. 08.02 Task Queue Vs Event Stream covers what a dedicated broker buys instead: partitioned logs that spread writers across explicit shards and never need vacuuming at all.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Reach for a SKIP LOCKED queue when"
+  againstTitle="Reach for a dedicated broker when"
+  forItems={[
+    "Jobs must be enqueued in the exact same transaction as the business write that creates them — a plain INSERT gives you that for free, a separate broker needs an outbox",
+    "Throughput is modest — dozens to low thousands of jobs a second, not tens of thousands sustained — so the primary's WAL and lock manager have headroom",
+    "You already operate Postgres and would rather not run and monitor a second stateful system for what is, at this volume, a small feature",
+    "Jobs benefit from SQL-native features for free: joins against business data, ad hoc queries over current queue state, transactional retries",
+    "Ordering only needs to be approximate — priority plus insertion time — not a strict, replayable log",
+  ]}
+  againstItems={[
+    "Sustained throughput runs into the tens of thousands of jobs per second or higher, where the claim UPDATE competes with every other write on the primary",
+    "Multiple independent consumer services each need their own copy of every event rather than one queue where a single claim removes the work — that's fan-out (08.09), not a work queue",
+    "You need a durable, replayable log rather than a queue that discards state once a job is marked done",
+    "Vacuum and bloat on a high-churn table would otherwise become something the team has to actively babysit",
+    "Delivery has to cross regions or datacenters — a single Postgres primary is a single point of write concurrency",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Introduce it by the failure it avoids, not the clause name: "Two workers can't be allowed to see the same pending row as claimable, and blocking one of them behind the other defeats the point of having multiple workers — so I'd use SKIP LOCKED to let each one claim a disjoint row in one round trip." Expect two follow-ups: what happens when a worker crashes mid-job (a visibility timeout reclaims the row, and idempotency is what makes reclaiming safe), and where this stops scaling (name the shared-WAL, shared-vacuum ceiling before being asked, and know roughly why it's there).
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "SKIP LOCKED filters rows locked by other open transactions out of the candidate set instead of blocking or erroring, so concurrent workers each claim a disjoint row in one round trip",
+    "The claim should be a short, separate transaction from the job itself — holding a row lock across slow application work turns the whole pattern back into a queue that stalls",
+    "A crashed worker leaves a row stuck in 'processing' forever unless a visibility timeout reclaims it, which means jobs must be safe to run more than once",
+    "Every claim is an UPDATE, and Postgres MVCC turns every UPDATE into a new row version — a high-churn queue table needs aggressive vacuuming or its own scan degrades over the day",
+    "The real selling point is transactional enqueue: the business write and the job insert commit together, a guarantee a separate broker can't offer without an outbox",
+    "The ceiling is the shared primary itself — WAL, connections, and vacuum cycles are split with the rest of the database, so this fits modest throughput, not tens of thousands of sustained jobs a second",
+  ]}
+/>

@@ -1,32 +1,91 @@
 ---
 title: "Signed URLs DRM And Video Security"
 number: "13.07"
-summary: "Signed URLs DRM And Video Security — notes in progress."
-status: draft
+summary: "How signed URLs, tokenized CDN edges, and DRM layers stop hotlinking and casual redistribution without pretending they stop a determined pirate."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 14
+tags: [signed-urls, drm, video-security, cdn]
+updated: "2026-09-15"
 ---
 
-## The problem
+## A public object URL is a permanent share button
 
-What breaks without this, and the situation that forces the decision.
+Once a video lives in object storage behind a stable HTTPS URL, anyone who can see that URL can fetch the bytes — and anyone who can fetch the bytes can forward the link. Hotlinking is not a clever attack; it is the default behavior of a URL. A CDN that caches the same path for every viewer makes redistribution cheaper, not harder. The security problem for video is not "encrypt the file on disk" — storage encryption already does that against a stolen disk. The problem is authorization at the edge: proving that *this* viewer, for *this* asset, for a short window of time, is allowed to pull segments.
 
-## How it works
+Signed URLs are the first layer. DRM is the second. Confusing them is how designs end up either overbuilt (Widevine for a private company training video) or underbuilt (a long-lived signed URL for a paid premiere that gets pasted into a forum).
 
-The mechanism, step by step.
+## What a signed URL actually authorizes
 
-## Tradeoffs
+A signed URL is not encryption. It is a capability token baked into the query string or a cookie: an expiry, a resource path (or path prefix), optionally a client IP or referrer constraint, and a MAC over those fields using a key the origin and the CDN share. The edge checks the signature and the expiry before serving; the origin never sees the play request if the signature is wrong.
+
+<Steps>
+  <Step title="Mint at the application, not at the CDN">
+    After the app has authenticated the user and checked entitlements, it asks a signing service (or signs locally with a short-lived key) for a URL or cookie scoped to that asset. The signing key never ships to the client as a general-purpose secret — only the resulting capability does.
+  </Step>
+  <Step title="Scope tightly">
+    Prefer a path to a single manifest or a short-lived cookie covering a directory of segments over a wildcard that covers the whole bucket. A signature that authorizes `/*` is a temporary public CDN.
+  </Step>
+  <Step title="Expire on a playback timescale">
+    Minutes to a few hours is the usual range for VOD; live manifests may need refresh every tens of seconds because the playlist itself is rewriting. An expiry longer than a viewing session is how a shared link keeps working after the subscription lapses.
+  </Step>
+  <Step title="Serve from the CDN with signature verification">
+    The edge rejects bad or expired signatures with `403` before touching origin. Rotation of signing keys is an ops event: dual-key verification during rotation avoids a mass outage when old cookies are still in flight.
+  </Step>
+</Steps>
+
+13.04 Video Upload With Signed URLs And Multipart uses the same mechanism on the write path; here the concern is the read path and the fact that a read URL is inherently shareable until it expires.
+
+| Control | Stops | Does not stop |
+| --- | --- | --- |
+| Short-lived signed URL / cookie | Hotlinking after expiry, anonymous scraping of stable paths | Screen recording, a user who re-shares while the URL is still valid |
+| Path-scoped signature | Access to sibling objects in the same bucket | Someone with a valid signature for that exact path |
+| IP-bound signature | Casual link forwarding to another network | Mobile clients whose IP changes mid-playback (breaks legitimate users) |
+| DRM license + encrypted segments | Casual file copy of cleartext mezzanine; basic rip tools without a license | Determined pirates with a compromised client or analog hole |
+
+<Callout type="gotcha">
+A signed URL that points at a cleartext MP4 still delivers cleartext. Signature checks authorization to *fetch*; they do not stop the fetcher from saving the file. If the threat model includes "subscriber redistributes the file," you need encryption of the media itself plus a license server — DRM — not a longer HMAC.
+</Callout>
+
+## When DRM enters the design
+
+DRM (Widevine, FairPlay, PlayReady, and the packaging that feeds them) encrypts media segments with content keys and only releases those keys through a license server after the player proves device and user policy. The player decrypts in a trusted path; a naïve `curl` of the segment URLs gets ciphertext.
+
+That cost is real: packaging pipelines must produce encrypted CMAF/HLS/DASH, license servers must be highly available (a license outage is a total playback outage even when the CDN is healthy), and client support fragments across browsers and devices. For user-generated content with soft entitlements, signed URLs plus authenticated manifests are usually enough. For studio or paid live where contracts assume a DRM footprint, signed URLs alone will not clear the commercial bar.
+
+Tokenized CDN cookies often sit between the two: the app sets an HTTP-only cookie the CDN validates, so segment URLs themselves can stay unsigned and cache-friendly while still requiring a recent entitlement check. That pattern pairs cleanly with adaptive bitrate (13.06 Adaptive Bitrate And CDN Decider) because every rendition under a path prefix shares one cookie.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Signed URLs / CDN tokens when"
+  againstTitle="Full DRM when"
+  forItems={[
+    "The threat is hotlinking, scraped stable URLs, or accidental public bucket paths — not organized redistribution",
+    "Content is UGC or internal where a determined pirate is an acceptable residual risk",
+    "You need edge caching with per-viewer authorization and can rotate expiries on a session timescale",
+    "License-server availability and multi-DRM packaging would dominate cost for little contractual gain",
+    "Players must work on clients that cannot host a DRM CDM, and cleartext-after-auth is acceptable",
+  ]}
+  againstItems={[
+    "Studio, sports, or premium VOD contracts explicitly require a DRM stack",
+    "Cleartext segments on disk after a successful fetch are an unacceptable leak even for paying users",
+    "You already operate packaging that emits encrypted CMAF and can staff license-server SLOs",
+    "Device attestation and output controls (HDCP, etc.) are part of the product promise, not optional",
+    "Signed URLs alone failed a prior audit because redistribution while the URL was live was trivial",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Frame video security as layered authorization, not as "encrypt the video": "The CDN must not serve a stable public path; I mint a short-lived signed URL or cookie after entitlement check, scoped to the manifest and segments. If the threat model includes saving cleartext, I add DRM so segments are ciphertext without a license." Expect follow-ups on expiry versus mid-playback IP changes, key rotation without mass `403`s, and whether a stolen cookie during its TTL is acceptable — answer that residual risk explicitly rather than claiming the design is unshareable. Name the failure mode of a public bucket URL before being asked: infinite free egress and zero entitlement enforcement.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "A stable public media URL is a permanent capability; signed URLs and CDN tokens turn fetch authorization into a short-lived, scoped capability instead",
+    "Signing proves the holder may download; it does not encrypt the payload — cleartext signed objects remain redistributable until expiry",
+    "Scope signatures to a manifest or path prefix and expire them on a playback timescale; wildcard bucket signatures recreate a public CDN",
+    "DRM adds encrypted segments and a license server when contracts or threat models reject cleartext-after-fetch",
+    "A license-server outage is a total playback outage even when the CDN is healthy — DRM availability is part of the video SLO",
+    "Pick the layer that matches the threat: hotlinking needs signatures; casual ripping of paid content needs DRM; neither stops the analog hole",
+  ]}
+/>

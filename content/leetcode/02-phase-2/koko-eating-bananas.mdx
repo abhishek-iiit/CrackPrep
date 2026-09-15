@@ -1,0 +1,107 @@
+---
+title: "Koko Eating Bananas"
+number: "02.44"
+summary: "Speed k is monotonic — if she finishes in h hours at speed k, any faster speed also works, so binary search the minimum k."
+status: published
+free: true
+difficulty: core
+estMinutes: 14
+tags: [binary-search, array]
+updated: "2026-09-15"
+---
+
+## Trying every speed from 1 to max(piles) is too slow
+
+Koko has `h` hours to finish `n` piles of bananas. Each hour she picks a pile and eats `k` bananas from it (or finishes the pile if fewer remain). Find the minimum integer `k` such that she can finish in `h` hours or less.
+
+Brute force tries k = 1, 2, 3, … up to max(piles), simulating hours for each. With n up to 10⁴ and piles up to 10⁹, that is O(n × maxPile) — billions of operations.
+
+The reframe: define `canFinish(k)` — total hours needed at speed k. This function is **monotonic**: if k works, every k′ > k also works. You are not searching an array; you are searching the **answer space** [1, max(piles)].
+
+## Binary search on the answer
+
+For a candidate speed `k`, compute hours = sum of `Math.ceil(pile / k)` over all piles. If hours ≤ h, k is feasible — try smaller. If hours > h, k is too slow — try larger.
+
+<Steps>
+<Step title="Set lo = 1, hi = max(piles)">
+  The answer always lies in this range.
+</Step>
+<Step title="Mid = floor((lo + hi) / 2); test canFinish(mid)">
+  Feasible → record mid as best, search lo..mid-1. Infeasible → search mid+1..hi.
+</Step>
+<Step title="Return lo when lo > hi">
+  Standard lower-bound binary search on the minimum feasible value.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function minEatingSpeed(piles: number[], h: number): number {
+  const canFinish = (k: number): boolean => {
+    let hours = 0;
+    for (const pile of piles) {
+      hours += Math.ceil(pile / k);
+    }
+    return hours <= h;
+  };
+
+  let lo = 1;
+  let hi = Math.max(...piles);
+
+  while (lo < hi) {
+    const mid = lo + Math.floor((hi - lo) / 2);
+    if (canFinish(mid)) {
+      hi = mid;
+    } else {
+      lo = mid + 1;
+    }
+  }
+
+  return lo;
+}
+```
+
+Time **O(n log m)** where m = max(piles) — O(log m) binary search steps, each O(n) to verify. Space **O(1)**.
+
+<Callout type="gotcha">
+  Use `Math.ceil(pile / k)`, not integer division — a pile of 7 at speed 3 needs 3 hours, not 2.
+</Callout>
+
+<Tradeoff
+  forTitle="Binary search on answer when"
+  againstTitle="Linear scan on answer when"
+  forItems={[
+    "The feasibility function is monotonic — 'works at k' implies 'works at k+1'",
+    "The answer range is large (up to 10⁹) but each check is cheap O(n)",
+    "You recognize the 'minimize the maximum' / 'find minimum feasible' pattern",
+    "Same template applies to capacity to ship packages, split array largest sum, and painter's partition",
+    "n is modest (10⁴) so O(n log m) comfortably beats O(n × m)",
+  ]}
+  againstItems={[
+    "The answer range is tiny (under a few hundred) — linear scan is simpler",
+    "Monotonicity is unclear — binary search on answer is wrong if feasibility flickers",
+    "You need all feasible speeds, not just the minimum",
+    "The check function itself is expensive (NP-hard inner problem) — outer binary search may not help",
+    "Interviewer wants the O(n × maxPile) simulation explained before optimizing",
+  ]}
+/>
+
+## In an interview
+
+Restate: piles `[3, 6, 7, 11]`, h = 8 → k = 4. Confirm she eats from only one pile per hour, k is an integer, and h ≥ n always.
+
+Say out loud that trying every k is O(n × maxPile) and that feasibility is monotonic in k — the classic binary-search-on-answer setup. Mention the ceiling division bug before coding.
+
+Follow-ups: variants with different cost functions, or "maximize the minimum" (flip the monotonic direction). The bug interviewers watch for is using floor instead of ceil when counting hours per pile.
+
+<KeyTakeaways
+  items={[
+    "Koko Eating Bananas is binary search on the answer space, not on the input array",
+    "canFinish(k) = sum of ceil(pile / k) over piles; monotonic — if k works, k+1 works",
+    "Search for the minimum feasible k in [1, max(piles)] using lo/hi with hi = mid when feasible",
+    "Time O(n log m), space O(1) — each of O(log m) probes costs O(n)",
+    "Ceiling division per pile is the edge case that breaks floor-division solutions",
+    "Same pattern family as split-array and ship-within-days problems on the LeetCode roadmap",
+  ]}
+/>

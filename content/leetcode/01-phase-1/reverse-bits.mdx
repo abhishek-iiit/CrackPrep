@@ -1,0 +1,83 @@
+---
+title: "Reverse Bits"
+number: "01.15"
+summary: "Pull bits off the input LSB-first and push them onto the result MSB-side — 32 shifts, no string conversion needed."
+status: published
+free: true
+difficulty: intro
+estMinutes: 10
+tags: [bit-manipulation]
+updated: "2026-09-15"
+---
+
+## Mirror the bit order in a fixed-width word
+
+Reverse the bits of a given 32-bit unsigned integer. Input `43261596` (`00000010100101000001111010011100`) becomes `964176192` (`00110001011100100010101100000000`).
+
+String conversion (`n.toString(2).padStart(32,'0').split('').reverse()`) works on LeetCode but misses the point — and on a whiteboard it is slow and easy to pad wrong. The intended solution treats the integer as a bit stream: peel one bit from the right of the input, append it to the left of the output, repeat 32 times.
+
+Think of it as building the result from bit 31 down: each step, shift result left to make room, OR in the lowest bit of n, then shift n right unsigned.
+
+## Shift out, shift in
+
+**Invariant:** after `k` iterations, the lowest `k` bits of `result` hold the highest `k` bits of the original `n`, reversed; the remaining bits of `n` are untouched on the right.
+
+<Steps>
+<Step title="Initialize result = 0">Empty output word.</Step>
+<Step title="Repeat 32 times">`result = (result << 1) | (n & 1)` — capture n's LSB into result's LSB after prior bits shifted up.</Step>
+<Step title="Shift n right unsigned">`n >>>= 1` — drop the bit you consumed.</Step>
+<Step title="Return result">Fully reversed 32-bit word.</Step>
+</Steps>
+
+## Solution
+
+```ts
+function reverseBits(n: number): number {
+  let result = 0;
+  for (let i = 0; i < 32; i++) {
+    result = (result << 1) | (n & 1);
+    n >>>= 1;
+  }
+  return result >>> 0; // force unsigned 32-bit
+}
+```
+
+Time **O(1)** — fixed 32 iterations. Space **O(1)**.
+
+Advanced follow-up (not required here): **divide-and-conquer bit swap** — swap 16-bit halves, then 8-bit quarters, then 4, 2, 1 — reverses in log(32) rounds of masking. Clever, harder to derive cold; the shift loop is the interview default.
+
+## Iterative shift versus divide-and-conquer swap
+
+<Tradeoff
+  forTitle="Shift loop when"
+  againstTitle="Mask-and-swap when"
+  forItems={[
+    "You need something you can write correctly in under two minutes",
+    "The width is fixed at 32 — a constant loop is honest O(1)",
+    "You are explaining bit extraction to an interviewer step by step",
+    "Variable bit-width reversal (not always 32) maps naturally to a while n > 0 loop",
+  ]}
+  againstItems={[
+    "You have seen the byte-swap pattern before and want to show O(log w) parallel-style swaps",
+    "The CPU exposes a reverse-bytes instruction and you are discussing hardware (rare in LC)",
+    "String/bit-array conversion is allowed and clarity beats performance — still mention the bit loop",
+    "You might forget `>>>` vs `>>` on negatives — mask-and-swap avoids shifting the input right",
+  ]}
+/>
+
+## In an interview
+
+Restate: reverse 32 bits. Draw four bits as a toy example: `1100` → shift out `0,0,1,1`, building `0011`. Code the 32-iteration loop with `>>>` on n.
+
+Follow-ups: reverse only the meaningful bits (while n > 0), or "how would you reverse bits in a byte?" (same loop, 8 times — useful micro-step).
+
+Bug to name: using signed `>>` on n — for negative inputs in some test harnesses, it never terminates. LeetCode input is unsigned, but `>>>` is the correct habit.
+
+<KeyTakeaways items={[
+  "Reverse bits by repeatedly: result = (result << 1) | (n & 1), then n >>>= 1 — exactly 32 steps.",
+  "Use unsigned right shift on n so bits shift in zeros, not sign extension.",
+  "Complexity is O(1) for fixed 32-bit width — not O(log n) in the numeric value.",
+  "String reverse with padStart works but is slower and hides the bit mechanism interviewers want.",
+  "result >>> 0 at the end normalizes to unsigned 32-bit in JavaScript if needed.",
+  "The divide-and-conquer mask swap is an optional optimization — know the shift loop first.",
+]} />

@@ -1,32 +1,90 @@
 ---
 title: "Database Ticket Servers"
 number: "03.09"
-summary: "Database Ticket Servers — notes in progress."
-status: draft
+summary: "A small dedicated database whose only job is handing out unique ids, for when sharding has taken away the one thing auto-increment needed."
+status: published
 free: true
 difficulty: core
 estMinutes: 12
+tags: [ids, sharding, availability]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Two shards, one auto-increment column, and no single owner of it
 
-What breaks without this, and the situation that forces the decision.
+Auto-increment is free as long as one database owns the whole table. It hands out 1, 2, 3, ... because it is the only writer that can, and the guarantee — every id unique, roughly ordered by creation time — costs nothing beyond what the engine already does internally to serialize concurrent inserts.
 
-## How it works
+Shard that table across four databases and the guarantee is gone. Each shard has its own auto-increment counter, because each shard is a separate database that has never heard of the other three. Shard A hands out id 500 for a photo at the same moment shard B hands out id 500 for an unrelated one, and now two different rows in two different places claim the same identity. Anything that assumes an id is globally unique — a URL that embeds it, a cache key, a foreign key from a table that isn't sharded the same way — breaks the moment those two 500s meet.
 
-The mechanism, step by step.
+You still want ids that look and behave like auto-increment: compact integers, monotonic enough to sort reasonably by creation order, cheap to index. You just need exactly one thing to be authoritative about handing them out, and none of your four shards is in a position to be that thing.
 
-## Tradeoffs
+## A ticket server is a database with one column and one job
+
+The fix is almost embarrassingly literal: stand up a separate, dedicated database instance whose entire schema is a counter, and make every shard ask it for an id before writing a new row. It is not part of the sharded fleet. It stores no application data. Its only operation is "give me the next number," and it answers that with a single-row transaction — an `UPDATE counter SET value = value + 1` or a `REPLACE INTO tickets (stub) VALUES ('a')` read back with `LAST_INSERT_ID()` — that the database engine already knows how to serialize correctly under concurrent callers, because that is exactly what auto-increment does internally on an unsharded table. You have not invented new coordination logic; you have relocated the one piece of infrastructure that still needs a single owner.
+
+<Steps>
+  <Step title="A shard needs a new id before an insert">
+    Instead of relying on its own auto-increment, the application asks the ticket server for one, over the network, before writing the row.
+  </Step>
+  <Step title="The ticket server increments and returns, atomically">
+    A tiny transaction against a single row or a single counter table. Concurrent requests serialize the same way any auto-increment column already does — this is not new mechanism, just moved to a server whose only table is the counter.
+  </Step>
+  <Step title="The application writes the row to the correct shard using that id">
+    The id is now globally unique by construction, because exactly one thing on the network ever hands out that number.
+  </Step>
+</Steps>
+
+## The single-owner design is also the single point of failure
+
+Centralizing id issuance onto one database recreates, deliberately, the exact bottleneck sharding was meant to remove — except now it is a bottleneck for every shard at once instead of for one unsharded table. Two costs follow directly.
+
+First, availability: if the ticket server is down, no shard can insert a new row anywhere, even though every shard's own database is healthy. The blast radius of one small, boring instance is the entire write path of the system.
+
+Second, latency: every insert now pays a network round trip to a separate database before it can even begin its own write — a cost that did not exist when auto-increment was local to the table being written.
+
+The standard fix for availability runs two ticket servers rather than one, and avoids the obvious failure mode — both servers handing out the same number — with a configuration trick rather than coordination between them: set each server's auto-increment step to 2, with different starting offsets, so one only ever emits odd numbers and the other only even. Failing over from one to the other needs no negotiation, because their output ranges never overlap by construction.
+
+<Callout type="gotcha">
+The odd/even trick buys uniqueness across a failover, not strict ordering. Ids from server A and server B interleave in whatever order requests happened to land on each one; you get "unique and roughly increasing," the same rough ordering a busy auto-increment column already gives you under concurrent writers, not a single unbroken sequence. If a caller needs a strict global order — not just uniqueness — a ticket server does not provide it, and neither does auto-increment on a single unsharded table under true concurrency; that is a different, stronger guarantee than this pattern is built to make.
+</Callout>
+
+The latency cost has a standard mitigation too: allocate ids in blocks instead of one at a time. A shard asks the ticket server for the next 1,000 ids, caches that range locally, and hands them out to inserts without a network round trip for 999 of every 1,000 rows. The price is a wider ordering gap and a specific waste mode — if the process holding an allocated block crashes before using all of it, that whole remainder is stranded, unusable by anyone else, because no other caller was ever told about it. That is a gap in the sequence, not a correctness bug, and it is the trade you are explicitly making: fewer round trips in exchange for ids that are unique and mostly ordered rather than densely packed.
+
+## Where this sits next to the alternatives
+
+A ticket server is not the only way to solve global uniqueness across shards — it is the low-effort one. 04.08 Distributed ID Generation frames the broader menu, and 04.09 UUID vs ObjectId vs Snowflake and 04.10 Snowflake ID Design cover the alternative that needs no central server per request at all: encode a timestamp, a machine id, and a per-machine sequence into the id itself, so any node can mint one without asking anyone. That removes the ticket server's availability and latency costs entirely, at the price of needing synchronized clocks across nodes — 04.11 Clock Skew And ID Ordering covers exactly what breaks when that synchronization slips.
+
+The ticket server earns its place specifically when that trade runs the other way: a system migrating a monolith's auto-increment ids into a sharded topology, where rewriting every id consumer to accept 128-bit UUIDs or Snowflake-shaped integers is a bigger project than standing up one small, boring, well-understood database. It keeps ids small, familiar, and roughly sequential — properties that matter for index locality on a B-tree-backed primary key (03.04 B-Tree covers why sequential keys are the cheap case for that structure) — at the cost of a single extra hop most other approaches avoid.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Reach for a ticket server when"
+  againstTitle="Prefer a coordination-free ID scheme when"
+  forItems={[
+    "You are migrating sharded auto-increment ids and cannot rewrite every consumer to a wider or unordered id format right away",
+    "Ids must stay small, compact integers for index or storage-size reasons, not 128-bit UUIDs",
+    "Rough, auto-increment-like ordering is enough — you do not need a strictly unbroken global sequence",
+    "The extra network round trip per id (or per block of ids) is affordable against your write rate and latency budget",
+    "You would rather operate one small, well-understood extra database than roll out synchronized clocks across every id-minting node",
+  ]}
+  againstItems={[
+    "Id issuance itself is high enough volume that even two ticket servers become the new hot spot you built sharding to avoid",
+    "You cannot tolerate the ticket server as a dependency on the write path's availability, even in a two-server HA setup",
+    "Nodes can keep clocks synchronized well enough that a Snowflake-style scheme's ordering guarantee holds",
+    "The consumer already accepts UUIDs or another wide id format, so there is no compatibility bridge to build",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Bring it up as a patch, not a foundation: "Sharding took away the one database that could run auto-increment safely, so I'll centralize id issuance in a small dedicated database instead of rewriting every id consumer today." The interviewer's next question is almost always about the single point of failure, and the answer is the odd/even two-server trick, stated with its actual limit attached — unique and roughly ordered across a failover, not a strict global sequence. If asked why not just use UUIDs, say so plainly: you could, and 04.09 UUID vs ObjectId vs Snowflake covers that trade, but a ticket server buys backward compatibility with existing integer ids at the cost of one extra hop, which is sometimes exactly the constraint the migration is under.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Sharding breaks per-shard auto-increment because each shard's counter is independent, so the same id can be issued twice across shards",
+    "A ticket server is a dedicated database whose only table is a counter, giving every shard one authoritative place to get a unique id",
+    "It reintroduces a single point of failure and a network round trip per id, which is the price for keeping ids compact and roughly ordered",
+    "Running two ticket servers with auto-increment step 2 and odd/even offsets makes failover safe without coordination between them, at the cost of strict ordering",
+    "Allocating ids in blocks trades a wider ordering gap for fewer round trips, and a crashed process can strand an unused block as a gap rather than a bug",
+    "It is a compatibility bridge for existing integer ids; Snowflake-style generation removes the central server entirely but trades it for a dependency on synchronized clocks",
+  ]}
+/>

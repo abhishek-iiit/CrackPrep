@@ -1,32 +1,128 @@
 ---
 title: "TF-IDF Relevance Scoring"
 number: "09.04"
-summary: "TF-IDF Relevance Scoring — notes in progress."
-status: draft
+summary: "Why raw term frequency is a bad relevance signal alone, and how TF × IDF turns boolean candidates into an ordered list."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: deep
+estMinutes: 18
+tags: [search, ranking, tf-idf, scoring]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Boolean match is not ranked relevance
 
-What breaks without this, and the situation that forces the decision.
+After 09.03 Boolean Tiered Search, you have a set of documents that satisfy a boolean predicate. That set can still be thousands of ids. Showing them in arbitrary order — or in crawl order, or by recency alone — ignores the only question the user asked: which of these is *more about* the query.
 
-## How it works
+Term frequency suggests itself immediately: count how often each query term appears in the document, sum the counts, sort descending. That fails in two predictable ways. A document that repeats `headphones headphones headphones` in a spammy title block outranks a careful review that uses the word twice. And a term like `the` or `for`, if not stopped, contributes huge counts everywhere and washes out the terms that actually discriminate. You need a weight that grows with frequency *inside* a document but shrinks when the term is common *across* the corpus. That product is TF-IDF.
 
-The mechanism, step by step.
+TF-IDF is not the final production ranking function in most engines today — 09.05 BM25 Production Ranking is — but it is the conceptual core those functions extend, and interviewers still expect you to derive it before naming BM25.
 
-## Tradeoffs
+## The two factors
+
+**Term frequency (TF).** How often term `t` appears in document `d`. Raw count `f(t, d)` works as a starting definition. Variants damp the growth so the 50th occurrence adds less than the 2nd:
+
+| TF variant | Formula sketch | Intent |
+| --- | --- | --- |
+| Raw | `f(t, d)` | Simple; over-rewards repetition |
+| Log-damped | `1 + log f(t, d)` (0 if f = 0) | Common textbook compromise |
+| Boolean TF | 1 if present else 0 | Ignores frequency entirely |
+
+**Inverse document frequency (IDF).** How rare `t` is in the corpus. If `N` is the number of documents and `df(t)` is the number that contain `t`:
+
+<Formula label="Inverse document frequency">idf(t) = log(N / df(t))</Formula>
+
+(Additive smoothing like `log(N / (df+1)) + 1` appears in real libraries to avoid extremes; the shape matters more than the exact offset.)
+
+A term in every document has `df ≈ N` and IDF near 0 — it barely moves the score. A term in one document in a million has large IDF — sharing that term with the query is strong evidence. IDF is computed from corpus statistics at index time (or refreshed periodically); query time only looks up a per-term weight.
+
+**TF-IDF weight** for one term in one document:
+
+<Formula label="TF-IDF">w(t, d) = tf(t, d) · idf(t)</Formula>
+
+**Document score** for query `Q` is usually the sum over query terms (sometimes normalized by document length or turned into cosine similarity between query and document vectors):
+
+<Formula label="Query–document score">score(Q, d) = Σ_{t ∈ Q} tf(t, d) · idf(t)</Formula>
+
+Cosine similarity treats documents and queries as vectors in term space and scores by the angle between them — which adds document-length normalization automatically. Sum-of-TF-IDF without length normalization tends to prefer longer documents that simply have more chances to accumulate term occurrences; that bias is one of the reasons BM25 exists.
+
+## Worked example (order-of-magnitude arithmetic)
+
+Corpus: `N = 1_000_000` documents. Query: `noise cancelling`.
+
+| Term | df(t) | idf ≈ log10(N/df) | Notes |
+| --- | --- | --- | --- |
+| noise | 50_000 | log10(20) ≈ 1.30 | Moderately common |
+| cancelling | 5_000 | log10(200) ≈ 2.30 | More selective |
+
+Document A (a product title page): `noise` appears 3 times, `cancelling` once.  
+Document B (a long blog post): `noise` appears 15 times, `cancelling` once.  
+Use log TF: `1 + log10(f)`.
+
+| | Doc A | Doc B |
+| --- | --- | --- |
+| tf-noise | 1 + log10(3) ≈ 1.48 | 1 + log10(15) ≈ 2.18 |
+| tf-cancelling | 1 + log10(1) = 1.00 | 1.00 |
+| contribution noise | 1.48 × 1.30 ≈ 1.92 | 2.18 × 1.30 ≈ 2.83 |
+| contribution cancelling | 1.00 × 2.30 = 2.30 | 2.30 |
+| **sum score** | **≈ 4.22** | **≈ 5.13** |
+
+B wins on raw TF-IDF sum because it repeats `noise`, even if A is the better product page. That is the length/repetition failure mode you should name out loud. IDF still did useful work: `cancelling` contributes more per occurrence than `noise`. A stop word with df ≈ N would contribute ~0 regardless of TF.
+
+## Vector space view
+
+Each document is a vector with one dimension per vocabulary term; most entries are zero (sparse). The query is a short vector in the same space. Scoring is similarity between those vectors. The inverted index (09.02) exists partly so you never materialize dense vectors: you only touch dimensions (terms) that appear in the query, and only documents in those terms' posting lists. TF-IDF is a weighting scheme *on top of* boolean candidates, not a reason to abandon the inverted index.
+
+At index time you can store `tf` in postings and `idf` (or `df`) in the dictionary. At query time: for each query term, walk postings of candidates (or score while traversing), accumulate `tf * idf`, then sort. Scoring every candidate exhaustively is fine for thousands of candidates; for larger heaps, engines use top-k structures and early termination — BM25 implementations lean hard on that.
+
+<Callout type="note">
+Log bases and additive constants differ across textbooks and libraries (log10 vs ln vs log2; `+1` smoothing). In an interview, pick one definition, state it, and stay consistent. Quibbling about log base does not change the ranking story; forgetting IDF or length bias does.
+</Callout>
+
+## Where TF-IDF stops being enough
+
+| Limitation | What goes wrong | What production adds |
+| --- | --- | --- |
+| Unsaturated TF | Spammy repetition wins | BM25's TF saturation (09.05) |
+| Weak length handling | Long docs dominate sum scores | Explicit length normalization vs avg doc length |
+| No coordination | Docs matching 1 of 3 rare terms can beat docs matching all 3 with lower TF | Explicit coordination factors or learn-to-rank features |
+| Static text only | Ignores clicks, purchases, freshness | 09.08 Search Feedback And Relevance Signals |
+| Same weight every field | Body TF equals title TF | Per-field boosts |
+
+TF-IDF remains the right teaching model and a strong baseline for small corpora and internal tools. For web-scale or product search with noisy lengths and spam, treat it as the ancestor you cite on the way to BM25.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Teach and baseline with TF-IDF when"
+  againstTitle="Move past plain TF-IDF when"
+  forItems={[
+    "You need a clear, derivable story for why rare terms beat common ones in ranking",
+    "The corpus is relatively clean and document lengths are not wildly skewed",
+    "A transparent sum-of-weights score is enough for an MVP or an interview whiteboard",
+    "You are explaining the vector-space model before introducing saturated TF",
+    "Offline evaluation (09.09) shows diminishing returns from more complex scorers on your actual queries",
+  ]}
+  againstItems={[
+    "Document length varies by orders of magnitude and long pages systematically outrank short good ones",
+    "Spam or boilerplate repetition is common in the corpus",
+    "You need a production default that matches what Lucene/Elasticsearch-family systems actually run (BM25)",
+    "Field structure (title, anchors, tags) must dominate body copy",
+    "Behavioral signals will be blended in — TF-IDF alone is only one feature among many",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Derive before you name: "Boolean gives me candidates; I score with term frequency times inverse document frequency so rare query terms count more, then sum." Write `score = Σ tf · idf` and define `idf = log(N/df)`. Then volunteer the failure mode: raw TF prefers long and repetitive documents — which is your bridge to BM25.
 
-<KeyTakeaways items={["", "", ""]} />
+If asked how this runs fast, tie it back to postings: "I only score documents that survived retrieval, using tf stored on the posting and idf from the term statistics — I do not scan the corpus." That loops the whole module into one coherent design.
+
+<KeyTakeaways
+  items={[
+    "TF-IDF ranks boolean candidates by weighting each query term with within-document frequency and across-corpus rarity",
+    "idf(t) = log(N/df(t)) drives rare terms up and near-stopwords down — without it, TF alone is easy to spam",
+    "Document score is typically Σ tf(t,d)·idf(t) over query terms, optionally via cosine in a vector space model",
+    "Store tf on postings and df/idf in dictionary stats; scoring touches query terms' lists, not every document vector",
+    "Plain TF-IDF over-rewards long and repetitive documents — the main structural reason production engines prefer BM25",
+    "TF-IDF is the right conceptual baseline; field boosts, length norms, and click signals are layered on after the core product makes sense",
+  ]}
+/>

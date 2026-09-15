@@ -1,32 +1,94 @@
 ---
 title: "Delegation And Async Work"
 number: "08.01"
-summary: "Delegation And Async Work — notes in progress."
-status: draft
+summary: "Why a request can answer 'accepted' before the work is done, and what durability promise that shortcut requires you to keep."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: intro
+estMinutes: 8
+tags: [async, queues, latency, durability]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Answering before the work is done
 
-What breaks without this, and the situation that forces the decision.
+A request that uploads a video, places an order, or signs up a new user actually triggers a dozen things: validate input, write the row, send a confirmation email, kick off a thumbnail render, notify a couple of other services, log an analytics event. Do all of that synchronously and the response time is the sum of all of it — including whichever one is slowest that day. An email provider having a bad afternoon becomes your signup endpoint having a bad afternoon, even though nothing about signing up actually requires the email to have sent yet.
 
-## How it works
+The fix is not to make the email provider faster. It's to notice that most of those dozen things are not what the caller is waiting for. The caller wants to know the order was placed, not that the receipt email left the building. So split the response from the work: do the part the caller needs synchronously — validate, write the authoritative record — and hand the rest to something that will do it soon, on its own schedule, off the request path.
 
-The mechanism, step by step.
+That's the trade this lesson names: latency in exchange for a new durability discipline. The request returns fast, at the cost of accepting a lag before the deferred work actually happens, and an obligation that the deferred work survive a crash, a restart, a deploy — exactly as if it had been done inline.
 
-## Tradeoffs
+## What "accepted" actually has to mean
+
+The dangerous version of this pattern is spawning a background thread, firing an async call, or pushing onto an in-memory list and returning success. That is not durable delegation — it's a promise with nothing backing it. If the process dies between "accepted" and "done," the work vanishes and nobody knows, because the caller already received their success response. The failure is silent by construction: a crash that would have been an obvious 500 in the synchronous version instead becomes a job that quietly disappears.
+
+Real delegation requires the intent to become durable before you respond. Concretely: write a row, or publish to a broker, and only then answer the caller. Committing the caller's state change and recording the intent to do the deferred work are usually two separate writes to two separate systems — exactly the seam that 08.03 Event Bus For Product Events covers, because "save the order" and "record that a confirmation email is owed" can each succeed while the other fails. Once the intent is durable somewhere that survives a crash, "202 Accepted" is an honest answer: the work is guaranteed to happen eventually, even though it hasn't happened yet.
+
+<Steps>
+  <Step title="Do the part the caller is actually waiting for">
+    Validate, authorize, and write whatever record makes the caller's action real — the order row, the account, the uploaded file's metadata. This stays synchronous because the caller needs the true answer, not an optimistic one, before you tell them it worked.
+  </Step>
+  <Step title="Durably record everything else as intent, not as finished work">
+    Before responding, persist that the deferred work needs to happen — a row in an outbox table, a message published to a broker, an event appended to a log. This has to be durable and it has to happen before the response, or the guarantee is fiction.
+  </Step>
+  <Step title="Respond to the caller">
+    Return success once step two is durable. The caller now knows their action was accepted; they do not yet know, and usually don't need to know, whether the thumbnail has rendered or the email has sent.
+  </Step>
+  <Step title="Let a consumer do the deferred work, on its own clock">
+    Some other process — a worker pool, a queue consumer — picks up the intent and executes it independently of the request that created it, retrying on failure without the caller waiting around for the retry.
+  </Step>
+</Steps>
+
+Once you've decided to do this, you still have to pick what the "somewhere" in step two actually is — a queue that one worker drains, or a log that many independent systems replay. That's a separate decision with its own mechanics, covered head to head in 08.02 Task Queue Vs Event Stream.
+
+## What's actually safe to defer
+
+Not everything qualifies. The rule of thumb: defer the work whose result the caller doesn't need in order to trust the response. Sending a confirmation email, updating a recommendation index, generating a thumbnail, notifying a partner webhook — none of these change whether the order itself is valid or the account itself exists. The response is correct with or without them having run yet.
+
+What doesn't qualify is anything the response's correctness actually depends on: checking a username is unique, authorizing a payment, decrementing inventory below zero. Deferring those doesn't buy a faster success response — it buys a fast, wrong one, because you told the caller "yes" before you knew the answer was yes. If a check can fail in a way that would change what you tell the caller, it has to run before you respond, however slow that makes the request.
+
+## What the deferral actually costs
+
+The two guarantees a synchronous path gives for free — the caller learns the true outcome immediately, and there is exactly one attempt — both have to be rebuilt by hand once you go async. The gap between "accepted" and "done" is a real window of eventual consistency: a user can refresh their profile a second after uploading a new photo and see the old one, because the resize job hasn't run yet. That has to be a product decision, not a surprise, and it usually shows up as a spinner, a "processing" state, or a follow-up push, rather than as silence.
+
+The other cost is that most delivery mechanisms for step two promise "at least once," not "exactly once" — a worker can process a message and crash before acknowledging it, and the message gets redelivered. Whatever consumes the deferred work has to tolerate running twice; 02.09 Retries Timeouts And Idempotency covers making that safe. And the deferred work is now a system you have to watch: a queue nobody is draining fails silently from the caller's point of view, which is exactly what 08.04 Queue Lag measures.
+
+<Callout type="tip">
+A good test for whether a piece of work belongs on the request path or off it: would the caller reasonably wait for it if you told them how long it takes? Nobody would knowingly wait 400 ms for a thumbnail to render before their upload "finishes." Most people would refuse to wait 400 ms longer for their payment to actually be authorized before hearing "success." The same question, asked honestly, sorts most of a request's side effects into the right list.
+</Callout>
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Defer the work when"
+  againstTitle="Keep it on the request path when"
+  forItems={[
+    "The caller's response does not depend on the outcome — a confirmation email or a search-index update can fail and retry without changing what you already told them",
+    "The work is slow or has unpredictable latency, and its tail would otherwise become the request's own tail",
+    "The work depends on a downstream system with its own outages, which you don't want to inherit as your own uptime",
+    "The work benefits from batching or throttling that only makes sense outside a single request's lifetime",
+    "You can make the deferred intent durable before responding, so 'accepted' is an honest guarantee rather than an optimistic one",
+  ]}
+  againstItems={[
+    "The response's correctness depends on the result — a uniqueness check, an authorization decision, an inventory decrement that must not go negative",
+    "The caller has no reasonable way to learn the outcome later — there is no polling endpoint, no webhook, no follow-up screen",
+    "The work is fast and reliable enough that deferring it adds an operational system for no real latency win",
+    "Eventual consistency is not acceptable for this data — the caller's very next read must see the effect immediately",
+    "You cannot yet guarantee the deferred intent is durable before the response goes out, which turns 'accepted' into a lie",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Introduce this the moment you notice the request path is doing something the caller doesn't need to wait for: "sending the welcome email doesn't need to block the signup response, so I'll write the signup synchronously and hand the email off to a queue." Expect the immediate follow-up — what happens if the process crashes between accepting the request and the email actually sending — and answer it by naming where the durability lives: the queue write happens before the response, so the intent survives the crash even if the email doesn't go out until after a restart.
 
-<KeyTakeaways items={["", "", ""]} />
+Name the eventual-consistency window before you're asked about it. If a user can observe stale state right after an action that felt instantaneous, say so and say what bridges the gap — a "processing" indicator, a poll, a push update — rather than letting the interviewer discover the gap and wonder if you noticed it.
+
+<KeyTakeaways
+  items={[
+    "Splitting a request's response from its side effects trades latency for a new obligation: the deferred work must survive a crash exactly as if it had run inline",
+    "A response of 'accepted' is only honest once the intent to do the work is durable somewhere — a fire-and-forget background call is not delegation, it's a promise with nothing backing it",
+    "Defer work whose outcome the caller's response doesn't depend on; keep anything that could change what you tell the caller on the synchronous path",
+    "Once work is deferred it typically runs at least once, not exactly once, so the consumer has to be idempotent against redelivery",
+    "The gap between accepted and done is a real eventual-consistency window that the product has to surface, not hide",
+    "Deciding to defer work is only the first decision — the next one is what durable hand-off mechanism to use, which is a queue-versus-stream question with real consequences",
+  ]}
+/>

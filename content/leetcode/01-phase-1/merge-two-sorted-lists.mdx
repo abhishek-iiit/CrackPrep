@@ -1,0 +1,106 @@
+---
+title: "Merge Two Sorted Lists"
+number: "01.42"
+summary: "Walk two sorted heads with a dummy tail pointer — each step attaches the smaller node and advances only that list."
+status: published
+free: true
+difficulty: intro
+estMinutes: 9
+tags: [linked-list, merge, two-pointers]
+updated: "2026-09-15"
+---
+
+## Two sorted streams, one ordered output
+
+Merge two ascending linked lists into one ascending list and return its head. Example: `1 → 2 → 4` and `1 → 3 → 4` become `1 → 1 → 2 → 3 → 4 → 4`.
+
+Because both inputs are already sorted, the next output node is always the smaller of the two current heads — no sorting pass required. The failure mode is not wrong ordering but **pointer bookkeeping**: losing the rest of a list, creating a cycle, or returning the dummy node instead of `dummy.next`.
+
+## The dummy-node merge invariant
+
+Maintain a `tail` pointer at the end of the merged list. While both lists have nodes left, compare heads, attach the smaller to `tail.next`, advance that list and `tail`. When one list empties, attach whatever remains of the other in one assignment — it is already sorted.
+
+<Steps>
+<Step title="Create a dummy head">
+  `dummy` points to nothing yet; `tail` starts at `dummy`. The real answer is always `dummy.next`.
+</Step>
+<Step title="Compare and link">
+  If `l1.val <= l2.val`, link `l1` and advance `l1`; else link `l2` and advance `l2`. Move `tail` forward each time.
+</Step>
+<Step title="Drain the non-empty list">
+  `tail.next = l1 ?? l2` handles the leftover chain without a loop.
+</Step>
+</Steps>
+
+Using `<=` instead of `<` is a tie-breaker choice; either works as long as you advance exactly one list per comparison.
+
+## Solution
+
+```ts
+class ListNode {
+  val: number;
+  next: ListNode | null;
+  constructor(val?: number, next?: ListNode | null) {
+    this.val = val ?? 0;
+    this.next = next ?? null;
+  }
+}
+
+function mergeTwoLists(
+  l1: ListNode | null,
+  l2: ListNode | null
+): ListNode | null {
+  const dummy = new ListNode();
+  let tail: ListNode = dummy;
+
+  while (l1 !== null && l2 !== null) {
+    if (l1.val <= l2.val) {
+      tail.next = l1;
+      l1 = l1.next;
+    } else {
+      tail.next = l2;
+      l2 = l2.next;
+    }
+    tail = tail.next!;
+  }
+
+  tail.next = l1 ?? l2;
+  return dummy.next;
+}
+```
+
+Time **O(n + m)**, space **O(1)** beyond the output links (nodes are reused, not copied).
+
+<Tradeoff
+  forTitle="In-place merge with dummy node when"
+  againstTitle="Collect values, sort, rebuild when"
+  forItems={[
+    "Both lists are already sorted and you may reuse existing nodes",
+    "Memory must stay O(1) aside from the output structure",
+    "This is the building block for 01.43 Merge K Sorted Lists",
+    "n and m are large enough that O(n log n) sort would hurt but linear merge is fine",
+  ]}
+  againstItems={[
+    "You need a deep copy rather than rewiring pointers",
+    "Values must be deduplicated or filtered during merge (custom logic on a flat array is simpler)",
+    "The inputs are not linked lists but arrays — sort + two indices or one output array is clearer",
+    "Interview time is extremely tight and the recursive one-liner is easier for you to write correctly",
+  ]}
+/>
+
+## In an interview
+
+State inputs, output, and sortedness. Examples: one empty list (return the other), equal heads (duplicate values appear twice). Say you will use a dummy node so the first attachment does not need a special case.
+
+The bug to mention before coding: advancing `tail` without linking, or returning `dummy` instead of `dummy.next`. Recursive merge is acceptable — merge heads, attach the smaller's `next` to the recursive result — but watch stack depth on long lists.
+
+Follow-ups: merge in descending order; merge with a cap on total length; this merge is the 2-list base case of 01.43 Merge K Sorted Lists.
+
+<KeyTakeaways items={[
+  "The next node in a merged sorted list is always the smaller of the two current heads.",
+  "A dummy head eliminates the special case for the first attached node; return dummy.next.",
+  "When one list runs out, attach the remainder of the other list in O(1) — it is already ordered.",
+  "Reuse existing nodes for O(1) extra space; do not allocate new ListNode objects unless required.",
+  "Use <= or < consistently when values tie so you advance exactly one pointer per step.",
+  "Linear two-list merge is the subroutine inside heap-based k-way merge in 01.43.",
+]} />

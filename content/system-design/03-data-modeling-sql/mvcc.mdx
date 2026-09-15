@@ -1,32 +1,92 @@
 ---
 title: "MVCC"
 number: "03.07"
-summary: "MVCC — notes in progress."
-status: draft
+summary: "Instead of locking a row to keep readers and writers from interfering, keep every version and let each transaction pick the one consistent with its own snapshot."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: deep
+estMinutes: 19
+tags: [mvcc, transactions, concurrency, postgres]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Two readers, one row, and neither should have to wait for the other
 
-What breaks without this, and the situation that forces the decision.
+Pure locking-based isolation has an uncomfortable consequence: a reader that needs a consistent view of a row can end up waiting on a writer's lock, and a writer can end up waiting on a long-running reader's lock, even though "reading" and "writing" don't actually need to conflict at the moment either one happens — they only conflict if the reader would otherwise see a half-finished write. Multi-version concurrency control (MVCC) removes that dependency entirely with one structural change: never overwrite a row in place. Keep the old version around, write the new one alongside it, and let each transaction decide for itself which version it's allowed to see.
 
-## How it works
+The mechanism that follows from that one decision is the entire subject of this lesson. It's a versioning scheme applied at the row level, and it rhymes with a versioning scheme you may already have met at the file level: an LSM tree (07.09 LSM Tree Storage Engine) never modifies a file in place either, and resolves "what's the current value" the same way — search the newest version first, and stop at the first one that's valid to see.
 
-The mechanism, step by step.
+## Every row carries the history it needs to answer "when was I written"
 
-## Tradeoffs
+Concretely, most MVCC implementations tag each row version with the identifier of the transaction that created it, and — once superseded — the identifier of the transaction that replaced or deleted it. Postgres calls these `xmin` and `xmax` and stores old versions directly in the table as dead tuples until cleanup reclaims them. Other engines, InnoDB among them, keep only the newest version in the table's main storage and reconstruct older ones on demand from an undo log of the changes applied since. Both are the same idea at different physical layouts: somewhere, the system can answer "what did this row look like as of transaction N," and the difference is whether old versions sit in the table itself or get rebuilt from a log when asked for.
+
+A transaction's **snapshot** is the boundary that makes "when was I written" answerable in a way that produces a consistent view: the set of transactions already committed, and the set still in flight, as of a point in time — usually when the transaction starts, sometimes refreshed on every statement, depending on the isolation level. A row version is visible to a snapshot if its creator is in the committed set and, if it has been superseded, its replacer is not.
+
+## The read and write paths, one row at a time
+
+<Steps>
+  <Step title="Start the transaction and take a snapshot">
+    Record which transaction ids are already committed and which are still in flight at this instant. This snapshot, not the current wall-clock state of the table, is what every read in this transaction will be checked against — which is exactly what makes a long-running read see one consistent moment in time even while writers keep committing around it.
+  </Step>
+  <Step title="Write: create a new version, don't touch the old one">
+    An update doesn't modify the row's bytes in place. It writes a new version tagged with the current transaction's id and marks the prior version as superseded by this transaction — but only tentatively, pending commit. The old version stays exactly as it was, still valid for any snapshot that started before this write.
+  </Step>
+  <Step title="Read: walk the version chain newest to oldest">
+    For a given row, check its most recent version first. If that version's creator is visible in the snapshot (committed, and committed before or at the snapshot's boundary) and it hasn't been superseded by a version also visible to the snapshot, that's the answer. Otherwise, step to the next-older version and repeat. The first version that satisfies both conditions is the one this transaction sees — structurally the same newest-to-oldest search an LSM read path runs across memtable and files, just scoped to one row's history instead of a whole keyspace.
+  </Step>
+  <Step title="A second writer meets an uncommitted version">
+    Two uncommitted versions of the same row can't both become "the" next version, so a transaction that tries to write a row already modified by another still-open transaction has to wait for that transaction to resolve, or in some engines and isolation levels, fail immediately with a serialization error rather than wait. Either way, this is the one place a purely MVCC design still needs something lock-like: writer-versus-writer conflict on the same row.
+  </Step>
+  <Step title="Commit makes the version visible to future snapshots">
+    Once a transaction commits, its transaction id moves into the committed set, and every snapshot taken afterward sees the version it wrote. Snapshots already in flight when the commit happened are unaffected — they took their picture of the committed set earlier and don't get retroactively updated, which is exactly the guarantee that makes a long read consistent.
+  </Step>
+  <Step title="Garbage-collect versions no snapshot can still need">
+    A version stays around only as long as some current or future snapshot could still legitimately ask for it. Once the oldest active snapshot in the system has moved past a version's superseded point, nothing can see it anymore and it's safe to reclaim — Postgres does this in `VACUUM`, InnoDB purges its undo log. Skip this step, or let it fall behind, and old versions accumulate.
+  </Step>
+</Steps>
+
+## The cost is storage and version-chain length, and it's a real operational number
+
+An UPDATE under this model is, physically, an INSERT of a new version plus marking the old one dead — so a table updated heavily can occupy several times its logical data size until cleanup catches up. This doesn't show up as an error, the same way LSM compaction debt doesn't: it shows up as a table that keeps growing even though row counts look stable, an index that's slower to scan because it has to skip past entries pointing at dead versions, and — the specific trap worth naming out loud — a single long-running transaction (an idle connection an ORM opened and forgot to close, a reporting query that runs for an hour) that pins an old snapshot boundary and prevents cleanup from reclaiming *any* version newer than it, for every table in the system, for as long as it stays open. Pushed far enough in engines that recycle a bounded range of transaction ids, this can escalate into a hard operational limit — Postgres calls its version "transaction id wraparound," and it is a real, if avoidable, failure mode rather than a hypothetical one.
+
+<Callout type="gotcha">
+Snapshot isolation is not the same thing as full serializability, and the gap has a name: write skew. Two transactions each read an overlapping set of rows, and each independently writes to a *different* row based on what it read — individually each write looks consistent with what was read, but the combination violates an invariant that spans both rows. The standard illustration: two on-call engineers, a rule that at least one must always be on call, each independently checks "is at least one other engineer currently on call" and, seeing yes, takes themselves off — both do this concurrently, both see the other still on call, and now nobody is. Plain snapshot isolation permits this because neither transaction's individual write conflicts with what it read. Postgres's actual Serializable level adds a separate mechanism (serializable snapshot isolation, tracking read/write dependencies between concurrent transactions) specifically to catch this on top of the same MVCC substrate — snapshot isolation alone does not provide it for free.
+</Callout>
+
+## What MVCC buys you and what it costs
+
+Because readers never take a lock a writer would block on, and writers never wait on a reader, the entire class of reader-versus-writer contention that plain two-phase locking (03.06 Database Locking And Isolation) has to manage explicitly simply doesn't arise. What replaces it is bookkeeping: storage for old versions, CPU spent walking chains at read time, and a cleanup process that has to keep pace with the write rate or the bill compounds. It's a direct trade of contention for space and maintenance — not a way of avoiding cost, a way of moving it somewhere more schedulable.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Reach for MVCC when"
+  againstTitle="Rely on plain locking when"
+  forItems={[
+    "Reads and writes happen concurrently at real volume, and readers blocking writers (or the reverse) is unacceptable",
+    "Long-running reads — reports, exports, dashboards — need a consistent snapshot without freezing the table for writers",
+    "The workload skews read-heavy, so paying storage and version-chain overhead to keep readers lock-free is worth it",
+    "You want snapshot-level isolation without hand-rolling application-level locking for every read-then-write sequence",
+    "The engine already provides it (Postgres, InnoDB, Oracle) — the practical choice is whether to fight the model, not whether to build it",
+  ]}
+  againstItems={[
+    "Update-heavy hot rows would accumulate version chains faster than cleanup can clear them, and every read of that row pays for walking the chain",
+    "Storage must be tightly bounded and predictable, and MVCC bloat between cleanup cycles is a real variable, not a constant",
+    "Long-running or idle-in-transaction connections are a real risk in your stack, and an old snapshot pinning cleanup indefinitely is a failure mode you'd rather not own",
+    "The workload is simple, single-writer, or already serialized upstream, so plain locking is simpler to reason about with no cleanup process to run at all",
+    "You need textbook serializability and want to reason about 2PL directly rather than about the extra mechanism (like serializable snapshot isolation) MVCC engines bolt on to catch write skew",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Introduce MVCC by the promise, not the mechanism: "readers never block writers, and writers never block readers, because nobody ever overwrites a row in place — every write is a new version, and every read picks the version consistent with its own snapshot." Be ready to immediately name the cost, because that's the question that actually distinguishes understanding from recitation: storage bloat from old versions, cleanup (`VACUUM` or purge) that has to keep pace with writes, and the specific, easy-to-cause failure mode of a long-running transaction pinning a snapshot and blocking cleanup for everything newer. If pushed further, naming write skew as the concrete anomaly plain snapshot isolation still allows — and that true serializability needs something extra on top — is the detail that shows you've gone past "MVCC means no locks."
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "MVCC keeps multiple versions of a row instead of overwriting it, so a reader's snapshot and a writer's new version never need to block each other",
+    "A snapshot is the set of transactions visible as committed as of a point in time, and a read walks a row's versions newest to oldest looking for the first one that snapshot can see",
+    "Writer-versus-writer conflict on the same row is the one case MVCC alone doesn't resolve — a second writer still waits or aborts",
+    "An update is physically an insert of a new version plus marking the old one dead, so heavily updated tables bloat until cleanup (VACUUM, undo-log purge) catches up",
+    "A single long-running or idle transaction can pin an old snapshot and block cleanup for every table in the system, not just the ones it touches",
+    "Snapshot isolation alone permits write skew — two transactions each write a different row based on an overlapping read — and true serializability needs a mechanism on top of plain MVCC to catch it",
+  ]}
+/>

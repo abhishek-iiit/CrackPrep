@@ -1,0 +1,109 @@
+---
+title: "My Calendar I"
+number: "02.35"
+summary: "Half-open intervals kept sorted make overlap detection a neighbor check at the insert position."
+status: published
+free: true
+difficulty: core
+estMinutes: 14
+tags: [design, binary-search, intervals]
+updated: "2026-09-15"
+---
+
+## Double booking is overlap, not touching
+
+Implement a calendar where `book(start, end)` adds `[start, end)` if it does not overlap any existing booking, and returns whether the add succeeded. Overlap means **strict intersection** — `[10, 20)` and `[20, 30)` are fine (half-open: end is exclusive).
+
+Brute force scans all events on every book — O(n) per call, O(n²) over n books. With up to 10⁹ time coordinates you cannot bucket by minute; you need a structure keyed by start time. Keep bookings **sorted by start** and locate where the new interval belongs — only neighbors can overlap it.
+
+## Sorted intervals, check neighbors
+
+Store `[start, end)` pairs in sorted order (array with binary search insert, or balanced BST — array + binary search is enough here).
+
+Two intervals `[a,b)` and `[c,d)` overlap iff `a < d && c < b`. After finding insertion index `i`, check overlap with the interval before (`i-1`) and after (`i`).
+
+<Steps>
+<Step title="Binary search for insertion point">
+  First index where `existing[start] >= new.start`.
+</Step>
+<Step title="Compare with predecessor">
+  If `prev.end > new.start`, overlap — reject.
+</Step>
+<Step title="Compare with successor">
+  If `new.end > next.start`, overlap — reject.
+</Step>
+<Step title="Insert and return true">
+  splice or insert at `i`.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+class MyCalendar {
+  private bookings: [number, number][] = [];
+
+  book(start: number, end: number): boolean {
+    let lo = 0;
+    let hi = this.bookings.length;
+
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (this.bookings[mid][0] < start) lo = mid + 1;
+      else hi = mid;
+    }
+
+    const i = lo;
+
+    if (i > 0 && this.bookings[i - 1][1] > start) return false;
+    if (i < this.bookings.length && end > this.bookings[i][0]) return false;
+
+    this.bookings.splice(i, 0, [start, end]);
+    return true;
+  }
+}
+```
+
+Each `book` is **O(n)** for the splice in the worst case (array shift), **O(log n)** for the search alone. Space **O(n)** for stored bookings. A tree map would make insert O(log n) — often discussed as follow-up.
+
+<Callout type="note">
+  Half-open intervals `[start, end)` are the standard convention — they make "back-to-back" bookings non-overlapping without ±1 hacks.
+</Callout>
+
+<Tradeoff
+  forTitle="Sorted array + neighbor check when"
+  againstTitle="Brute scan or tree when"
+  forItems={[
+    "n books is up to 10³–10⁴ — simple array is fast enough to implement cleanly",
+    "Overlap depends only on adjacent intervals in sort order — not all pairs",
+    "Coordinates are huge (10⁹) — minute buckets are impractical",
+    "Interview time favors correct half-open logic over balanced-tree boilerplate",
+    "Books arrive online; sorted insert maintains the invariant incrementally",
+  ]}
+  againstItems={[
+    "n and book rate are very high — use TreeMap for O(log n) insert without splice",
+    "You need to delete or reschedule events — array splice cost adds up",
+    "Queries include \"list all overlaps with X\" — interval tree or sweep line",
+    "n is under 50 — linear scan on book is acceptable and shorter",
+    "02.36 My Calendar II adds double-booking rules — same base structure extends",
+  ]}
+/>
+
+## In an interview
+
+Use half-open intervals on the whiteboard: `[10,20)` plus `[20,30)` succeeds, `[10,20)` plus `[15,25)` fails. Confirm return boolean, not throwing.
+
+Explain sorted-by-start and checking at most two neighbors before coding. State half-open explicitly — the ±1 error on touching endpoints is the classic bug.
+
+Follow-ups: 02.36 My Calendar II (allow two layers), 01.39 Meeting Rooms II (min rooms, not rejection). Interviewer may ask tree-based insert for true O(log n).
+
+<KeyTakeaways
+  items={[
+    "Calendar overlap on half-open [start, end) uses a < d && c < b; touching ends do not overlap",
+    "Sorted by start reduces overlap checks to the immediate predecessor and successor",
+    "Binary search finds the insert position in O(log n); array splice makes book O(n) overall",
+    "Brute scanning all bookings works for tiny n but not as the intended scalable pattern",
+    "This is the building block for 02.36 My Calendar II and meeting-room variants",
+    "Using inclusive end points causes false rejections on adjacent bookings",
+  ]}
+/>

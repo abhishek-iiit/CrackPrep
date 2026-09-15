@@ -1,32 +1,105 @@
 ---
 title: "Sharding And Partitioning"
 number: "04.05"
-summary: "Sharding And Partitioning — notes in progress."
-status: draft
+summary: "How to split a dataset across machines so each owns a key range, and why the partition key choice decides whether the split helps or just relocates the bottleneck."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 14
+tags: [sharding, partitioning, scaling]
+updated: "2026-09-15"
 ---
 
-## The problem
+## One machine is a ceiling, not a starting point
 
-What breaks without this, and the situation that forces the decision.
+A single primary can take you surprisingly far — tens of thousands of writes a second on modern hardware if the workload is well indexed and the working set fits in memory. Past that, or past the point where the dataset no longer fits on one disk with room for growth, vertical scaling stops being a plan and starts being a hope. Horizontal scaling is the next move: split the data so each machine owns a slice, and route every request to the slice that holds the key. That split is partitioning. When each partition lives on its own node (or replica set), people call it sharding. The words get used interchangeably in interviews; the mechanism is the same either way.
 
-## How it works
+What partitioning buys is capacity that grows with node count — storage, write throughput, and often read throughput if each shard serves its own traffic. What it costs is everything a single-node database gave you for free: multi-row transactions that span keys, joins across the whole table, a single place to take a consistent backup, and a failure domain that was one machine rather than N. 01.08 Horizontal Vs Vertical Scaling covers when to prefer adding machines; this lesson is about how the data itself gets cut once you have decided to.
 
-The mechanism, step by step.
+The decision that matters most is not how many shards you start with. It is which attribute becomes the **partition key** — because every query that does not include that key becomes a scatter-gather across every shard, and every key that concentrates traffic lands on one shard and wastes the rest. 04.06 Hot Partitions is the failure mode; here the job is to choose a key that makes that failure rare.
 
-## Tradeoffs
+## Partitioning strategies
+
+Three strategies dominate. They differ in how a key maps to a partition, what range scans cost, and how painful it is to add capacity later.
+
+| Strategy | How a key finds its home | Range scans | Rebalancing when you add a node |
+| --- | --- | --- | --- |
+| **Hash** | `hash(key) mod N` (or a consistent-hash ring) | Broken — adjacent keys scatter | Naive mod remaps most keys; consistent hashing remaps ~1/N |
+| **Range** | Sorted key space split into contiguous intervals | Cheap — one or a few partitions | Split a hot or oversized range; move that slice |
+| **Directory / lookup** | A metadata map from key (or key prefix) to partition | Depends on how you assign keys | Remap entries in the directory; data moves only for remapped keys |
+
+**Hash partitioning** is the default for key-value and document workloads where almost every access is by primary key. A good hash spreads load evenly across partitions for uniform key popularity, which is exactly why it is popular — and exactly why it destroys locality. "Give me everything for user 42 ordered by time" becomes N parallel queries if you hashed on `event_id` instead of `user_id`.
+
+**Range partitioning** keeps keys sorted. Time-series, logs, and any workload that scans `WHERE created_at BETWEEN …` want this. The price is skew: if you partition by calendar day and today is a launch day, today's partition eats the write traffic while last Tuesday sits idle. Operators watch range sizes and split busy ranges before they become the bottleneck.
+
+**Directory-based partitioning** puts the mapping in a small, highly available metadata service. Flexible — you can assign VIP tenants their own partitions, or pin a key to a region — but the directory is now on the critical path of every request, and a stale map sends traffic to the wrong place. Use it when assignment policy is richer than a hash or a sorted split can express.
+
+<Callout type="gotcha">
+`hash(key) mod N` looks fine until N changes. Adding an 11th shard when you had 10 remaps roughly 10/11 of the keys to a new home — a thundering migration, not a growth step. If you expect to change shard count, either over-provision partitions from day one (start with 128 logical partitions on 4 nodes, and move whole partitions when you add hardware) or use consistent hashing so only about 1/N of the keys move. 04.07 Consistent Hashing covers the ring; 07.15 Range Partitioning vs Consistent Hashing for Storage covers the same choice from the storage-engine side.
+</Callout>
+
+## Choosing the partition key
+
+The partition key is the attribute every request that must stay cheap is forced to carry. Pick it by walking the access patterns, not the entity diagram.
+
+<Steps>
+  <Step title="List the queries that must hit one partition">
+    Point lookups by id, "all orders for this customer", "the latest messages in this chat" — anything that should stay O(1) shards contacted. The key those queries share is a candidate.
+  </Step>
+  <Step title="Check cardinality and skew">
+    A key with a handful of distinct values (country, plan tier) collapses the whole dataset onto a few partitions. A key with millions of values can still skew if a few values are enormously hotter than the rest — one celebrity account, one viral product id. Cardinality is necessary; it is not sufficient.
+  </Step>
+  <Step title="Prefer the unit of transactional consistency">
+    If two rows must update together atomically, they need to share a partition. Putting `user_id` on both the profile and the balance lets you keep a single-partition transaction; putting them on different keys forces a distributed transaction or an eventual-consistency story you now have to design.
+  </Step>
+  <Step title="Accept the queries that will fan out">
+    Cross-partition work is not forbidden — admin reports, global search, "top products this week" — but it must be rare, asynchronous, or served from a secondary index / analytics store. Designing as if every query is single-partition and then discovering the homepage needs all partitions is how interviews go sideways.
+  </Step>
+</Steps>
+
+A worked shape: a multi-tenant SaaS with `tenant_id` as the partition key. Almost every product query is scoped to a tenant, so fan-out stays near zero. The risk is a whale tenant that outgrows a single partition — then you sub-partition that tenant by a secondary key (`hash(user_id)` inside the tenant) rather than abandoning tenant locality for everyone else.
+
+## What you lose the day you shard
+
+Sharding is not free capacity. It is a different product:
+
+- **Cross-shard transactions.** Two-phase commit or saga compensation replaces a local ACID transaction. Latency jumps; failure modes multiply. Prefer co-locating anything that must commit together.
+- **Secondary indexes.** A global unique email index either lives on every shard (scatter on write) or in a separate lookup service (another system to keep consistent). Local indexes — "orders for this user" when you are already on the user's shard — stay cheap.
+- **Joins.** Application-side joins or denormalisation replace SQL joins that used to span the whole table. 03.10 Relational Database Scaling walks the same tradeoffs from the relational side.
+- **Operational unity.** Rolling schema changes, backups, and vacuuming now happen N times. Automate early; manual ops across shards does not scale with the data.
+
+None of this means "never shard". It means the first question is whether read replicas, caching, or a bigger box delay the cut — because once you cut, rolling it back is a migration measured in months.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Shard when"
+  againstTitle="Stay on one primary when"
+  forItems={[
+    "Dataset or write rate has outgrown one machine even after indexing, batching, and vertical upgrades",
+    "Access patterns have a natural partition key with high cardinality and tolerable skew",
+    "Most hot-path queries can include that key, so scatter-gather stays off the critical path",
+    "You can co-locate rows that must update together, so cross-shard transactions stay rare",
+    "You need independent failure domains or per-tenant isolation that one shared primary cannot give",
+  ]}
+  againstItems={[
+    "A larger instance, read replicas, or a cache would buy another year of headroom — sharding early pays interest on complexity you do not yet need",
+    "The workload is dominated by cross-cutting queries with no stable key, so every read becomes a fan-out",
+    "Strict cross-row invariants span entities you cannot co-locate without inventing a worse key",
+    "The team cannot yet automate schema changes, backups, and rebalancing across N nodes",
+    "You cannot name the partition key without guessing — a wrong key is harder to fix than a late shard",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Lead with the pressure that forces the split — disk full, write QPS past one primary, tenant isolation — then name the partition key and why. "I will shard by `user_id` because the feed and the profile are always fetched per user; global analytics can be async." Expect the follow-ups: how you rebalance when you add capacity, what happens to secondary indexes, and whether any transaction crosses shards. Name the hot-partition risk before you are asked — "celebrity keys land on one shard; if that shows up I will salt or sub-partition those keys" — and point at 04.06 Hot Partitions as the deeper treatment. Saying "we shard by hash of user id into 64 partitions on day one so we can move partitions without remapping" is usually a stronger answer than naming a vendor.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Partitioning splits the key space so capacity grows with nodes; sharding is that split deployed as separate node ownership",
+    "The partition key decides almost everything — locality, transaction scope, and whether load is even or concentrated",
+    "Hash spreads load and kills range locality; range preserves scans and invites skew; a directory buys flexible assignment at the cost of a metadata hotspot",
+    "Changing shard count under hash(key) mod N remaps most keys — over-partition early or use consistent hashing",
+    "Cross-shard transactions, global secondary indexes, and joins are the real price of sharding, not the routing layer",
+    "Shard when one machine is genuinely the ceiling and you have a key most hot-path queries already carry; otherwise buy time with replicas, cache, or a bigger box",
+  ]}
+/>

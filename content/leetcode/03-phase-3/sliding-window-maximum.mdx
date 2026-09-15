@@ -1,0 +1,100 @@
+---
+title: "Sliding Window Maximum"
+number: "03.36"
+summary: "A monotonic deque of indices keeps the window maximum at the front — drop stale and dominated entries each step."
+status: published
+free: true
+difficulty: core
+estMinutes: 15
+tags: [deque, sliding-window, monotonic-stack]
+updated: "2026-09-15"
+---
+
+## Every window re-scanning is O(nk) — too slow
+
+Given integer array `nums` and window size `k`, return the maximum in each contiguous window as it slides. For `nums = [1,3,-1,-3,5,3,6,7]`, `k = 3`, output `[3,3,5,5,6,7]`.
+
+Brute force: for each start index, scan `k` elements — O(nk). With n up to 10⁵ and k up to n, that TLEs.
+
+The structure you want: a **deque of indices** whose values in `nums` are strictly decreasing. Front = index of current window max. Back = smallest candidate still worth keeping.
+
+When index `i` enters:
+1. Pop from front while front index is outside `[i-k+1, i]`.
+2. Pop from back while back value `<= nums[i]` — those indices can never become max while `i` lives.
+3. Push `i`. If `i >= k-1`, record `nums[deque[0]]`.
+
+<Steps>
+<Step title="Maintain deque of indices, decreasing nums values">
+  Dominating future elements evict weaker back entries.
+</Step>
+<Step title="Expire front when index <= i - k">
+  Window slides one step right each iteration.
+</Step>
+<Step title="Append max when i >= k - 1">
+  First full window completes at index k-1.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function maxSlidingWindow(nums: number[], k: number): number[] {
+  const deque: number[] = [];
+  const result: number[] = [];
+
+  for (let i = 0; i < nums.length; i++) {
+    while (deque.length && deque[0] <= i - k) deque.shift();
+    while (deque.length && nums[deque[deque.length - 1]] <= nums[i]) {
+      deque.pop();
+    }
+    deque.push(i);
+    if (i >= k - 1) result.push(nums[deque[0]]);
+  }
+
+  return result;
+}
+```
+
+Time **O(n)** — each index pushed and popped at most once. Space **O(k)** for the deque.
+
+<Callout type="gotcha">
+  Store **indices** in the deque, not values — you need to test whether the front fell out of the window.
+</Callout>
+
+<Tradeoff
+  forTitle="Monotonic deque when"
+  againstTitle="Max-heap per window when"
+  forItems={[
+    "k and n up to 10⁵ — O(n) is required; heap gives O(n log k)",
+    "Same deque pattern applies to 02.39 Daily Temperatures and 02.41 Largest Rectangle in Histogram",
+    "Amortized one push/pop per index — easy to defend as linear",
+    "You need deterministic max without lazy deletion bookkeeping",
+    "Follow-ups ask for sliding window min/median — deque handles min the same way",
+  ]}
+  againstItems={[
+    "k is tiny (≤ 10) — O(nk) brute force is simpler and fast enough",
+    "Interviewer asks for 02.25 Find Median from Data Stream style — need two heaps, not deque",
+    "You only need one window max once, not all windows — single scan suffices",
+    "03.34 Trapping Rain Water uses two pointers, not deque — different problem family",
+    "Implementation time is tight and you forget index expiry — heap with stale entries + lazy delete is a fallback at O(n log n)",
+  ]}
+/>
+
+## In an interview
+
+Restate with `k=3` example. Confirm `1 <= k <= n`.
+
+Explain why heap is O(n log k) and deque is O(n). Mention storing indices for expiry.
+
+Follow-ups: sliding minimum, fixed-size sum, 03.34 rain variants. Bug: using values in deque and failing to evict `i-k` from the front.
+
+<KeyTakeaways
+  items={[
+    "Sliding Window Maximum uses a deque of indices with strictly decreasing nums values",
+    "Pop front when out of window; pop back while back value <= incoming — dominated indices never win",
+    "Output nums[deque[0]] once each index i reaches i >= k-1",
+    "O(n) time amortized, O(k) space — each index enters and leaves the deque once",
+    "Store indices, not values, so window boundary checks are O(1)",
+    "Monotonic deque/stack family includes 02.39 Daily Temperatures and 02.41 Largest Rectangle in Histogram",
+  ]}
+/>

@@ -1,32 +1,112 @@
 ---
 title: "Hot Partitions"
 number: "04.06"
-summary: "Hot Partitions — notes in progress."
-status: draft
+summary: "When one shard absorbs disproportionate traffic despite an even key map, why it presents as latency not errors, and the mitigations that actually move the heat."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [sharding, skew, load]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Balanced topology, unbalanced reality
 
-What breaks without this, and the situation that forces the decision.
+You shard carefully. Sixty-four partitions, a good hash, capacity planned for peak. Average utilisation across the fleet looks fine — forty percent CPU, half the disk. Then one partition's p99 write latency climbs from 2 ms to 900 ms over an afternoon, replication lag on that shard alone stretches into minutes, and on-call pages a single node while its neighbours are bored. The cluster is not undersized. One key — or a small set of keys that hash to the same place — is eating a share of traffic the partition was never meant to carry alone.
 
-## How it works
+That is a **hot partition**: traffic or data volume concentrates on one slice of the key space far above the mean. Hashing protects you against *random* keys clustering; it does nothing for *popular* keys. A celebrity account, a flash-sale SKU, a chat room during a cup final, a tenant that is 40% of your ARR — those keys have a home, and that home becomes the bottleneck while the rest of the ring idles. 04.05 Sharding And Partitioning assumes the key distributes work; this lesson is what happens when the workload refuses.
 
-The mechanism, step by step.
+It does not present as an error. It presents as a latency cliff on one shard, write timeouts for clients unlucky enough to touch the hot key, and metrics that look healthy if you only average across partitions.
 
-## Tradeoffs
+## Where the heat comes from
+
+Three shapes cover almost every incident:
+
+| Shape | What concentrates | Typical trigger |
+| --- | --- | --- |
+| **Popular key** | One primary key gets a huge fraction of reads or writes | Celebrity profile, viral post, contested inventory row |
+| **Popular partition** | Many distinct keys that still land together | Bad key choice (country, status), hash collision under a weak hash, range partition on "today" |
+| **Growing key** | One partition key's *row set* balloons | A whale tenant's event log, an unbounded collection under one parent id |
+
+Popular-key heat is a throughput problem: the partition can only serialise so many updates to one row, and caches help reads more than writes. Popular-partition heat is a routing problem: the map put too much unrelated work on one node. Growing-key heat is a storage and compaction problem that eventually becomes a throughput problem too — large partitions take longer to compact, rebalance, and recover.
+
+A useful diagnostic: if moving *other* keys off the partition would not help the hot key's latency, you have a single-key bottleneck. If spreading the keys that share the partition would help, you have a packing problem. The mitigations differ.
+
+## Mitigations that move heat
+
+Not every fix fits every shape. Apply them in roughly this order of invasiveness.
+
+<Steps>
+  <Step title="Cache and read replicas for read-heavy heat">
+    If the hot key is mostly read, a cache in front of the shard — or extra replicas for that partition — absorbs the fan-in. Writes still serialise on the primary, but many "hot partition" pages are read storms on a viral object. Invalidate carefully; a stampede back to the primary recreates the incident.
+  </Step>
+  <Step title="Salting / write sharding for a single hot key">
+    Append a salt bucket to the key: `product_id#0` … `product_id#15`. Writes fan out across buckets; reads fan in and merge. You trade a single-partition read for N parallel reads and an application-level merge. Bucket count is a knob — start small (8–16) and raise it for keys you know will be hot. Random salt on every write without a fixed bucket set makes reads impossible without scanning.
+  </Step>
+  <Step title="Split the range or move the partition">
+    For range-partitioned stores, split the hot interval so yesterday and today no longer share fate. For hash rings with many logical partitions per node, migrate the hot logical partition onto quieter hardware. This fixes packing; it does not fix one row that is simply too popular for one writer.
+  </Step>
+  <Step title="Change the partition key for a class of entities">
+    If an entire tenant or entity type is chronically hot, sub-partition: `tenant_id` alone becomes `tenant_id + hash(user_id)`. Painful as a migration, decisive as a design. Do it for the whale class, not for every tenant on day one.
+  </Step>
+  <Step title="Special-case the known hot set">
+    Pre-declare VIP keys — top streamers, homepage inventory — onto dedicated partitions or even dedicated clusters. Operationally heavy, but predictable heat is cheaper to isolate than to discover at p99.
+  </Step>
+</Steps>
+
+<Callout type="warn">
+Load shedding and rate limiting on the hot key protect the shard's neighbours — they stop a celebrity write storm from taking down unrelated tenants on the same disk — but they do not cool the key itself. Clients still see failures or retries. Treat shedding as blast-radius control while you roll out salting or a key change, not as the permanent architecture for a known hot entity.
+</Callout>
+
+## Detection before the page
+
+Average QPS across partitions hides the problem by construction. Watch per-partition metrics: request rate, CPU, disk queue depth, replication lag, and p99 latency. Alert on **skew ratios** — hottest partition versus median — not only on absolute thresholds. A cluster at 30% average utilisation with one partition at 95% is already in trouble; waiting for the average to cross 80% is waiting too long.
+
+In capacity planning, assume a peak-to-mean ratio on the hottest keys. Consumer products routinely see a small fraction of keys carry a large fraction of traffic; if you provision as if hash perfection made every partition equal, you have provisioned the average and the hot partition will find you. Order-of-magnitude: designing for the hottest partition to run 5–10× the mean is a defensive starting point for social and marketplace workloads — a ballpark to reason with, not a universal constant.
+
+| Signal | Healthy-ish | Investigate |
+| --- | --- | --- |
+| QPS hottest / median partition | Under ~3× | Sustained above ~5–10× |
+| Replication lag on one shard only | Seconds, matches peers | Minutes while peers are caught up |
+| Error rate | Flat across shards | Spikes correlated with one partition id |
+| Cache hit rate on hot key | High if read-heavy | Low plus rising primary CPU → write heat or bad invalidation |
+
+## What not to do
+
+- **Do not "just add shards"** without changing how the hot key maps. More partitions under the same hash still send that key to exactly one place.
+- **Do not salt every key.** Salting multiplies read cost and complexity; reserve it for keys that have earned it.
+- **Do not confuse hot partitions with under-provisioned clusters.** If every partition is hot, you need capacity. If one is hot, you need redistribution or a different key.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Invest in hot-key mitigations when"
+  againstTitle="Treat it as ordinary capacity when"
+  forItems={[
+    "Per-partition metrics show sustained skew — one shard's latency or lag diverges while peers stay calm",
+    "A small set of business entities (celebrities, SKUs, tenants) are predictably responsible for disproportionate traffic",
+    "Writes concentrate on single rows so caching alone cannot absorb the heat",
+    "Blast radius matters: one hot key must not starve unrelated tenants sharing the shard",
+    "You can afford application-level merge (salted reads) or a one-time key migration for the whale class",
+  ]}
+  againstItems={[
+    "All partitions are equally busy — the fix is more nodes or faster hardware, not salting",
+    "The spike is a one-off incident with a known end (a match, a sale window) and shedding plus cache will ride it out",
+    "The 'hot' key is actually a bug — a retry storm, a missing cache, a client polling loop — fix the client first",
+    "You have not measured per-partition skew yet and are guessing from averages",
+    "Changing the partition key would break co-location invariants you still need more than you need even load",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+When you propose sharding, volunteer the failure mode in the same breath: "Hash by user id spreads load assuming popularity is not too skewed; for celebrity users I would salt writes or give them dedicated partitions." Interviewers listen for whether you know that hashing does not equal fairness under Zipf traffic. Be ready to walk salting — fixed bucket count, write fan-out, read merge — and to say how you would detect the problem (per-partition p99 and lag, not cluster averages). If they ask what you do mid-incident, separate blast-radius control (rate limits, shed) from the durable fix (salt, split, re-key).
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "A hot partition is skew: one slice of the key space carries far more traffic or data than the map assumed",
+    "Hashing spreads random keys; it does not spread popular keys — Zipf workloads defeat an even ring",
+    "It shows up as per-shard latency and lag, not as a clean error, and cluster averages hide it",
+    "Mitigations match the shape: cache for read heat, salt for single-key write heat, split/move for packing, re-key for chronic whales",
+    "Adding shards without changing the hot key's mapping does not cool that key",
+    "Watch hottest-versus-median partition metrics, and provision for skew rather than for perfect balance",
+  ]}
+/>

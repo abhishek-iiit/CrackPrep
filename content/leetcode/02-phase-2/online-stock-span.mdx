@@ -1,0 +1,100 @@
+---
+title: "Online Stock Span"
+number: "02.37"
+summary: "A decreasing price stack accumulates span counts so each quote reuses popped history in amortized O(1)."
+status: published
+free: true
+difficulty: core
+estMinutes: 13
+tags: [stack, monotonic-stack, design]
+updated: "2026-09-15"
+---
+
+## Consecutive days looking backward
+
+The **span** of today's price is the number of consecutive days (including today) where price was ≤ today's price, scanning backward until a strictly higher price stops you.
+
+Naive approach: for each new price, walk backward day by day — O(n) per call, O(n²) over n days. Prices arrive in a stream; you only need history, not the full array recomputed from scratch. Days that were "absorbed" into a later span never need individual backward walks again — store them on a **monotonic decreasing stack** of `(price, span)`.
+
+## Monotonic stack with accumulated span
+
+Stack holds pairs with strictly decreasing prices (top = most recent). On `next(price)`:
+
+1. Pop while top price ≤ new price, **adding** popped spans to a running total.
+2. Push `[price, 1 + accumulated span]`.
+3. Return the span on top.
+
+Each day is pushed once and popped at most once — **amortized O(1)** per call.
+
+Example: prices `100, 80, 60, 70`. After 60, stack is `(100,1),(80,1),(60,1)`. Price 70 pops 60 (span 1), stops at 80; push `(70, 2)` — today plus the popped day.
+
+<Steps>
+<Step title="Pop weaker or equal prices">
+  Their spans fold into the new day's count.
+</Step>
+<Step title="Push new (price, span)">
+  Span is 1 plus sum of popped spans.
+</Step>
+<Step title="Return top span">
+  That is the answer for the current day.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+class StockSpanner {
+  private stack: [number, number][] = []; // [price, span]
+
+  next(price: number): number {
+    let span = 1;
+
+    while (this.stack.length > 0 && this.stack[this.stack.length - 1][0] <= price) {
+      span += this.stack.pop()![1];
+    }
+
+    this.stack.push([price, span]);
+    return span;
+  }
+}
+```
+
+Amortized **O(1)** per `next`, **O(n)** space for the stack in the worst case (strictly decreasing prices).
+
+<Tradeoff
+  forTitle="Monotonic stack when"
+  againstTitle="Backward scan when"
+  forItems={[
+    "Prices arrive online and span queries are interleaved with inserts",
+    "Amortized O(1) per day matters over long streams (10⁴+ calls)",
+    "The definition uses consecutive days ≤ current price — stack pops match that exactly",
+    "Same pattern extends to 02.39 Daily Temperatures and 02.41 Largest Rectangle in Histogram",
+    "You want to avoid revisiting indices already merged into a prior span",
+  ]}
+  againstItems={[
+    "The full price array is known upfront and static — precompute spans once backward",
+    "Total days n is under 100 — double loop is fine",
+    "You need arbitrary range min queries, not consecutive span — use a segment tree",
+    "Memory must be O(1) — backward scan uses no auxiliary structure",
+    "Prices can be deleted or revised — stack assumes append-only history",
+  ]}
+/>
+
+## In an interview
+
+Define span with a small sequence: `[100, 80, 60, 70, 60, 75, 85]` — walk one `next` call. Confirm strictly greater price stops the span (≤ includes equal).
+
+Describe decreasing stack and folding popped spans before coding. Tie to "each index pushed and popped once."
+
+Follow-ups: 02.38 Next Greater Element I (forward nearest greater), 02.39 Daily Temperatures (wait days until warmer). Bug: using `<` instead of `<=` when popping — equal prices must merge into the same span.
+
+<KeyTakeaways
+  items={[
+    "Stock span is consecutive prior days with price ≤ today — monotonic stack with accumulated counts",
+    "Pop while stack top ≤ new price; new span = 1 + sum of popped spans",
+    "Amortized O(1) per next because each day enters and leaves the stack once",
+    "Stack stores (price, span) pairs, not prices alone — span carries merged history",
+    "Same monotonic-stack family as 02.39 Daily Temperatures and histogram problems",
+    "Equal prices must be popped and merged — strict `<` on pop condition is wrong for this problem",
+  ]}
+/>

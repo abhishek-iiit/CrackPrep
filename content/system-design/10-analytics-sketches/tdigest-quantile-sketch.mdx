@@ -1,32 +1,92 @@
 ---
 title: "TDigest Quantile Sketch"
 number: "10.11"
-summary: "TDigest Quantile Sketch — notes in progress."
-status: draft
+summary: "Estimate medians and tail percentiles from a stream by clustering values into centroids that stay exact at the extremes and compress more in the middle."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: deep
+estMinutes: 19
+tags: [tdigest, quantiles, percentiles, sketches]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Sorting every latency to find p99 does not fit a stream
 
-What breaks without this, and the situation that forces the decision.
+Latency SLOs, payload size distributions, and queue lag charts care about percentiles — p50, p95, p99 — not about averages. An average can look healthy while a thin tail of multi-second requests ruins users. The exact answer sorts all observations (or keeps a full histogram with tiny buckets) and reads an order statistic. At millions of samples per minute per dimension, retaining every sample is the same unbounded-state problem the rest of this module keeps solving with sketches.
 
-## How it works
+t-digest is a quantile sketch optimized for that job: it summarizes a distribution into a few hundred centroids (mean ± weight of a cluster of points) and answers approximate quantiles from those centroids. Relative accuracy is tighter near 0 and 1 — where p99 and p999 live — than around the median, which is the opposite of a naive equal-width histogram that wastes resolution on the middle and smears the tail.
 
-The mechanism, step by step.
+## Centroids with a size limit that depends on rank
 
-## Tradeoffs
+A t-digest stores a list of centroids `(mean, count)`. New points are absorbed into nearby centroids when those centroids are still allowed to grow. The allowed weight of a centroid depends on its quantile position: centroids near the ends of the distribution must stay small (often weight 1 — individual points), while centroids near the middle may merge aggressively. That force is controlled by a compression parameter `δ` (delta): larger `δ` means more centroids, more memory, finer accuracy.
+
+<Steps>
+  <Step title="Insert a point into the nearest eligible centroid">
+    Find a centroid close in value whose current weight is below the size limit for its rank. Add the point by updating the weighted mean and incrementing count. If no centroid can accept it, spawn a new centroid for that point.
+  </Step>
+  <Step title="Compress when the centroid list grows too long">
+    Periodically merge adjacent centroids that are still under their size limits, reclaiming slots so the structure stays near `O(δ)` centroids rather than growing with the stream.
+  </Step>
+  <Step title="Estimate a quantile by walking cumulative weight">
+    To estimate the value at quantile `q`, walk centroids in value order, accumulating counts, and interpolate within the centroid that crosses `q · N`. Because tail centroids are fine-grained, interpolation error stays small where SLOs usually care.
+  </Step>
+  <Step title="Merge digests by concatenating and recompressing">
+    Compatible t-digests merge by pooling centroids and running compression again — the same associative idea as 10.05 Mergeable Sketches For Analytics. Per-shard latency digests become a service-wide digest without shipping every sample.
+  </Step>
+</Steps>
+
+<Formula label="Centroid size scale (intuition)">max weight at quantile q scales with ~ q(1−q) · N / δ</Formula>
+
+Read the formula as a design statement more than as something to compute by hand in an interview: the `q(1−q)` term is smallest near `q = 0` and `q = 1`, so the allowed cluster size shrinks at the tails. Exact constants vary by t-digest variant (clustering digest vs merging digest); libraries implement them. What you provision is `δ` and the byte budget — commonly a few KB per digest at moderate compression.
+
+| Approach | Memory | Tail accuracy | Merge | Notes |
+| --- | --- | --- | --- | --- |
+| Store all samples | O(n) | Exact | Concatenate | Does not fit streams |
+| Equal-width histogram | O(bins) | Poor if bins coarse in tail | Add bins | Simple, easy to mis-bin |
+| HDR / fixed-percentile histograms | O(configured) | Excellent in range | Add | Needs known value range |
+| t-digest | O(δ) centroids | Strong near 0/1 | Concat + compress | No fixed range required |
+| Sample then exact quantile | O(k) | Depends on k | Harder | 10.10 Reservoir Sampling |
+
+<Callout type="gotcha">
+t-digest estimates quantiles of a **value distribution**, not distinct counts or per-key frequencies. Feeding it request URLs makes no sense; feeding it latency milliseconds does. For "how many distinct users" use HyperLogLog (10.04); for "which endpoints are hottest" use Count-Min Sketch and top-K (10.08, 10.09).
+</Callout>
+
+## Accuracy you should expect in practice
+
+With compression in the low hundreds, relative quantile error for extreme percentiles often lands in the low single-digit percent range of the true order statistic for smooth distributions — order-of-magnitude guidance, not a guarantee for every multimodal spike. Pathological cases (huge point masses, adversarial ordering before compression) can need higher compression or a different histogram tool. For SLO burn alerts, validate the digest against exact batch quantiles on a sampled day before you trust automated page-out decisions to the sketch alone.
+
+Pair digests with time buckets (10.06): one t-digest per minute per service merges into an hour for "p99 this hour," and you can discard old minute digests without rebuilding a global structure that cannot forget.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Reach for a t-digest when"
+  againstTitle="Prefer exact samples or fixed histograms when"
+  forItems={[
+    "You need streaming p50/p95/p99 (and friends) with bounded memory and no preset value range",
+    "Tail accuracy matters more than median accuracy — classic SLO and latency use cases",
+    "Per-shard digests must merge into a global distribution summary",
+    "Value domains vary widely (microseconds to minutes) and equal-width bins are awkward",
+    "A few percent quantile error is acceptable for dashboards and soft alerting",
+  ]}
+  againstItems={[
+    "You can retain all samples or an exact HDR histogram for the configured range and need certified exact percentiles",
+    "The metric is categorical or a frequency-of-keys problem rather than a numeric distribution",
+    "Hard automated actions fire on tiny quantile movements inside the sketch's error band",
+    "You only needed an unbiased sample of raw points for offline exact quantiles — a reservoir may suffice",
+    "Implementation constraints forbid a digest library and a simple bounded histogram already fits the domain",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Name the consumer: "I need p99 latency without storing every sample, so I will maintain a t-digest per service and time bucket — centroids stay small in the tails — and merge digests across instances for a global percentile." Be ready to contrast with averages (hide tails), with reservoirs (sample then sort), and with HLL/CMS (wrong family). Follow-ups: mergeability across shards, and why compression trades memory for error. If they ask for a formula, explain `q(1−q)` shrinking allowed centroid weight at the extremes rather than pretending to recite library constants.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "t-digest summarizes a numeric stream as weighted centroids, estimating quantiles by cumulative weight with interpolation",
+    "Compression limits how large centroids may grow, and the limit is tighter near quantiles 0 and 1 — preserving tail resolution for p99-style queries",
+    "Memory scales with the compression parameter (typically hundreds of centroids, kilobytes), not with the number of observations",
+    "Digests merge by concatenating centroids and recompressing, which fits sharded latency aggregation",
+    "It estimates value distributions — latencies, sizes, lags — not distinct counts or per-key frequencies",
+    "Validate against exact batch percentiles before driving high-severity automation solely from sketch output",
+  ]}
+/>

@@ -1,0 +1,129 @@
+---
+title: "Serialize and Deserialize Binary Tree"
+number: "02.15"
+summary: "Preorder with explicit null markers round-trips any binary tree — one string, one recursive walk each way."
+status: published
+free: true
+difficulty: deep
+estMinutes: 20
+tags: [binary-tree, dfs, design]
+updated: "2026-09-15"
+---
+
+## Turn a pointer graph into a string and back
+
+Design an algorithm to serialize a binary tree to a string and deserialize that string back to the **same** tree structure. LeetCode uses a `Codec` class with `serialize(root)` and `deserialize(data)`.
+
+The failure modes are structural, not arithmetic: comma-separated values without null markers cannot distinguish `[1,2]` from `[1,null,2]`. JSON-style nested arrays work but are verbose. A compact **preorder with `#` (or `null`) sentinels** encodes shape and values in one pass — the same family of encoding 02.11 Same Tree might use for comparison.
+
+Constraints allow up to 10⁴ nodes; O(n) encode and decode is required. Space is O(n) for the string plus O(h) stack during traversal.
+
+## Preorder encode, preorder decode
+
+**Serialize:** visit root, append value, append separator, recurse left, recurse right. Null nodes append a sentinel (e.g. `"#"`) so shape is recoverable.
+
+**Deserialize:** maintain an index into the token array. Read next token — if sentinel, return null. Otherwise create node, attach `deserialize()` for left then right, return node.
+
+The invariant on decode: preorder on the string mirrors preorder on the tree — the next token always belongs to the next node in the current subtree's preorder walk.
+
+<Steps>
+<Step title="Serialize with null markers">
+  `node.val, leftSubtreeString, rightSubtreeString` flattened preorder.
+</Step>
+<Step title="Split or stream tokens">
+  Split on a delimiter that cannot appear in values (commas are fine for integers).
+</Step>
+<Step title="Deserialize recursively">
+  One helper advances a shared index; each call consumes exactly one subtree.
+</Step>
+</Steps>
+
+Level-order serialization with nulls (LeetCode's official example `"1,null,2,..."`) also works — pick one traversal and stay consistent between encode and decode.
+
+## Solution
+
+```ts
+class TreeNode {
+  val: number;
+  left: TreeNode | null;
+  right: TreeNode | null;
+  constructor(val?: number, left?: TreeNode | null, right?: TreeNode | null) {
+    this.val = val ?? 0;
+    this.left = left ?? null;
+    this.right = right ?? null;
+  }
+}
+
+class Codec {
+  serialize(root: TreeNode | null): string {
+    const parts: string[] = [];
+
+    function dfs(node: TreeNode | null): void {
+      if (node === null) {
+        parts.push("#");
+        return;
+      }
+      parts.push(String(node.val));
+      dfs(node.left);
+      dfs(node.right);
+    }
+
+    dfs(root);
+    return parts.join(",");
+  }
+
+  deserialize(data: string): TreeNode | null {
+    const tokens = data.split(",");
+    let i = 0;
+
+    function build(): TreeNode | null {
+      const token = tokens[i++];
+      if (token === "#") return null;
+      const node = new TreeNode(Number(token));
+      node.left = build();
+      node.right = build();
+      return node;
+    }
+
+    return build();
+  }
+}
+```
+
+Time **O(n)** each way — every node written once, read once. Space **O(n)** for the string and token array, **O(h)** recursion stack.
+
+<Tradeoff
+  forTitle="Preorder + null markers when"
+  againstTitle="Level-order comma encoding when"
+  forItems={[
+    "You want a short recursive deserialize — one index, one build function",
+    "Values are integers without commas — simple split is safe",
+    "Same encoding supports subtree compare and copy problems",
+    "Tree height is moderate; recursive decode matches recursive serialize",
+    "Interview expects the classic DFS codec, not a JSON tree dump",
+  ]}
+  againstItems={[
+    "Values are strings that may contain your delimiter — need length-prefix or escaping",
+    "You need streaming decode without storing all tokens — iterative queue decode fits level-order",
+    "Human readability matters — nested JSON is easier to debug",
+    "Extremely deep tree — iterative deserialize with explicit stack avoids call-stack limits",
+    "Follow-up is serialize a BST with structure-only bits — drop nulls using BST property",
+  ]}
+/>
+
+## In an interview
+
+Clarify: binary tree (not necessarily BST), null children must be preserved, round-trip must be exact. Walk through a three-node tree showing why values alone are insufficient without null markers.
+
+Say encode and decode must use the **same traversal order**. Preorder is the usual choice because the root token appears first and subtrees follow contiguously.
+
+Bugs: forgetting null markers (shape loss); deserialize without shared index (re-splitting breaks order); using `shift()` on huge arrays in JS — index pointer is O(1) per token. Follow-ups: serialize BST compactly; deserialize iteratively; handle duplicate delimiter in string values.
+
+<KeyTakeaways items={[
+  "Serialization must encode both values and null shape — otherwise distinct trees collide.",
+  "Preorder with a null sentinel round-trips in O(n) with a single advancing index on decode.",
+  "Serialize and deserialize must share the same traversal contract.",
+  "Shared index (or queue) on decode — each recursive call consumes one subtree's tokens.",
+  "O(n) time and O(n) space for the string; O(h) stack during DFS.",
+  "Level-order null encoding is an equivalent choice if you prefer BFS symmetry with 02.14.",
+]} />

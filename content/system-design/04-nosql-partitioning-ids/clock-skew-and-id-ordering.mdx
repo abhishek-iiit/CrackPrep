@@ -1,32 +1,106 @@
 ---
 title: "Clock Skew And ID Ordering"
 number: "04.11"
-summary: "Clock Skew And ID Ordering — notes in progress."
-status: draft
+summary: "Why wall-clock timestamps across machines disagree, how that breaks ID-based ordering, and what Snowflake-style designs do — and cannot do — about causality."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 14
+tags: [ids, clocks, ordering]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Timestamps lie about happened-before
 
-What breaks without this, and the situation that forces the decision.
+Two API servers mint ids a millisecond apart. Server A's clock is 40 ms behind server B's. A request hits A, then a dependent request hits B. Wall clocks say B's event came first. Your "sort by id ascending" feed, your pagination cursor, your dedupe window — all of them now disagree with the order users actually experienced. The ids are unique. The order is fiction.
 
-## How it works
+Clock skew is the gap between what each machine believes "now" is. NTP usually keeps skew in the low tens of milliseconds on well-managed fleets; under load, after a pause, or on a misconfigured VM, hundreds of milliseconds to seconds show up. Distributed id schemes that embed a timestamp — Snowflake and its relatives — inherit that gap as an ordering gap. 04.08 Distributed ID Generation and 04.10 Snowflake ID Design cover how those ids are packed; this lesson is the part operators discover in production: **unique does not mean ordered**, and **timestamp-ordered does not mean causally ordered**.
 
-The mechanism, step by step.
+06.05 Clocks And Ordering widens the lens to Lamport clocks and true causality. Here the focus is the narrower, interview-common case: time-based ids and the promises people incorrectly read into them.
 
-## Tradeoffs
+## What skew does to Snowflake-shaped ids
+
+A typical Snowflake layout is roughly: timestamp bits | worker bits | sequence bits. Rough numbers for intuition, not a single vendor's spec: ~41 bits of milliseconds since an epoch, ~10 bits of worker id, ~12 bits of per-millisecond sequence. IDs increase with time *on that worker's clock*. Across workers, comparison of ids is only as meaningful as comparison of those clocks.
+
+Consequences that show up as product bugs:
+
+- **Feed ordering.** "Newest first" by id interleaves two users' posts wrong when their writers' clocks disagree.
+- **Keyset pagination.** `WHERE id < cursor ORDER BY id DESC` skips or double-visits rows if ids from skewed writers land out of causal order in the same stream — see 04.12 Keyset Pagination for the pagination mechanics; the cursor assumes a total order the ids may not deserve.
+- **Idempotency windows.** "Ignore events older than id X" drops late-but-valid work when X was minted on a fast clock.
+- **Sequence exhaustion under backward jumps.** If a worker's clock steps backward, a naive generator risks minting an id it already issued; production generators refuse to emit until time catches up, or they bump a logical counter — either way, latency or complexity appears exactly when the clock misbehaves.
+
+| Promise people hear | What time-based ids actually give |
+| --- | --- |
+| Globally unique | Yes, if worker ids are unique and the sequence does not wrap incorrectly |
+| Roughly time-sortable | Yes within one worker; across workers, only within clock sync tolerance |
+| Causal / happened-before order | No — not without a separate causality mechanism |
+| Monotonic on every node forever | No — clock rollback and pause handling are explicit design work |
+
+<Callout type="gotcha">
+Synchronising clocks tighter does not create causality. Even with perfect NTP, two events on two machines have no defined order unless one waited for the other (a response, a shared fence, a log position). Skew makes false ordering *more* likely to be noticed; eliminating skew does not make id order equal user order. If the product needs "A then B because A caused B", you need a causal mechanism — a parent pointer, a per-entity sequence, a consensus log index — not a better timestamp.
+</Callout>
+
+## Defences that actually work
+
+Mitigations stack; pick by how strong an order you need.
+
+<Steps>
+  <Step title="Bound the clock, do not worship it">
+    Run NTP (or better, a PTP-capable setup where it matters). Alert on offset and peer reachability. Snowflake workers should track the last issued timestamp and refuse to go backwards — wait or error — rather than emit duplicates. This keeps ids unique under rollback; it does not invent causality.
+  </Step>
+  <Step title="Order within an entity, not across the universe">
+    Feeds, chat threads, and account ledgers usually need order *per user* or *per conversation*. Allocate a per-entity monotonic sequence (or store `created_at` from the primary that accepted the write, plus a tie-breaker) instead of sorting the global id stream. Global ids stay unique; local sequences stay ordered.
+  </Step>
+  <Step title="Prefer wait-free logical counters where one writer owns the stream">
+    A single partition owner can mint `max+1` without a wall clock. That total order is real for that stream. Cross-stream merge still needs a policy — merge by accept time, by vector clock, or display as concurrent.
+  </Step>
+  <Step title="Treat cross-worker id order as approximate">
+    Document that global id order is best-effort chronological. UI copy and secondary indexes should not assume that id A &lt; id B means A happened first in the user's world. For analytics, bucket by event time recorded at ingest with explicit skew tolerance.
+  </Step>
+</Steps>
+
+UUID v1 embeds a timestamp and a node identity with its own skew story; UUID v4 is random and offers no order; ULID and KSUID chase sortable strings with the same clock caveats as Snowflake. 04.09 UUID vs ObjectId vs Snowflake compares the formats — choose on coordination and storage shape, not on a fantasy of perfect global time order.
+
+## How bad is "tens of milliseconds"
+
+For a social feed rendered once a second, 50 ms of skew between workers is usually invisible. For a trading ledger, a lock service, or an audit log that must reconstruct exact sequence, it is a bug. Match the defence to the invariant:
+
+- **Display ordering with occasional inversion OK** — time-based ids plus NTP are fine; do not over-build.
+- **Per-aggregate strict order required** — per-entity sequences or single-writer partitions.
+- **Global total order required** — consensus log or a serialised assigner; accept the throughput ceiling.
+
+Inventing a "global strictly ordered Snowflake" without a single serialisation point is how designs claim a property they cannot enforce.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Lean on time-based ids when"
+  againstTitle="Introduce stronger ordering when"
+  forItems={[
+    "You need unique, roughly chronological ids at high rate without a central allocator bottleneck",
+    "Product can tolerate occasional cross-worker inversions within clock sync tolerance",
+    "Per-entity order is enforced elsewhere — conversation seq, ledger row numbers — and the global id is only a primary key",
+    "Operational cost of NTP monitoring is acceptable and generators already handle clock rollback safely",
+    "Sortable ids help locality or debugging even when they are not causal proof",
+  ]}
+  againstItems={[
+    "The product invariant is causal: B must never appear before A if A caused B, across any writers",
+    "Regulators or finance need a reconstructible total order for a stream of records",
+    "Pagination or dedupe correctness depends on id order matching user-visible order across all clients",
+    "Clocks in the environment are hostile — burstable VMs, frequent pauses, no reliable time sync",
+    "A single-writer partition or consensus log already exists and can mint positions without pretending wall time is truth",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+When you propose Snowflake ids, add one sentence that disarms the follow-up: "These are unique and roughly time-ordered per worker; I will not use global id order as causal order — feeds sort by per-user sequence / accept time." Expect questions on clock rollback (wait or error, never reuse), worker id uniqueness, and what happens if two datacenters drift. If they push on "strictly ordered tweets worldwide", say that needs a serialised per-timeline counter or a log, not more timestamp bits. Name skew as a measured operational reality — tens of milliseconds typically, worse under failure — not as a theoretical curiosity.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Clock skew is the disagreement between machines' wall clocks; NTP bounds it but never creates causality",
+    "Snowflake-style ids are unique and roughly time-sortable; they are not a happened-before relation across workers",
+    "Using global id order for feeds, cursors, or idempotency windows imports skew directly into product behaviour",
+    "Generators must handle clock rollback explicitly — wait or advance a logical component — or they risk duplicate ids",
+    "Enforce strict order per entity with local sequences or single-writer streams; keep global ids for identity",
+    "Match ordering strength to the invariant: display-tolerant, per-aggregate strict, or globally serialised — each costs differently",
+  ]}
+/>

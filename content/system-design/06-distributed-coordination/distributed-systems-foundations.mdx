@@ -1,32 +1,68 @@
 ---
 title: "Distributed Systems Foundations"
 number: "06.01"
-summary: "Distributed Systems Foundations — notes in progress."
-status: draft
+summary: "Partial failure and network unreliability, not scale, are what make distributed systems a genuinely different kind of engineering problem."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: intro
+estMinutes: 9
+tags: [distributed-systems, partial-failure, networking, foundations]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The request that never came back
 
-What breaks without this, and the situation that forces the decision.
+On a single machine, a function call has three outcomes: it returns a value, it throws, or the whole process is gone — and if the process is gone, you know it, because whatever called it is either gone too or can check. Failure is visible and total. Across a network, a fourth outcome shows up that single-machine programming has no name for: you sent a request and got nothing back, and you cannot tell why. The remote process might have crashed before it ever saw the request. It might have processed the request completely and crashed before the reply reached you. The reply might have been sent and lost somewhere in between. All three look identical from where you are standing: silence.
 
-## How it works
+That is partial failure, and it is the property that actually separates a distributed system from a single-machine one — not the number of machines. A single process's failure model is close to fail-stop: it is either running or it is not, and anyone checking agrees on which. A distributed system has no such agreement for free. Different nodes can hold different, simultaneously "correct" views of who is alive, because the news that a node died has to travel over the same unreliable network that just swallowed your request.
 
-The mechanism, step by step.
+The consequence engineers actually trip over: a timeout is not an answer, it is the absence of one. Treating "no response within 500 ms" as "the operation failed" is a guess, and it is wrong exactly often enough to matter — the work may have completed on the other end a moment before the timeout fired. Every retry issued after a timeout is a bet that the original request did not already succeed, which is why retrying a payment charge or an inventory decrement without an idempotency key is a bug waiting for a slow network, not a rare one (02.09 Retries Timeouts And Idempotency).
 
-## Tradeoffs
+<Callout type="gotcha">
+A timeout tells you that no response arrived in time. It does not tell you that nothing happened. Code that treats the two as the same thing works fine in every demo and fails the first time a reply gets delayed rather than lost.
+</Callout>
+
+## Why more machines change the kind of problem, not just the size
+
+Distributed systems inherit none of the conveniences single-machine code quietly relies on.
+
+There is no shared clock. Even continuously corrected against NTP, machines commonly disagree by single-digit milliseconds within a datacenter, and the gap widens across regions or with a poorly maintained sync setup — enough that comparing two nodes' timestamps to decide "which happened first" is already on shaky ground before you have written a line of application logic (06.05 Clocks And Ordering covers what to do about it).
+
+There is no shared memory. Nodes exchange only messages, an idea that sounds obvious until you notice how much application code implicitly assumes a current, shared view of state — a cache entry, an in-memory flag — that a second node cannot see and has no way to know is stale.
+
+There is no shared, low-cost notion of "far away." A same-datacenter round trip commonly runs under a millisecond; a cross-region one commonly costs tens to a couple hundred milliseconds, depending on distance — a gap of two to three orders of magnitude that changes what "just check with another node before answering" is allowed to cost in a design. And the network itself is not a reliable wire: packet loss on a wide-area link is typically a small fraction of a percent in normal conditions, and congestion or a bad link segment can push it much higher for the traffic caught in it.
+
+None of this is exotic — it is the ordinary operating condition of any system spanning more than one machine. Consistency models, replication, CAP and PACELC, clocks, and consensus, the rest of this module, are not a grab-bag of unrelated topics. Each is a specific, named answer to the same two facts: messages can be lost, delayed, or duplicated, and any node's knowledge of any other node's state is always a little bit in the past.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Accept distributed complexity when"
+  againstTitle="Stay on one machine when"
+  forItems={[
+    "A single machine cannot hold the data or serve the request rate at any price you can pay — capacity has a hard ceiling on one box",
+    "The system must survive the loss of an entire machine, rack, or data center without losing acknowledged data or going fully dark",
+    "Users are spread across regions and the speed of light makes serving all of them from one location too slow for the latency budget",
+    "Different parts of the workload have different failure and scaling profiles and benefit from being deployed and failed over independently",
+  ]}
+  againstItems={[
+    "The data and traffic fit comfortably on one well-provisioned machine with headroom for a year or two of growth",
+    "The team cannot yet operate the extra surface a distributed system adds — more failure modes, more monitoring, more pages at 3am",
+    "Simple, end-to-end correctness matters more than uptime, and a single machine's fail-stop model is easy to reason about completely",
+    "The coordination a distributed design requires (06.03 Replication, 06.06 Consensus) is not yet justified by the durability or scale it buys",
+    "A vertical upgrade (01.08 Horizontal Vs Vertical Scaling) is available and cheaper, and buys enough headroom to defer the harder decision",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Name partial failure early, the moment a design turns distributed — say plainly that "no response" is ambiguous and that the design has to decide what a client does about it: retry with an idempotency key, fail safe and surface an error, or something else, but a decision, not a default. It signals more maturity than diving straight into boxes and arrows, and it sets up every later decision in the conversation: a consistency model, a replication strategy, a stance on CAP, all exist because this one problem does. If asked "what's actually different here versus a single server," the honest answer is not "more moving parts" — it is that no node's view of any other node is ever current, only recently true.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "A distributed system's defining property is partial failure: some nodes and some messages can fail while others keep working, and no single observer sees the whole picture at once.",
+    "A timeout means no response arrived in time — it does not mean the operation failed, since the request or the reply, not the work itself, may be what got lost.",
+    "Distributed programming loses two guarantees single-machine programming takes for granted: a shared clock and shared memory; every node's view of the world is a message-delayed guess.",
+    "Latency across a network is not a rounding error: a same-datacenter round trip runs under a millisecond, cross-region commonly costs tens to a couple hundred milliseconds, and that gap shapes most of the decisions later in this module.",
+    "Because 'no response' is ambiguous, every retry is a bet that the original request did not already succeed — which is why idempotency, not just retrying, is the actual fix.",
+    "Consistency models, replication, CAP/PACELC, clocks, and consensus are not independent topics — each is a specific, named answer to what to do about partial failure and network unreliability.",
+  ]}
+/>

@@ -1,0 +1,93 @@
+---
+title: "Find Peak Element"
+number: "02.45"
+summary: "nums[mid] < nums[mid+1] means a peak exists to the right — binary search without full sorted order."
+status: published
+free: true
+difficulty: core
+estMinutes: 13
+tags: [binary-search, array]
+updated: "2026-09-15"
+---
+
+## The array is not sorted, but slopes are
+
+A peak element is strictly greater than its neighbors. Given an integer array with `nums[-1] = nums[n] = -∞` (virtual boundaries), return any peak index. For `[1, 2, 1, 3, 5, 6, 4]` → index 1 (value 2) or index 5 (value 6) both work.
+
+Linear scan finds a peak in O(n). The problem allows O(log n). The array is not globally sorted — you cannot compare mid to a single target — but you *can* compare mid to mid+1. If `nums[mid] < nums[mid + 1]`, you are on an upward slope, so some peak exists at mid+1 or to its right. If `nums[mid] > nums[mid + 1]`, a peak exists at mid or to its left.
+
+## Binary search on slope direction
+
+Use half-open bounds `left = 0`, `right = n - 1`, loop while `left < right`. Compare `nums[mid]` to `nums[mid + 1]`. Ascending at mid → `left = mid + 1`. Descending at mid → `right = mid`. When `left === right`, that index is a peak.
+
+<Steps>
+<Step title="Initialize left = 0, right = n - 1">
+  A peak is guaranteed to exist — the problem statement says so.
+</Step>
+<Step title="Mid = left + floor((right - left) / 2)">
+  Compare nums[mid] vs nums[mid + 1] — never mid - 1, because mid could be 0.
+</Step>
+<Step title="Shrink toward the uphill side">
+  Ascending → peak is right of mid. Descending → peak is at or left of mid.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function findPeakElement(nums: number[]): number {
+  let left = 0;
+  let right = nums.length - 1;
+
+  while (left < right) {
+    const mid = left + Math.floor((right - left) / 2);
+    if (nums[mid] < nums[mid + 1]) {
+      left = mid + 1;
+    } else {
+      right = mid;
+    }
+  }
+
+  return left;
+}
+```
+
+Time **O(log n)**. Space **O(1)**.
+
+<Tradeoff
+  forTitle="Slope binary search when"
+  againstTitle="Linear peak scan when"
+  forItems={[
+    "The problem asks for O(log n) and guarantees a peak exists",
+    "You can compare adjacent elements to determine which half still contains a peak",
+    "Virtual -∞ boundaries mean edges never fail the peak check",
+    "Same half-open binary search template as lower-bound problems",
+    "Follow-ups may ask for 2D peak finding — same slope idea on rows/columns",
+  ]}
+  againstItems={[
+    "You need the global maximum, not any local peak — full scan required",
+    "n is tiny and O(n) linear scan is simpler to implement correctly",
+    "Adjacent comparison is unavailable (sparse or implicit array)",
+    "Multiple peaks exist and you need the leftmost — slope search returns *a* peak, not necessarily the first",
+    "Interviewer wants O(n) baseline stated before the log-n insight",
+  ]}
+/>
+
+## In an interview
+
+Restate: peak is strictly greater than neighbors; `nums[-1]` and `nums[n]` are -∞; return any valid index. Example: `[1,2,3,1]` → index 2.
+
+Say out loud that this is not standard target search — you compare mid to mid+1 to decide which half still contains a peak. Mention you use `right = mid` (not mid - 1) on the descending side because mid itself could be the peak.
+
+Follow-ups: find peak in 2D matrix, or find element in rotated array (01.08 — different invariant). The bug interviewers watch for is comparing mid to mid-1 when mid = 0, or using `left <= right` with wrong update rules.
+
+<KeyTakeaways
+  items={[
+    "Find Peak Element uses binary search on slope direction, not on sorted values",
+    "If nums[mid] < nums[mid+1], a peak exists in the right half; otherwise at or left of mid",
+    "Half-open loop (left < right) with right = mid on the descending branch preserves a valid peak",
+    "Time O(log n), space O(1) — guaranteed peak means no empty-window edge case",
+    "Virtual -∞ boundaries ensure index 0 and n-1 can always be peaks",
+    "Differs from 02.42 exact search — here you discard based on local monotonicity, not global order",
+  ]}
+/>

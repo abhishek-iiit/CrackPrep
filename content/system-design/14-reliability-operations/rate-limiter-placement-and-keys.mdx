@@ -1,32 +1,105 @@
 ---
 title: "Rate Limiter Placement And Keys"
 number: "14.13"
-summary: "Rate Limiter Placement And Keys — notes in progress."
-status: draft
+summary: "Where to enforce rate limits in a stack and which dimensions to key on — so you throttle abusers without collapsing NAT users into one unfair bucket."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [rate-limiting, api-gateway, abuse, quotas]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The algorithm does not matter if you key on the wrong thing
 
-What breaks without this, and the situation that forces the decision.
+A perfect sliding window (14.14 Sliding Window Rate Limiter) keyed only on source IP will punish an entire mobile carrier CGNAT when one client misbehaves, and will miss a botnet that spreads one request per IP. Placement and **key design** decide whether rate limiting is a fairness and abuse control or a self-inflicted outage. This lesson is where the limiter lives and what string indexes the counter; the next is how the counter window math works.
 
-## How it works
+Rate limiting is related to load shedding (02.13) but not identical: shedding protects server survival under overload; rate limiting enforces a policy quota per caller even when the server is healthy.
 
-The mechanism, step by step.
+## Where to put the check
 
-## Tradeoffs
+| Placement | Sees | Good for | Weak for |
+| --- | --- | --- | --- |
+| CDN / edge | Raw IP, geo, TLS fingerprint hints | Volumetric scrapers, early cheap reject | Fine-grained per-user quotas (user not known yet) |
+| API gateway | Route, API key, JWT subject after auth | Consistent per-route policy across services | Logic that needs body fields not parsed at gateway |
+| Service mesh / sidecar | Service identity | Service-to-service budgets | End-user fairness |
+| Application | Full auth context, entity ids | Per-user, per-resource, business quotas | Cost if every service reimplements inconsistently |
+| Data tier | DB user / tenant | Last line against query storms | Late — work already done; use as backstop |
+
+Practical designs **stack**: edge limits for anonymous floods, gateway limits for API keys and routes, application limits for "max 5 OTP sends per account per hour." Duplicating the same key at every layer without need just adds latency; omitting the edge layer leaves your origin to pay for bytes you could have dropped closer to the client.
+
+Enforce **before** expensive work — the same gotcha as load shedding. A limiter after the database query only protects the next caller.
+
+## Choosing keys
+
+A key is the dimension that shares a budget. Common building blocks, often combined:
+
+- **IP / IP prefix** — anonymous traffic; coarse.
+- **API key / app id** — partner integrations.
+- **User id / tenant id** — authenticated fairness and multi-tenant isolation (14.15).
+- **Device id / session** — mobile abuse where accounts are cheap to create.
+- **Route + method** — protect expensive endpoints with tighter budgets than cheap GETs.
+- **Target resource** — e.g. destination phone number for SMS, to stop many accounts beating one victim.
+- **Combination** — `user_id + route`, `tenant_id + ip`, etc.
+
+<Callout type="gotcha">
+Per-tenant limits without per-user limits let one hot user inside a tenant starve neighbors in the same tenant. Per-user limits without per-tenant limits let a tenant create infinite users and bypass. Multi-tenant products usually need **both** ceilings.
+</Callout>
+
+## Policy shape
+
+Limits should state: key, window, action (`429` with `Retry-After`, queue, degrade), and whether the limit is **shared across replicas**. A local in-process counter on each of 50 pods is effectively 50× the intended rate unless you use a shared store (Redis, etc.) or consistent hashing sticky to one limiter. Edge limiters often count locally per PoP — know that global exactness is approximate.
+
+Document **burst versus sustained** expectations for clients. Return standard errors; silent drops look like availability bugs.
+
+<Steps>
+  <Step title="List endpoints by cost and abuse history">
+    Separate cheap reads, expensive searches, and irreversible side effects (OTP, pay, delete).
+  </Step>
+  <Step title="Assign keys per class">
+    Anonymous → IP + route at edge. Authenticated → user + route at gateway/app. Side effects → user + target resource.
+  </Step>
+  <Step title="Pick placement for each rule">
+    Earliest point that knows the key material. Do not wait for the app if the API key is enough.
+  </Step>
+  <Step title="Decide shared vs local counters">
+    Global fairness needs a shared store; coarse flood control may accept per-PoP approximation.
+  </Step>
+  <Step title="Watch false positives">
+    Metrics for `429` by key type; support escape hatches for enterprise NATs and batch jobs with separate API keys.
+  </Step>
+</Steps>
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Enforce at the edge / gateway when"
+  againstTitle="Enforce in the application when"
+  forItems={[
+    "You can identify the caller with IP, API key, or token already validated at the gateway",
+    "You want one policy plane across many services and cheap rejects before origin work",
+    "Volumetric anonymous traffic is a primary concern",
+    "Consistency of limits matters more than access to deep request body fields",
+    "You need to protect languages and runtimes that should not each implement counters",
+  ]}
+  againstItems={[
+    "The limit depends on entity ids or business state only the service understands",
+    "Different tenants need custom quotas loaded from your billing DB",
+    "You must rate-limit side effects against a target resource after authz decides visibility",
+    "Gateway cannot see enough of gRPC/metadata without invasive parsing",
+    "Offline workers and internal consumers bypass the gateway — they still need service-level budgets",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Separate placement from algorithm: "I put cheap anonymous limits at the edge keyed by IP and route, authenticated quotas at the gateway by user id and route, and special side-effect limits in-app by user and target; counters for global fairness live in a shared store." Mention NAT false positives and per-tenant *plus* per-user ceilings. Point to 14.14 when asked how the window is counted.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Rate limit effectiveness depends more on key and placement than on which window algorithm you cite first",
+    "Place checks as early as the needed identity exists — before expensive handlers",
+    "Stack edge, gateway, and app limits for different threat classes rather than one magical global counter",
+    "Key on user, tenant, route, and sometimes target resource; IP-only keys fail open to botnets and fail closed on NATs",
+    "Multi-tenant systems typically need both per-tenant and per-user ceilings",
+    "Shared counters enforce global quotas across replicas; local counters multiply the effective limit by pod or PoP count",
+  ]}
+/>

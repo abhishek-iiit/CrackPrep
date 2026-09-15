@@ -1,0 +1,133 @@
+---
+title: "Vertical Order Traversal of a Binary Tree"
+number: "03.48"
+summary: "Assign each node a column from its horizontal offset — BFS by level, then sort column, row, and value for the tie-break rules."
+status: published
+free: true
+difficulty: core
+estMinutes: 16
+tags: [binary-tree, bfs, hash-map]
+updated: "2026-09-15"
+---
+
+## Level order alone is wrong — column and row both sort
+
+Return nodes grouped by **vertical column**, left to right. Column 0 is the root. Moving to a left child decreases column by 1; right child increases by 1.
+
+Within the same column **and same row**, sort values ascending. Across rows in the same column, top row comes first.
+
+Example: root 3, left 9, right 20, 20's children 15 and 7. Column -1: `[9]`. Column 0: `[3]`. Column 1: `[15, 20, 7]` — row 1 has 20, row 2 has 15 then 7 sorted.
+
+02.14 Binary Tree Level Order Traversal ignores horizontal position. Pure column DFS without row tie-breaking mishandles same-row same-column pairs.
+
+## BFS with (row, col) tags
+
+Use a queue of `(node, row, col)`. A nested map `col → row → values[]` collects nodes. BFS ensures row order within a column is naturally increasing if you process level by level.
+
+After traversal:
+
+1. Sort column keys ascending
+2. For each column, sort row keys ascending
+3. For each row bucket, sort values ascending before appending
+
+Offset columns to nonnegative indices if using array storage — a `Map<number, …>` avoids shifting.
+
+<Steps>
+<Step title="BFS from (root, 0, 0)">
+  Push children with col - 1 and col + 1, row + 1.
+</Step>
+<Step title="Bucket into map[col][row]">
+  Append node.val to the list at that coordinate.
+</Step>
+<Step title="Sort columns, then rows, then values">
+  Produce the final nested output array.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+class TreeNode {
+  val: number;
+  left: TreeNode | null;
+  right: TreeNode | null;
+  constructor(val?: number, left?: TreeNode | null, right?: TreeNode | null) {
+    this.val = val ?? 0;
+    this.left = left ?? null;
+    this.right = right ?? null;
+  }
+}
+
+function verticalTraversal(root: TreeNode | null): number[][] {
+  if (root === null) return [];
+
+  const buckets = new Map<number, Map<number, number[]>>();
+  const queue: [TreeNode, number, number][] = [[root, 0, 0]];
+
+  while (queue.length) {
+    const [node, row, col] = queue.shift()!;
+    if (!buckets.has(col)) buckets.set(col, new Map());
+    const colMap = buckets.get(col)!;
+    if (!colMap.has(row)) colMap.set(row, []);
+    colMap.get(row)!.push(node.val);
+
+    if (node.left) queue.push([node.left, row + 1, col - 1]);
+    if (node.right) queue.push([node.right, row + 1, col + 1]);
+  }
+
+  const cols = [...buckets.keys()].sort((a, b) => a - b);
+  const result: number[][] = [];
+
+  for (const col of cols) {
+    const colMap = buckets.get(col)!;
+    const rows = [...colMap.keys()].sort((a, b) => a - b);
+    const columnValues: number[] = [];
+    for (const row of rows) {
+      const vals = colMap.get(row)!;
+      vals.sort((a, b) => a - b);
+      columnValues.push(...vals);
+    }
+    result.push(columnValues);
+  }
+
+  return result;
+}
+```
+
+Time **O(n log n)** from sorting values within buckets (worst case many nodes share a row). Space **O(n)**.
+
+<Tradeoff
+  forTitle="BFS + coordinate map when"
+  againstTitle="DFS with offset when"
+  forItems={[
+    "LeetCode requires row order then value sort within column — BFS processes row by row naturally",
+    "Tree height up to 100 — coordinate maps are compact",
+    "Same-column same-row duplicates need explicit value sort — bucket lists handle it",
+    "02.14 level order is a stepping stone — add col tracking to the queue tuple",
+    "Output is grouped columns left to right — sort column keys at the end",
+  ]}
+  againstItems={[
+    "Older 'vertical order' variant without value tie-break — simple DFS column map suffices",
+    "Tree is a perfect complete tree — closed-form column formulas exist",
+    "Memory must be O(h) only — DFS with sorted merge is heavier but possible",
+    "You need streaming output before full traversal — BFS emits partial columns early",
+    "Graph not a tree — column definition breaks without parent direction",
+  ]}
+/>
+
+## In an interview
+
+Clarify three sort keys: column asc, row asc, value asc within (col, row). Draw a small tree with two nodes sharing column and row — show why value sort matters.
+
+Say: "BFS tracks (row, col); I bucket into a nested map, then sort at each level of the hierarchy."
+
+Bug: using DFS without sorting values at the same (col, row); or sorting columns but forgetting row order. Follow-ups: print column boundaries; handle very wide trees with column offset compression.
+
+<KeyTakeaways items={[
+  "Vertical order: left child col-1, right child col+1; group by column left to right.",
+  "Within a column, sort by row ascending, then by node value ascending at the same row.",
+  "BFS with (node, row, col) tuples fills a nested map col → row → values.",
+  "Sort column keys, then row keys, then value lists when assembling output.",
+  "02.14 Level Order Traversal ignores horizontal offset — this adds column tracking.",
+  "O(n log n) worst case from value sorting within crowded rows; O(n) space for buckets.",
+]} />

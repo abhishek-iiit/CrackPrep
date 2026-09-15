@@ -1,32 +1,87 @@
 ---
 title: "Cache Availability And Database Fallback"
 number: "05.06"
-summary: "Cache Availability And Database Fallback — notes in progress."
-status: draft
+summary: "A cache outage must degrade into database load you planned for — treating the cache as mandatory turns a cache failure into a total outage."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [caching, availability, fallback, resilience]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The cache is optional until you make it mandatory
 
-What breaks without this, and the situation that forces the decision.
+Teams add a distributed cache to protect the database, then wire the read path so a cache timeout is a user-facing 500. At that point the cache is no longer a performance optimization — it is in the critical path for availability, and it is usually less carefully operated than the database it was meant to shield. A restart, a network blip, a bad config flush, a shard failover that takes thirty seconds: any of these become a site outage if the application refuses to proceed without a cache answer.
 
-## How it works
+The design question is whether the cache is a **soft dependency** (miss or error → fall through to the database, maybe slower) or a **hard dependency** (miss or error → fail the request). Soft is the default that matches what caching is for. Hard is a conscious choice for a narrow set of cases — ephemeral session stores with no other backing, rate-limit counters you would rather fail closed on — and even then you should say so explicitly.
 
-The mechanism, step by step.
+05.02 Distributed Cache Design covers building the tier; this lesson is what the application does when that tier misbehaves.
 
-## Tradeoffs
+## Failure modes that are not "Redis is down"
+
+| Failure | What the app sees | Naive reaction | Better reaction |
+| --- | --- | --- | --- |
+| Node or process crash | Timeouts or connection errors | Retry hard, then 500 | Fail open to DB with bounded concurrency |
+| Network partition to cache | Timeouts | Wait full timeout on every request | Short timeout, circuit open, fall through |
+| Thundering herd after flush | Fast misses, DB overload | Keep sending | Coalesce, shed, serve stale if you have it |
+| Hit rate collapse (eviction / bad deploy) | Healthy cache, slow DB | "Cache is fine" on dashboards | Watch DB CPU and cache hit rate together |
+| Stale data bug | 200 with wrong body | Blame the DB | Invalidate, roll back TTL, version keys |
+
+Notice the middle rows: the cache process can be "up" while still causing an incident. Availability of the cache TCP port is not availability of the protected system. The metric that matters is whether users get correct answers within budget — which often means watching database saturation as a first-class cache signal.
+
+## Fallback that does not stampede the database
+
+Falling through to the database is correct only if the database can survive the traffic the cache was absorbing. If the cache was handling 90% of reads, a total cache outage is a 10× read spike on the origin. Provisioning and admission control have to assume that spike, or the fallback becomes a self-inflicted outage of a different kind.
+
+Concrete controls:
+
+- **Short cache timeouts.** A 50–100 ms connection/read timeout (order-of-magnitude; tune to your RTT) fails fast into fallback. A 5 s timeout makes every request pay for a dead cache before it even tries the database.
+- **Circuit breaker.** After a burst of cache errors, stop calling the cache for a cooldown and go straight to the database (or to a degraded response). 06.10 Circuit Breakers And Timeouts is the general pattern; here it prevents a down cache from consuming the entire request latency budget.
+- **Bounded miss concurrency.** Semaphores or queueing on the database path so ten thousand simultaneous fallbacks become a fixed number of in-flight queries and the rest shed or wait. Pair with 05.05 Cache Concurrency Control for per-key coalescing.
+- **Serve stale on error.** If you still hold a value that is past TTL, serving it during a cache or database blip is often better than an error page — stale-if-error as a deliberate policy.
+- **Load shedding.** When the database is past capacity, refuse low-priority reads rather than letting every fallback queue until timeouts cascade. 02.13 Load Shedding.
+
+<Callout type="warn">
+Retries against a timed-out cache without a budget multiply load. One request that retries three times with full timeout can hold a worker for seconds while the database never gets tried. Prefer fail-fast to fallback over retry-until-hope against a dependency you have already classified as soft.
+</Callout>
+
+## When you intentionally keep the cache hard
+
+A few designs put authoritative or sole-copy state in the cache: sessions stored only in Redis, feature flags with no DB mirror, idempotency keys with a short TTL and no disk. Losing that tier means losing the feature. That can be acceptable if the blast radius is narrow and the recovery path is clear (users re-login; flags fail closed; clients retry with a new key). It is not acceptable as an accidental consequence of copy-pasting a cache client that throws on every error.
+
+If the data matters, either replicate the cache tier for availability (05.02), keep a durable source of truth, or both. Redis persistence is not a substitute for "this is the system of record" thinking — recovery time and freshness after restart are still cache-shaped problems.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Treat the cache as a soft dependency when"
+  againstTitle="Treat it as hard (fail closed) when"
+  forItems={[
+    "Every cached value can be reconstructed from a database or upstream service",
+    "A slower correct response is better than an error during a cache blip",
+    "The cache exists to shed load, not to be the only place the data lives",
+    "You can bound fallback concurrency so a cache outage does not automatically kill the database",
+    "Operators should be able to restart or flush the cache without scheduling a user-facing incident",
+  ]}
+  againstItems={[
+    "The cache holds sole-copy ephemeral state — sessions, one-time tokens — with no durable mirror",
+    "Failing open would violate a safety property (fail-closed authz checks, abuse limits you would rather block than skip)",
+    "The fallback path cannot be made safe at any concurrency and serving stale is forbidden",
+    "You have explicitly designed cache HA and accept that cache loss equals feature loss for a narrow scope",
+    "Degraded database reads would return more dangerous wrongness than an error (rare — usually stale is safer than silent wrong elsewhere)",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Say out loud that the cache is a soft dependency unless you have a reason otherwise. Then describe the fallback: short timeout, circuit breaker, fall through to the database, with a concurrency limit so the fall-through does not become the next outage. Expect "what if the database cannot take the load" — answer with provisioning for cache-loss peak, serving stale, and shedding, not with "Redis is highly available so it will not happen." Naming cache loss as a planned scenario is stronger than claiming the cache never fails.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "A cache should usually be a soft dependency: errors and timeouts fall through to the source of truth instead of failing the request",
+    "Making the cache hard turns routine restarts and network blips into full outages",
+    "Fallback without admission control converts a cache outage into a database overload — bound concurrency and shed when needed",
+    "Use short timeouts and circuit breakers so a dead cache does not consume the whole latency budget",
+    "Serving stale-on-error is often better than a hard error when correctness allows a freshness waiver",
+    "Sole-copy data in a cache is a deliberate availability trade; do not back into it by accident",
+  ]}
+/>

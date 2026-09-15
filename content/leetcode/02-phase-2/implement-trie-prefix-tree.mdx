@@ -1,0 +1,115 @@
+---
+title: "Implement Trie Prefix Tree"
+number: "02.21"
+summary: "Prefix queries need shared structure; a trie turns each character step into O(1) pointer chase instead of rescanning strings."
+status: published
+free: true
+difficulty: core
+estMinutes: 14
+tags: [trie, design, string]
+updated: "2026-09-15"
+---
+
+## Prefix lookup without rescanning every string
+
+Implement a trie supporting `insert(word)`, `search(word)` (exact match), and `startsWith(prefix)` (any stored word has this prefix). Words are lowercase English letters; total inserted length can reach 3×10⁴ over the lifetime of the structure.
+
+The naive approach stores words in an array and scans each one on every query. Searching `"app"` means comparing character-by-character against every stored string — O(N × L) per call where N is word count and L is average length. `startsWith` is worse because you cannot short-circuit on length mismatch alone; you need prefix checks on every entry. At 10⁴ words of length 10, that is 10⁵ character comparisons per query. The judge expects each operation in time linear in the **word length**, not the dictionary size.
+
+## A tree keyed by character position
+
+A trie is a rooted tree where edge labels are characters and paths from root spell stored words. Each node holds up to 26 children (one per letter) and a flag `isEnd` marking that some inserted word terminates here.
+
+The invariant: following children from root along `"a" → "p" → "p"` lands at the node representing prefix `"app"`. `search("apple")` succeeds only if that node exists **and** `isEnd` is true. `startsWith("app")` succeeds if the node exists — `isEnd` does not matter.
+
+<Steps>
+<Step title="Insert walks one character at a time">
+  Start at root. For each character, create the child if missing, then descend. Mark `isEnd = true` on the last node.
+</Step>
+<Step title="Search is insert without creating nodes">
+  Walk the same path. Return false if any child is missing. At the end, return `node.isEnd`.
+</Step>
+<Step title="startsWith stops one step early">
+  Same walk as search, but return true as soon as you consume the last prefix character — no `isEnd` check.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+class TrieNode {
+  children: Map<string, TrieNode> = new Map();
+  isEnd = false;
+}
+
+class Trie {
+  private root = new TrieNode();
+
+  insert(word: string): void {
+    let node = this.root;
+    for (const ch of word) {
+      if (!node.children.has(ch)) {
+        node.children.set(ch, new TrieNode());
+      }
+      node = node.children.get(ch)!;
+    }
+    node.isEnd = true;
+  }
+
+  search(word: string): boolean {
+    const node = this.walk(word);
+    return node !== null && node.isEnd;
+  }
+
+  startsWith(prefix: string): boolean {
+    return this.walk(prefix) !== null;
+  }
+
+  private walk(s: string): TrieNode | null {
+    let node = this.root;
+    for (const ch of s) {
+      if (!node.children.has(ch)) return null;
+      node = node.children.get(ch)!;
+    }
+    return node;
+  }
+}
+```
+
+Time **O(m)** per operation where m is word or prefix length — one map lookup per character. Space **O(total characters inserted)** for nodes; shared prefixes are stored once.
+
+<Tradeoff
+  forTitle="Trie when"
+  againstTitle="Sorted array or hash set when"
+  forItems={[
+    "You need prefix or autocomplete queries, not just exact membership",
+    "Many words share long common prefixes — memory deduplication matters",
+    "m (word length) is small and bounded — 26-way branching stays sparse enough",
+    "Insert and lookup must both be O(m), independent of how many words are stored",
+    "Follow-ups add wildcards or board search — the trie becomes the backbone (02.22, 02.23)",
+  ]}
+  againstItems={[
+    "Only exact lookups, no prefix queries — a hash set is simpler and often faster in practice",
+    "Alphabet is huge (Unicode) — 26 children per node wastes memory; compressed tries add complexity",
+    "Dataset is tiny — linear scan is fine and easier to code under time pressure",
+    "Keys are not strings — tries are the wrong abstraction",
+    "Memory is tight and strings do not share prefixes — you pay for tree overhead without savings",
+  ]}
+/>
+
+## In an interview
+
+Restate the three operations with an example: insert `"apple"`, `"app"`; `search("app")` → true, `search("ap")` → false, `startsWith("ap")` → true. Draw the first two levels of the tree before coding — interviewers want to see you recognize shared `"app"` prefix.
+
+Say the invariant out loud: each node represents the prefix spelled by the path from root. Mention `isEnd` separately from existence — `"ap"` exists as a prefix node but is not a word unless you inserted it. The bug to flag proactively: forgetting `isEnd` on insert makes `search` return false for words that are prefixes of longer words.
+
+Expect follow-ups: add `delete`, count words with prefix, or wildcard search (02.22 Design Add and Search Words).
+
+<KeyTakeaways items={[
+  "A trie stores strings by character position; shared prefixes share nodes, so lookup cost is O(m) in word length, not dictionary size.",
+  "Each node needs children (array of 26 or a map) plus an isEnd flag — existence of a path is not the same as membership of a complete word.",
+  "insert creates missing nodes; search and startsWith only traverse — startsWith ignores isEnd at the terminal prefix node.",
+  "Space is proportional to total characters stored, with savings wherever prefixes overlap.",
+  "Tries are the foundation for prefix autocomplete, wildcard word dictionaries, and board word search (02.22, 02.23).",
+  "For exact-match-only sets with no prefix queries, a hash set is simpler and usually sufficient.",
+]} />

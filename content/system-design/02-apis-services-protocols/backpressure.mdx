@@ -1,32 +1,81 @@
 ---
 title: "Backpressure"
 number: "02.11"
-summary: "Backpressure — notes in progress."
-status: draft
+summary: "Why an unbounded buffer only delays a failure rather than preventing it, and how a slow-down signal has to travel upstream to the point where it can actually help."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [backpressure, flow-control, queues]
+updated: "2026-09-15"
 ---
 
-## The problem
+## A queue with no ceiling is a promise you cannot keep
 
-What breaks without this, and the situation that forces the decision.
+Put a queue between a fast producer and a slower consumer and, for a while, it looks like the problem is solved — the producer keeps running at full speed, the consumer drains at its own pace, and the queue absorbs the difference. It absorbs it right up until memory runs out. An unbounded in-memory queue does not fail gracefully: it fails as an out-of-memory kill, all at once, taking every item still buffered with it — a worse outcome than if the producer had simply been slowed down or a fraction of its work had been rejected up front. A queue with no ceiling is not a buffer; it is a delayed and larger version of the failure a bounded one would have shown immediately.
 
-## How it works
+Backpressure is the fix: a signal that travels from the slow side back to the fast side, telling it to stop producing faster than the system can actually absorb. It is a negotiation between two ends of a pipeline that both understand the signal, which is what separates it from load shedding — 02.13 Load Shedding covers the related but distinct case where the sender cannot be told to slow down, or should not be trusted to honor it, and the only lever left is to drop or reject at the boundary.
 
-The mechanism, step by step.
+## What a backpressure signal actually looks like
 
-## Tradeoffs
+<Steps>
+  <Step title="Bound every buffer">
+    The starting point is refusing to let any queue in the pipeline grow without limit. A bounded queue converts an eventual out-of-memory failure into an immediate, visible decision at the point where the bound is hit.
+  </Step>
+  <Step title="When a buffer is full, block or reject — never silently drop">
+    Blocking makes the producer wait, which propagates the slowdown backward through whatever is calling the producer. Rejecting returns an explicit signal — a full return value, an exception, a `429` — that the caller has to handle. Silently dropping is neither; it looks like success to the producer while data quietly disappears.
+  </Step>
+  <Step title="Prefer an explicit pull over an implicit push where you can">
+    Reactive-streams-style backpressure inverts the relationship: the consumer calls `request(n)` to ask for n items, and the producer is only ever allowed to send that many. There is no buffer to overflow because the producer literally cannot get ahead of what was asked for — the cost is that both ends need to speak the same pull protocol, a bigger design commitment than a bounded queue.
+  </Step>
+  <Step title="Let the signal travel further upstream than the first hop">
+    A single stage slowing down is only useful if the stage feeding it also slows down, and the one feeding that one, all the way back to wherever work actually enters the system. A pipeline where only the last stage applies backpressure just moves the unbounded buffer one hop earlier.
+  </Step>
+</Steps>
+
+TCP's receive window is the oldest working example of this idea, applied one layer below anything discussed here: a receiver advertises how much buffer space it has left, and a sender is not permitted to have more unacknowledged data in flight than that. 02.04 TCP Vs UDP covers the transport-level mechanics; application-level backpressure is the same idea moved up a layer, with queue depth or in-flight count standing in for the receive window.
+
+<Callout type="note">
+07.09 LSM Tree Storage Engine describes a concrete instance of this: when background compaction cannot keep up with incoming writes, the engine's only remedy is to slow the writers and, if the backlog keeps growing, stall them outright. That stall is backpressure working as designed — an ugly-looking but correct response to a real capacity mismatch — and it is also exactly why the failure shows up as a p99 write latency spike rather than an error.
+</Callout>
+
+## Comparing the mechanisms
+
+| Strategy | What happens when the consumer falls behind | Cost |
+| --- | --- | --- |
+| Unbounded buffer | Nothing, until memory is exhausted and the process is killed | Deferred catastrophic failure, and everything buffered is lost at once |
+| Bounded queue, block producer | Producer's own caller waits, propagating the slowdown backward | Simple, but can tie up threads or connections on the producer side while blocked |
+| Bounded queue, reject on full | Producer gets an explicit failure to handle — retry, buffer elsewhere, or shed | Requires the producer to have a real fallback, not just a catch block that hides the rejection |
+| Credit/pull-based (`request(n)`) | Producer is structurally unable to get ahead of the consumer | No overflow possible, but both ends need to implement the protocol |
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Apply backpressure when"
+  againstTitle="It will not help when"
+  forItems={[
+    "Producer and consumer are both internal, cooperating components that can understand and act on a slow-down signal",
+    "Slowing the source is actually possible — the producer has a caller of its own that can be made to wait or back off",
+    "The mismatch is temporary and bounded — a burst the consumer will catch up on, not a permanent capacity gap",
+    "Losing or delaying data is acceptable in exchange for never losing it all at once via an out-of-memory failure",
+  ]}
+  againstItems={[
+    "The producer is external and uncooperative — a browser, a third-party integration, an attacker — and cannot be relied on to honor a slow-down signal; 02.13 Load Shedding is the tool for a boundary like that",
+    "The producer has no buffer of its own and blocking it just moves the user-facing delay somewhere else rather than removing it",
+    "The consumer's slowness is permanent rather than transient — the fix is more consumer capacity or a smaller workload, not a longer wait",
+    "The pipeline has no headroom to catch up even once slowed, in which case the queue will still fill and the real question is what to do once it does",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Name the failure you are preventing before naming the mechanism: "Without a bound here, a slow consumer turns into an unbounded queue and eventually an out-of-memory kill, so I want the consumer's queue depth to signal back and slow the producer before that happens." Be ready to distinguish this from load shedding when asked — the interviewer is checking whether you know backpressure only works when the producer can actually be slowed, and that an external, uncooperative caller needs a different answer. If asked where the signal should stop, say as far upstream as it can still be honored — a signal that dies at the second hop just relocates the unbounded buffer to the first one.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "An unbounded buffer does not prevent a capacity mismatch, it only delays and enlarges the failure into an eventual out-of-memory kill",
+    "Backpressure is a signal that travels from the slow end of a pipeline back to the fast end, and it only works when the fast end can actually be slowed down",
+    "Bounding every queue turns an eventual catastrophic failure into an immediate, visible decision at the point the bound is hit",
+    "Credit or pull-based flow control, like TCP's receive window or a reactive stream's request(n), makes overflow structurally impossible rather than merely rare",
+    "Backpressure assumes a cooperating producer; an external or uncooperative one needs load shedding at the boundary instead",
+    "A slowdown signal that stops at the first hop just moves the unbounded buffer one stage earlier — it has to propagate as far upstream as the mismatch requires",
+  ]}
+/>

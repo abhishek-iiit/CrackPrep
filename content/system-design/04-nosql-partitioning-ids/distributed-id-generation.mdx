@@ -1,32 +1,88 @@
 ---
 title: "Distributed ID Generation"
 number: "04.08"
-summary: "Distributed ID Generation — notes in progress."
-status: draft
+summary: "Why a single auto-increment counter cannot survive sharding, and the shapes among which every distributed id scheme chooses."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [ids, sharding, coordination, primary-keys]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The problem: a primary key only one machine can hand out
 
-What breaks without this, and the situation that forces the decision.
+`AUTO_INCREMENT` on a single database works because there is exactly one place a number can come from. The database serializes every insert through one sequence, so "the next id" always has an unambiguous answer, and no two rows can ever claim the same one. That guarantee is cheap right up until the moment there is more than one database.
 
-## How it works
+Once the write path is sharded across multiple database nodes — because 04.05 Sharding And Partitioning put it there — there is no longer one sequence to consult. Two shards handing out ids from their own `AUTO_INCREMENT` columns will both eventually mint id 500, and now two unrelated rows in two unrelated tables share a primary key that some other part of the system — a cache key, a foreign key in a third table, a URL — assumed was globally unique. The database that used to guarantee uniqueness for free no longer can, because "the database" is no longer one thing.
 
-The mechanism, step by step.
+A central id-issuing service looks like the obvious fix, and 03.09 Database Ticket Servers covers exactly that: a single, dedicated store that every writer asks for its next id before writing. It restores the single-sequence guarantee. It also puts one machine back in the critical path of every write in the system, and that machine's availability and latency become the availability and latency floor of everything downstream. What follows is what you are actually choosing between once you accept that either something coordinates, or nothing does.
 
-## Tradeoffs
+## What you're actually deciding
+
+Every distributed id scheme is a specific answer to five questions, and naming them explicitly is what turns "which id scheme" from a vibe into a decision:
+
+- **Does minting an id require talking to anything else?** A coordination-free generator can produce ids offline, under partition, with zero network round trips. A coordinated one needs a working path to whatever hands out the next block or the next worker slot.
+- **Are ids ordered, even roughly, by time?** Sortable ids make range scans, keyset pagination (04.12 Keyset Pagination), and "show me the newest 50" cheap. Unordered ids make all three expensive or impossible without a secondary index.
+- **How many bytes does one id cost**, in the row, in every foreign key referencing it, and in every index entry pointing at it? This compounds — a wide primary key is a wide entry in every index on that table and every table that references it.
+- **Does the id leak information?** A sequential integer tells a competitor your daily signup count and lets anyone enumerate every other resource by walking the integers. A scheme that embeds a raw counter is making that tradeoff whether or not anyone asked for it.
+- **What closes the collision surface** if two generators produce concurrently, and how far apart in time or space do two generators have to be before it closes?
+
+No scheme wins on all five. UUIDv4 answers "coordination-free" and "no leakage" by giving up "sortable" and "compact." A Snowflake-style id answers "sortable," "compact," and "coordination-free at generation time" by moving the coordination earlier, into assigning each generator a worker id. 04.09 UUID vs ObjectId vs Snowflake puts three real schemes side by side against these same five questions.
+
+## Four shapes the decision takes
+
+<Steps>
+  <Step title="Centralized allocation">
+    One authority — a ticket server, a Hi-Lo range allocator, a `SELECT ... FOR UPDATE` on a counter row — hands out either single ids or blocks of ids on request. Simplest to reason about, strictly ordered, and it reintroduces the single point of coordination you were trying to remove. Handing out a block of, say, 1,000 ids per request instead of one at a time amortizes that round trip across a thousand inserts, trading a little wasted range — unused ids if a node crashes mid-block — for a lot less contention.
+  </Step>
+  <Step title="Pure randomness">
+    Generate a large enough random value — 128 bits, as UUIDv4 does — that the odds of two generators picking the same one are astronomically small. No coordination at all, ever, by construction. The cost is that the id carries no structure: it does not sort by creation time, and inserting random values into a B-tree-backed primary key index means every insert lands in a random leaf page rather than the rightmost one (03.04 B-Tree), which is real write amplification on a busy table.
+  </Step>
+  <Step title="Embedded metadata">
+    Fold identifying information directly into the id itself — a timestamp, a machine identifier, a process id — so that uniqueness comes from the combination rather than from a shared counter or from raw entropy. MongoDB's ObjectId is the canonical example: each generator can mint ids independently because the fields that make it unique already encode which generator and roughly when.
+  </Step>
+  <Step title="Structured composite ids">
+    Reserve fixed bit ranges for a timestamp, a worker id, and a per-millisecond sequence, and assemble them into one integer. Coordination shrinks to a one-time step — assigning each worker a distinct worker id — after which every id is generated locally, in constant time, sortable by time and compact enough to index well. This is the Snowflake family, and 04.10 Snowflake ID Design goes through the bit layout and the arithmetic in full.
+  </Step>
+</Steps>
+
+<Callout type="note">
+"Coordination-free" is almost always coordination-free *at generation time*, not coordination-free, full stop. A Snowflake generator still needed someone, once, to hand it a worker id nobody else has. The honest question is not "does this scheme need coordination" but "when does the coordination happen, and how often" — once at startup is a very different operational cost than once per id.
+</Callout>
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Reach for a coordination-free, structured id when"
+  againstTitle="A centralized allocator is fine when"
+  forItems={[
+    "Write throughput is high enough that a round trip per id, or even per block, would be a measurable tax on every insert",
+    "The id needs to be roughly sortable by creation time — for pagination, for range scans, for 'show me what's new'",
+    "Generators run across many hosts or processes that cannot all reach one allocator with low, predictable latency",
+    "You can tolerate a one-time setup cost — assigning worker ids — in exchange for zero per-id coordination afterward",
+    "Index locality matters: a monotonic id keeps B-tree inserts at the right edge of the tree instead of scattering them",
+  ]}
+  againstItems={[
+    "Write volume is modest and a single allocator's throughput is nowhere near the bottleneck",
+    "Strict, gapless ordering matters more than availability under partition — a ticket server gives you exact sequence numbers, a distributed scheme only gives you rough time order",
+    "The team would rather operate one well-understood component than a fleet of generators each carrying local state",
+    "Ids are internal and never need to be minted from an edge or offline device that might not reach the allocator",
+    "The system is small enough that the operational cost of coordinating worker-id assignment isn't worth paying yet",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Introduce the decision by naming what changed, not by naming a technology: "Once I shard the writes, no single `AUTO_INCREMENT` column can guarantee uniqueness across shards, so I need ids minted independently." Then state your five criteria before picking a scheme — sortable, compact, coordination-free, non-enumerable, low collision surface — because an interviewer who hears "I'll use UUIDs" with no reasoning behind it cannot tell whether you know what you gave up. Naming the ticket-server option first and explaining why you are moving past it — a shared bottleneck, a single point of failure — shows you understand the baseline you're improving on rather than skipping straight to the fashionable answer.
 
-<KeyTakeaways items={["", "", ""]} />
+Be ready to say what happens when the scheme you picked breaks its own assumption — a worker id collision, a centralized allocator that goes down mid-burst — before you're asked.
+
+<KeyTakeaways
+  items={[
+    "A single AUTO_INCREMENT sequence guarantees uniqueness because there is exactly one place ids come from; sharding the writes removes that one place",
+    "Every id scheme is a specific answer to five questions: does minting require coordination, is the id sortable, how wide is it, does it leak information, and what closes the collision surface",
+    "A centralized allocator (03.09 Database Ticket Servers) restores a single sequence but reintroduces a shared bottleneck and a single point of failure",
+    "Random ids like UUIDv4 need no coordination at all but cost sortability and can hurt B-tree insert locality",
+    "Structured composite ids in the Snowflake family move coordination to a one-time worker-id assignment, after which generation is local, fast, and roughly time-ordered",
+    "The right question is not which scheme is best in general, but which of sortability, compactness, and coordination-free generation this particular system can afford to give up",
+  ]}
+/>

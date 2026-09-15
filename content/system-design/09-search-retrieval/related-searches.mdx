@@ -1,32 +1,75 @@
 ---
 title: "Related Searches"
 number: "09.16"
-summary: "Related Searches — notes in progress."
-status: draft
+summary: "How to propose next queries from co-session patterns and embeddings without turning the results page into a distraction engine."
+status: published
 free: true
 difficulty: core
 estMinutes: 12
+tags: [search, related-queries, query-logs, recommendations]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The result list answered; the user still might not be done
 
-What breaks without this, and the situation that forces the decision.
+A good first query is often a starting point, not a finish line. Someone who searched `"noise cancelling headphones"` may next want `"best for airplane"`, a brand, or a budget filter they did not know to type. Related searches are **query recommendations** shown beside or below results — not more documents, but alternate queries that refine, pivot, or broaden intent. They sit downstream of retrieval and ranking, fed mostly by how real users move through query sequences, not by document similarity alone.
 
-## How it works
+Done well, they reduce empty reformulation effort and teach the vocabulary your index understands. Done badly, they look like spam links, leak private intents into another user's page, or recommend competitors in ways the business cannot defend.
 
-The mechanism, step by step.
+## Where related queries come from
 
-## Tradeoffs
+| Signal source | Method | What it captures | Risk |
+| --- | --- | --- | --- |
+| Session co-occurrence | Queries that follow each other in a session, mined offline | Real refinement paths | Spurious couples from noisy sessions |
+| Collaborative query graph | Edge weights between queries by shared successful clicks | Task similarity | Cold start for new queries |
+| Text / embedding neighbors | Nearest queries in an embedding space (09.13 Vector Search And Hybrid Retrieval) | Paraphrase and semantic nearness | Plausible but useless neighbors |
+| Document-anchored | Terms and entities extracted from top results | On-topic elaborations | Echoes the same result set's bias |
+| Editorial / merchandising | Hand-built links for campaigns | Business control | Does not scale; goes stale |
+
+Most production systems **precompute** a map `query → related[]` for the head, and compute lightly at request time only for the tail (embed-and-search a query index, or fall back to document-anchored suggestions). Online, the results page should only look up and filter — not mine logs.
+
+Filtering is half the feature: drop near-duplicates of the current query, drop adult or policy-breaking strings, drop suggestions that historically produce worse success metrics, and cap the list to a handful. Related search is a precision surface; one embarrassing suggestion outweighs three helpful ones.
+
+<Callout type="warn">
+Query logs contain secrets — addresses, medical topics, unreleased project names, personally identifying strings. Aggregates used for related-search mining need the same privacy floors as other log pipelines: frequency thresholds, PII scrubbing, and never surfacing a suggestion that only a tiny cohort ever typed. A related-search tile is a public broadcast of whatever you failed to filter.
+</Callout>
+
+## Ranking related items is not ranking documents
+
+Score candidates for **utility as a next query**: likelihood of click on the suggestion, likelihood of success after adopting it, diversity so five paraphrases of the same string do not fill the module, and business rules (boost official support queries, demote known-noise patterns). Use feedback loops from 09.08 Search Feedback And Relevance Signals — suggestion impressions and clicks are first-class events.
+
+Do not sort related searches by BM25 against the corpus. That optimizes for looking like a document title, not for helping the user ask a better question.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Ship related searches when"
+  againstTitle="Skip or keep them minimal when"
+  forItems={[
+    "Sessions show frequent reformulation and you can mine stable co-occurrence for the head query set",
+    "The UI has room for a small, scannable module that does not fight the primary results",
+    "You have privacy thresholds and policy filters strong enough to keep rare and sensitive queries off the tile",
+    "Online metrics can validate that suggestion clicks lead to successful sessions, not just curiosity clicks",
+    "Merchandising needs a controlled slot for a few editorial next-queries on high-value intents",
+  ]}
+  againstItems={[
+    "Query volume is too low to learn co-occurrence that is more than noise",
+    "The product is a single-shot lookup (order id, invoice number) where 'related' is meaningless",
+    "Compliance cannot accept query text being redistributed as public suggestions",
+    "The results page is already dense and related links would dilute the primary ranking you are trying to teach users to trust",
+    "You would only ship embedding neighbors with no click validation — semantic similarity without utility",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Position related searches as a **query-to-query** recommender built offline from sessions and guarded by privacy floors, not as "more like this document." Describe precompute-for-head, light tail fallback, and filters for duplicates and policy. Expect "how is this different from autocomplete?" — autocomplete completes a prefix mid-typing (09.14 Autocomplete System Design); related searches propose next full queries after a result set. Name the PII leak failure mode early; it is the one that turns a cute feature into an incident.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Related searches recommend next queries, not additional documents — success is a better subsequent search, not a higher BM25 hit",
+    "Session co-occurrence and click-derived query graphs capture real refinement paths; embeddings help paraphrase but need utility filters",
+    "Precompute for head queries; keep the results-page path to a lookup plus filtering",
+    "Privacy floors and policy filters are mandatory — rare queries must not become public suggestions",
+    "Rank suggestions for diversity and post-click success, not for resemblance to document titles",
+    "Autocomplete steers typing; related searches steer the next full query after results — do not conflate the two systems",
+  ]}
+/>

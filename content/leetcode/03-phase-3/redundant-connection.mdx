@@ -1,0 +1,101 @@
+---
+title: "Redundant Connection"
+number: "03.16"
+summary: "The last edge that closes a cycle — Union-Find rejects merges when both endpoints already share a root."
+status: published
+free: true
+difficulty: core
+estMinutes: 12
+tags: [union-find, graph]
+updated: "2026-09-15"
+---
+
+## One extra edge in a tree-plus-one
+
+A connected undirected graph on `n` nodes has `n` edges — exactly **one cycle**. Edges arrive in order; return the **last** edge that can be removed so the graph stays a tree (still connected).
+
+For `edges = [[1,2],[1,3],[2,3]]`, edges 1–2 and 1–3 build a tree on three nodes. Edge `[2,3]` connects nodes already in the same component — that is the redundant edge. Answer: `[2,3]`.
+
+DFS cycle detection on the full graph works but revisits structure unnecessarily. Union-Find streaming edges is cleaner: the first time `union(a, b)` fails because `find(a) === find(b)`, that edge closes a cycle. Process edges in input order; the **last** failure is the answer.
+
+## Online cycle detection with Union-Find
+
+Initialize `n` singleton sets. For each `[u, v]` in order: if `find(u) === find(v)`, record this edge as redundant (keep updating — last one wins); else `union(u, v)`.
+
+The invariant: after processing `k` edges without redundancy, the graph has at most one extra edge total; when the redundant edge appears, both endpoints already lie in one component.
+
+<Steps>
+<Step title="Initialize UF">
+`parent[i] = i` for nodes `1..n` (LeetCode uses 1-indexed labels).
+</Step>
+<Step title="Process edges in order">
+For `[u, v]`, if same root, set `answer = [u, v]`; else unite.
+</Step>
+<Step title="Return last redundant edge">
+After the loop, `answer` is the last edge that would have formed a cycle.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function findRedundantConnection(edges: number[][]): number[] {
+  const n = edges.length;
+  const parent = Array.from({ length: n + 1 }, (_, i) => i);
+
+  function find(x: number): number {
+    if (parent[x] !== x) parent[x] = find(parent[x]);
+    return parent[x];
+  }
+
+  let redundant: number[] = [];
+  for (const [u, v] of edges) {
+    const pu = find(u), pv = find(v);
+    if (pu === pv) redundant = [u, v];
+    else parent[pv] = pu;
+  }
+  return redundant;
+}
+```
+
+Time **O(n × α(n))** ≈ **O(n)** for `n` edges. Space **O(n)**.
+
+<Callout type="tip">
+This is the undirected warm-up before 03.17 Redundant Connection II — same Union-Find skeleton, but directed graphs need case analysis on in-degrees and roots.
+</Callout>
+
+<Tradeoff
+  forTitle="Union-Find when"
+  againstTitle="DFS cycle find when"
+  forItems={[
+    "Edges arrive sequentially and you need the last cycle-forming edge",
+    "Graph is undirected and guaranteed one extra edge",
+    "You want O(n) amortized without building adjacency lists",
+    "03.11 MST Kruskal uses the same reject-on-same-root logic",
+    "Follow-up is Redundant Connection II — UF is half of that solution"
+  ]}
+  againstItems={[
+    "You need the full cycle path, not one edge — DFS parent tracking",
+    "Graph may have multiple disjoint cycles — this problem guarantees one",
+    "Nodes are non-integer — UF needs a hash map of parents",
+    "You must remove the edge with maximum weight — sort + Kruskal variant",
+    "Directed graph — switch to 03.17 case analysis; UF alone is insufficient"
+  ]}
+/>
+
+## In an interview
+
+Restate: `n` nodes, `n` edges, connected, undirected, return last redundant edge in order. Draw the triangle example.
+
+Say Union-Find before coding: if endpoints already connected, edge is redundant; keep the last such edge. Mention 1-indexed nodes.
+
+Expect: Redundant Connection II (directed), "which edge to remove if multiple cycles?" (this problem has exactly one extra edge), MST connection (Kruskal skips redundant edges the same way). Bug to name first: returning the **first** redundant edge when the problem asks for the **last** — process all edges and overwrite.
+
+<KeyTakeaways items={[
+  "Redundant Connection finds the last edge that closes a cycle in an undirected graph with n nodes and n edges.",
+  "Union-Find: union if different roots; if same root, that edge is redundant — keep updating to get the last one.",
+  "No adjacency list is required; edges are processed online in O(n α(n)).",
+  "1-indexed node labels are common on LeetCode — size parent array to n + 1.",
+  "Kruskal MST skips edges that would cycle — identical reject condition.",
+  "Directed variant 03.17 adds in-degree counting and root detection before UF applies."
+]} />

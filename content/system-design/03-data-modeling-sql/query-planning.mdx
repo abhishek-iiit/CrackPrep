@@ -1,32 +1,83 @@
 ---
 title: "Query Planning"
 number: "03.05"
-summary: "Query Planning — notes in progress."
-status: draft
+summary: "The same SQL can execute as dozens of structurally different plans; the planner picks one from cost estimates before anything runs, and stale statistics make it guess wrong."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 14
+tags: [sql, query-planning, optimizer, indexing]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The database picks a plan before it agrees with you about the query
 
-What breaks without this, and the situation that forces the decision.
+SQL describes *what* result you want, not how to compute it. "Every order for this customer, joined to its line items, filtered to the last 90 days" can be executed by reading the orders table first and probing line items per row, or reading line items first and probing orders, or scanning both fully and hash-joining them in memory, or half a dozen other structurally different plans that all return the identical rows. Before any of them runs, a component called the query planner (or optimizer) picks exactly one, using cost estimates built from statistics about the tables — and those estimates can be stale, wrong, or simply not the shape your intuition assumed.
 
-## How it works
+This is the part of a relational database most people never see and most interviews never ask about directly, which is exactly why being able to reason about it is a signal: it means you know a slow query is a planning problem before it's a hardware problem.
 
-The mechanism, step by step.
+## What the planner is actually choosing between
 
-## Tradeoffs
+Two decisions dominate the plan: the access path for each table, and the order and method used to join them.
+
+**Access path** is how a single table gets read. A **sequential scan** reads every page of the table in physical order — cheap per page, since it's sequential I/O, but it touches every row regardless of the predicate. An **index scan** uses an index (03.03 Database Indexing) to jump straight to matching rows via a B-tree (03.04) descent, then fetches each matching row from the table — fast when few rows match, and expensive per-row if many do, because each fetch is a separate, effectively random read into the table. An **index-only scan** answers the query entirely from a covering index and never touches the table at all, when every column the query needs happens to be in the index.
+
+The planner picks between a sequential scan and an index scan by estimating selectivity — what fraction of the table the predicate will match — from statistics: row counts, a histogram of common values, the fraction of rows that are null, an estimate of how many distinct values a column holds. A predicate estimated to match 1% of rows favors the index; one estimated to match 40% often favors the sequential scan, because scattered index-driven fetches for 40% of a table's rows can cost more in random I/O than one sequential pass over all of it. Where exactly that crossover sits depends on the storage layout and the device, which is why it's a cost estimate and not a fixed rule.
+
+**Join strategy** governs how two already-read row sets combine:
+
+| Strategy | When it wins |
+| --- | --- |
+| Nested loop | One side is small, or the inner side has a usable index — for each outer row, probe the inner side directly |
+| Hash join | No usable index on the join column; build an in-memory hash table on the smaller side, then stream the larger side through it |
+| Merge join | Both inputs are already sorted on the join key (often because an index provided that order) — walk both in one synchronized pass |
+
+**Join order** compounds these choices across every table in the query, and it's where the planning problem gets combinatorially large: for `n` tables, the number of possible join orders grows roughly as `n!`, before even counting the strategy choice at each step. Most planners handle this with dynamic programming up to a handful of tables — Postgres's default threshold for switching to a cheaper heuristic search sits around eight — and fall back to greedy or randomized search past that, trading a guarantee of finding the truly optimal plan for a plan that's merely good, computed in reasonable time.
+
+## Statistics go stale, and the planner has no way to know
+
+The cost model runs entirely on statistics collected the last time the table was analyzed — usually automatically, on a threshold of rows changed, sometimes only on an explicit command. Bulk-load a table, bulk-delete half of it, or skew a column's distribution with a large batch import, and the planner keeps costing plans against a shape the table no longer has. This doesn't present as an error. It presents as a query that ran in 40 milliseconds for six months and takes eight seconds after last week's import, with nothing in the query itself having changed.
+
+`EXPLAIN` shows the chosen plan and its estimated costs and row counts before running anything; `EXPLAIN ANALYZE` actually executes the query and reports real elapsed time and real row counts alongside the estimates. The single most useful thing to look at in that output isn't the total time — it's the gap between estimated and actual row counts at each step. A plan can be "slow" for reasons that have nothing to do with planning at all, but a large estimate-versus-actual gap is specifically the planner's statistics disagreeing with reality, which is the one class of problem `ANALYZE` (refreshing statistics) or an index change can actually fix.
+
+<Callout type="gotcha">
+A **prepared statement** is often planned once, against the parameter value used the first time it ran, and that same plan gets reused for later calls with different, sometimes very differently skewed, parameter values. A plan that's excellent for a rare value and terrible for a common one can get locked in by whichever call happened to run first — a real, specific failure mode usually called parameter sniffing, and it shows up as the same query being fast for some callers and slow for others with no other explanation.
+</Callout>
+
+## When to leave it alone and when to push back
+
+Most of the time the right move is to trust the planner and address the actual gap — add the index it's missing, refresh the statistics it's stale on — rather than fight it. Overriding it directly (a forced join order, an optimizer hint where the engine supports one) trades a plan that adapts as the data grows for one that's frozen at today's data shape, and it stops adapting exactly when the data changes underneath it.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Trust the planner when"
+  againstTitle="Intervene when"
+  forItems={[
+    "Statistics are fresh and the data distribution is fairly uniform, so cost estimates track reality",
+    "The query is simple enough — few joins, straightforward predicates — that the plan search reliably finds a good plan",
+    "EXPLAIN ANALYZE shows estimated and actual row counts agreeing, and latency is within budget",
+    "The workload's data keeps changing shape over time, and a fixed hint would go stale while the planner keeps adapting",
+    "You don't have a measured problem yet — only a query that looks like it should be faster",
+  ]}
+  againstItems={[
+    "EXPLAIN ANALYZE shows the row-count estimate wildly off from reality — that gap, not raw latency, is the signal something structural is wrong",
+    "A selective predicate is running a sequential scan because there's no index to use — see 03.03 Database Indexing",
+    "Parameter sniffing has locked in a plan tuned for one skewed value that's now wrong for most calls",
+    "The chosen join order ignores a filter you know will eliminate one table almost entirely, and the planner's statistics don't capture that",
+    "Indexes and statistics are already correct and the plan is still wrong — only then is a query rewrite, a materialized view, or a targeted hint the next lever",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Reach for the planner by name when a query is described as "slow," and separate two different diagnoses out loud: a missing index (a genuinely slow access path) versus a plan that's wrong for the data (a planner working off bad statistics or a bad estimate). Naming `EXPLAIN ANALYZE` and the estimated-versus-actual row count as the specific thing you'd check first is worth more than naming any specific fix, because it shows a diagnostic habit rather than a guess. If pushed on the combinatorics, knowing that join order search is factorial in table count and that real planners cap it with heuristics past a handful of tables is the kind of detail that shows you've looked past the one-line mental model of "the database just knows."
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "SQL is declarative — one query can execute as many structurally different plans, and the planner commits to one before execution starts",
+    "Access-path choice (sequential vs. index vs. index-only scan) comes down to estimated selectivity, not the predicate's syntax",
+    "Join strategy (nested loop, hash, merge) and join order both matter, and join order search is combinatorial, so real planners bound it with heuristics past a handful of tables",
+    "Stale statistics after a bulk load or delete don't cause an error — they cause a query that quietly gets much slower with no code change",
+    "EXPLAIN ANALYZE's most useful signal is the gap between estimated and actual row counts, not the total execution time by itself",
+    "Fix the underlying gap — missing index, stale statistics — before overriding the planner directly, since a manual override stops adapting the moment the data changes",
+  ]}
+/>

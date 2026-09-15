@@ -1,0 +1,107 @@
+---
+title: "Longest Palindromic Substring"
+number: "02.07"
+summary: "Every palindrome expands from a center; try each index as odd or even center and track the widest spread."
+status: published
+free: true
+difficulty: core
+estMinutes: 15
+tags: [string, two-pointers]
+updated: "2026-09-15"
+---
+
+## Longest block that reads the same both ways
+
+Given a string `s`, return the longest substring that is a palindrome. `"babad"` might return `"bab"` or `"aba"` — either is accepted. A single character always wins at least length 1.
+
+Check every substring for palindrome property: O(n³) if you compare naively per window, O(n²) if you reuse 02.06 Valid Palindrome two-pointer checks per center. At n = 1000 that is a million centers in the O(n²) version — acceptable. At n = 10⁵ it is not.
+
+**Expand around center** avoids redundant work: a palindrome is symmetric about a center. There are 2n − 1 centers — each index as an odd-length center (single character) and each gap between indices as an even-length center. From each center, walk outward while characters match. Track the best span.
+
+Manacher's algorithm reaches O(n) but is rarely expected in interviews; expand-around-center is the standard trade.
+
+## Expand from each center
+
+Define `expand(l, r)`: while `l` and `r` are in bounds and `s[l] === s[r]`, move outward. When it stops, the palindrome lived from `l + 1` to `r − 1` inclusive.
+
+For each index `i`, call `expand(i, i)` for odd length and `expand(i, i + 1)` for even length. Keep the start index and max length of the widest palindrome seen.
+
+<Steps>
+<Step title="For each center, expand while characters match">
+  Odd center: one character; even center: two adjacent equal characters (or empty gap).
+</Step>
+<Step title="After expand stops, compute length = r - l - 1">
+  Record start = l + 1 if this length beats the best so far.
+</Step>
+<Step title="Return s.slice(start, start + maxLen)">
+  Slice is O(k) for output length k — unavoidable if the string itself is required.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function longestPalindrome(s: string): string {
+  let start = 0;
+  let maxLen = 0;
+
+  function expand(left: number, right: number): void {
+    while (left >= 0 && right < s.length && s[left] === s[right]) {
+      left--;
+      right++;
+    }
+    const len = right - left - 1;
+    if (len > maxLen) {
+      maxLen = len;
+      start = left + 1;
+    }
+  }
+
+  for (let i = 0; i < s.length; i++) {
+    expand(i, i);       // odd length
+    expand(i, i + 1);   // even length
+  }
+
+  return s.slice(start, start + maxLen);
+}
+```
+
+Time **O(n²)** — n centers, each expansion walks at most n steps (amortized O(n) total per analysis, worst-case O(n²) for strings like `"aaaa..."`). Space **O(1)** beyond the output string.
+
+<Tradeoff
+  forTitle="Expand around center when"
+  againstTitle="Dynamic programming table when"
+  forItems={[
+    "n ≤ 1000 on the judge — O(n²) is the expected sweet spot",
+    "You need the actual substring, not just its length",
+    "Code clarity matters — ~15 lines with no table indexing",
+    "Same expand helper solves 02.08 Palindromic Substrings with a counter instead of max tracking",
+    "Interviewer does not expect Manacher's O(n) derivation in 45 minutes",
+  ]}
+  againstItems={[
+    "Follow-up asks for count of all palindromic substrings in one pass — DP or expand with counting (see 02.08)",
+    "You need palindrome decompositions (03.06 Palindrome Partitioning) — DP on intervals is the natural next step",
+    "String is so long that O(n²) TLEs — Manacher or rolling hash is required",
+    "You only need yes/no existence of length ≥ k — early exit on expand can beat full DP fill",
+    "Multiple queries on the same string — preprocess with DP or Manacher for O(1) answers",
+  ]}
+/>
+
+## In an interview
+
+Example: `"babad"` → `"bab"` or `"aba"`. Confirm return the string, not length; non-empty input.
+
+Explain 2n − 1 centers before coding. Mention odd vs even expand in the same breath — forgetting even centers misses `"cbbd"` → `"bb"`.
+
+Follow-ups: count all palindromic substrings (02.08), longest palindrome after one deletion, palindrome partitioning. Bug: off-by-one on start index after expand — palindrome is `[left+1, right-1]`, length `right - left - 1`.
+
+<KeyTakeaways
+  items={[
+    "Longest Palindromic Substring tries each of 2n − 1 centers and expands while characters match",
+    "Odd centers use expand(i, i); even centers use expand(i, i + 1)",
+    "After expansion stops, the palindrome spans [left + 1, right − 1] with length right − left − 1",
+    "O(n²) time and O(1) auxiliary space — standard interview solution",
+    "02.08 Palindromic Substrings reuses the same expand helper but increments a count on each valid layer",
+    "Every single character is a palindrome — maxLen initializes to 0 and the first expand sets at least 1",
+  ]}
+/>

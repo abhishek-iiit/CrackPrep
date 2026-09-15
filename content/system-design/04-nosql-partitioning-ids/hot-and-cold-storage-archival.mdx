@@ -1,32 +1,98 @@
 ---
 title: "Hot And Cold Storage Archival"
 number: "04.14"
-summary: "Hot And Cold Storage Archival — notes in progress."
-status: draft
+summary: "Tiering data by access frequency so recent work stays on fast storage while older retention moves to cheaper media — without pretending cold data is still a primary-key lookup away."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [storage, archival, cost]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Paying SSD prices for data nobody reads
 
-What breaks without this, and the situation that forces the decision.
+Retention requirements and access patterns disagree. Compliance wants seven years of records. Product wants the last ninety days in under 100 ms. If you keep all seven years on the same primary volume that serves the app, you pay premium IOPS and disk for bytes that are touched in audits and lawsuits, not in the request path. Storage becomes one of the largest line items in the bill, backups grow without bound, and vacuum or compaction spends its life rewriting cold rows.
 
-## How it works
+**Hot / cold tiering** splits the problem: keep a hot set on fast, expensive storage sized for interactive access; move colder data to cheaper storage (object stores, archival classes, packed files) with explicitly worse latency and query shape. 01.01 Requirements Clarification already asks for retention as one of the four numbers worth collecting — this lesson is what you do with the answer when "keep forever" and "query in 50 ms" cannot share a disk.
 
-The mechanism, step by step.
+The mistake is treating archival as a filesystem move with the same API. Cold data that still needs point lookups by primary key is not cold yet — or your cold tier needs an index strategy you have to design, not assume.
 
-## Tradeoffs
+## What "hot" and "cold" mean operationally
+
+| Tier | Typical access | Storage shape | Latency expectation |
+| --- | --- | --- | --- |
+| **Hot** | Interactive reads/writes, product path | Primary DB, SSD, maybe memory cache | Milliseconds |
+| **Warm** | Occasional product or support lookups | Cheaper disks, secondary DB, compressed columns | Tens–hundreds of ms |
+| **Cold / archive** | Compliance, analytics backfill, rare restore | Object storage, glacier-class, columnar dumps | Seconds to hours (restore) |
+
+Names vary; the contract does not. Each tier needs a stated access path: SQL on the primary, `GET` by object key, or "submit a restore job and wait". Ambiguous "we'll query S3 like Postgres" is how cold tiers become outages.
+
+Age is the usual axis — `created_at < now() - 90 days` — but **access frequency** is the real one. A seven-year-old contract that legal opens weekly is warm. Yesterday's debug log that nobody will ever read again is cold the moment it rolls off the dashboard. Prefer policies driven by both age and table/use-case, not a single global TTL.
+
+## A workable archival path
+
+<Steps>
+  <Step title="Define the hot window from product numbers">
+    Ninety days of chat messages, thirteen months of orders, six hours of raw clickstream — pick from actual read patterns and SLOs, then size hot storage for that window plus headroom. 01.06 Back-Of-The-Envelope Capacity Planning turns retention × write rate into disk.
+  </Step>
+  <Step title="Choose an immutable export format">
+    Dump cold rows to object storage as Parquet/ORC for analytics, or as length-prefixed records per day/tenant for replay. Prefer append-only files keyed by time partition so you never update a cold object in place.
+  </Step>
+  <Step title="Move, then delete — with a fence">
+    Write to cold storage, verify checksums and row counts, only then delete from hot (or mark tombstoned). Dual-running both copies briefly beats silent data loss. Soft delete lessons apply: 03.13 Soft Delete is about row visibility; here the delete is a tier boundary.
+  </Step>
+  <Step title="Publish how to get data back">
+    Support tooling, legal hold export, and analytics should know whether they query the warehouse, restore an archive class to standard object storage first, or hit a read-only warm replica. Document RTO for restores — glacier-class is not a second primary.
+  </Step>
+  <Step title="Automate and monitor lag">
+    Archival jobs fall behind under write spikes. Alert on "oldest hot row age" and "bytes pending archive", not only on job success. A hot tier that never shrinks is a failed policy.
+  </Step>
+</Steps>
+
+<Callout type="warn">
+Legal hold and GDPR-style deletion cut across tiers. Archiving does not retire your obligation to find or erase a user's data. Keep a metadata index of what went where (tenant, time range, object keys), and test delete/export paths against cold storage — not only against the hot database. 14.10 Data Retention And Deletion and 14.11 Privacy And Data Retention sit on that side of the problem.
+</Callout>
+
+## Query patterns that survive the split
+
+- **Time-bounded product queries** ("last 30 days") stay on hot by construction if the window fits.
+- **Historical analytics** run on the warehouse or directly on columnar files in object storage — not on the OLTP primary via a linked scan of cold rows.
+- **Rare point lookup of an old id** needs either a warm index (metadata DB mapping id → cold object) or an acceptance that support looks it up asynchronously. Without that index, cold storage is write-only for practical purposes.
+- **Rehydration** — pulling a slice back to hot for a campaign or a replay — should be exceptional and capacity-planned; making it routine means your hot window is wrong.
+
+Cost intuition, order-of-magnitude: keeping a terabyte on provisioned SSD primary storage can cost many times the same terabyte in standard object storage, and archival classes cheaper still with retrieval fees and delay. Exact prices move; the ratio is why tiering exists. Run the arithmetic on your cloud's current numbers before promising finance a specific saving.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Tier hot/cold when"
+  againstTitle="Keep a single hot store when"
+  forItems={[
+    "Retention is years but interactive access concentrates on a much shorter window",
+    "Hot storage or backup cost is material and dominated by rarely read bytes",
+    "You can define a clear export format, verification step, and restore path before deleting from hot",
+    "Analytics already wants columnar data in object storage, so archival doubles as the warehouse source",
+    "Compliance accepts slower access to older data in exchange for durable retention",
+  ]}
+  againstItems={[
+    "Almost all retained data is still read in the product path — there is no cold set",
+    "You cannot index or find cold records when legal or support needs them",
+    "Team size cannot operate dual pipelines, checksum verification, and delete fences safely yet",
+    "Dataset fits comfortably on one primary with room to grow; complexity would exceed savings",
+    "Regulators require online queryability of the full retention window at interactive latency",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Tie archival to the retention number from clarification: "Ninety days hot in Postgres; older events land in S3 as daily Parquet, delete from primary after checksum verify; legal export reads the lake." Name the failure modes — archive lag filling the primary, deletes before successful write, no metadata for GDPR erasure. If asked about querying last year's order by id, describe a metadata map or a warm tier rather than pretending object storage is a clustered index. Cost is a valid reason; so is backup duration and vacuum time — mention whichever matches the prompt's pressure.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Hot/cold tiering matches storage class to access frequency so retention does not force every byte onto primary SSD",
+    "Each tier needs an explicit access path and latency expectation — cold is not 'the same SQL, slower'",
+    "Move-then-delete with checksum verification; never drop hot rows on a best-effort archive job",
+    "Age is a proxy; design policies per use case, and keep metadata so legal hold and erasure can find cold data",
+    "Interactive queries stay inside the hot window; history belongs to analytics formats and restore workflows",
+    "Skip tiering when the working set is the retention set, or when you cannot operate the second pipeline safely",
+  ]}
+/>

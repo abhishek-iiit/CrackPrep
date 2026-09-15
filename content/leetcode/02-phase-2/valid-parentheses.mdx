@@ -1,0 +1,100 @@
+---
+title: "Valid Parentheses"
+number: "02.05"
+summary: "Open brackets wait on a stack; each close must match the most recent unmatched open — LIFO is the whole rule."
+status: published
+free: true
+difficulty: intro
+estMinutes: 10
+tags: [stack, string]
+updated: "2026-09-15"
+---
+
+## Every close must pair with the nearest open
+
+Given a string containing only `'()'`, `'[]'`, and `'{}'`, determine whether the brackets are valid: every opener eventually closes, in the right order, with no leftovers.
+
+`"()[]{}"` is valid. `"(]"` fails because `]` meets `(` — the most recent unmatched open was `(`, not `[`. `"(["` fails because opens remain after the scan ends. The failure mode is always one of three: wrong closer type, closer with an empty stack, or non-empty stack at the end.
+
+Counting opens and closes separately does not work: `")("` has balanced counts but is invalid. You need **memory of order**, not just totals.
+
+## Stack as pending openers
+
+Scan left to right. On an open bracket, push it — it is waiting for a partner. On a close bracket, the stack must be non-empty and the top must be the matching open. Pop on success; return false on mismatch or empty stack.
+
+The invariant: bottom-to-top of the stack is the nested chain of still-unmatched openers, outermost at the bottom.
+
+<Steps>
+<Step title="Push each open bracket onto the stack">
+  `'('`, `'['`, `'{'` are the only characters that grow the stack.
+</Step>
+<Step title="On a close, require stack non-empty and top matches">
+  Map `')' → '('`, `']' → '['`, `'}' → '{'`. Mismatch or empty stack → false.
+</Step>
+<Step title="After the scan, stack must be empty">
+  Any remaining openers were never closed.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function isValid(s: string): boolean {
+  const stack: string[] = [];
+  const pairs: Record<string, string> = {
+    ")": "(",
+    "]": "[",
+    "}": "{",
+  };
+
+  for (const ch of s) {
+    if (ch === "(" || ch === "[" || ch === "{") {
+      stack.push(ch);
+    } else {
+      if (stack.pop() !== pairs[ch]) return false;
+    }
+  }
+
+  return stack.length === 0;
+}
+```
+
+Time **O(n)** — one pass, O(1) stack operations per character. Space **O(n)** in the worst case — a string of n open brackets before any close.
+
+<Tradeoff
+  forTitle="Stack when"
+  againstTitle="Counter-only tricks when"
+  forItems={[
+    "Three bracket types with different shapes — order matters, not just balance",
+    "Follow-ups add nesting depth, longest valid prefix, or remove minimum to fix",
+    "n up to 10⁴ — linear stack is the expected solution",
+    "You need to know *where* mismatch happens, not just yes/no — stack carries position implicitly",
+    "Generalizes to parse trees, expression evaluators, and 02.48 Evaluate Reverse Polish Notation",
+  ]}
+  againstItems={[
+    "Only one bracket type `()` — a single running counter suffices",
+    "Interviewer asks for O(1) space with only parentheses — two-pointer from both ends works for `()` only",
+    "String is guaranteed valid and you only need max depth — count opens without a stack",
+    "Input is so small that any correct approach passes",
+    "Problem is generate-all-valid (02.49 Generate Parentheses), not validate — backtracking replaces stack",
+  ]}
+/>
+
+## In an interview
+
+Restate with `"([])"` valid and `"(]"` invalid. Confirm only the six bracket characters, no letters, empty string is valid.
+
+Say "stack of pending openers" before coding. Mention all three exit conditions: wrong match, pop from empty, non-empty stack at end.
+
+Follow-ups: include `*` as wildcard, minimum removals to make valid, longest valid substring. Bug interviewers watch for: pushing closers, or comparing with `==` without a map and writing three ugly if-chains that forget one pair.
+
+<KeyTakeaways
+  items={[
+    "Valid Parentheses is stack matching — each close must pair with the most recent unmatched open",
+    "Counting alone fails on ordering — ')(' has balanced counts but is invalid",
+    "Three failure modes: mismatch on pop, pop from empty stack, non-empty stack after scan",
+    "O(n) time, O(n) space for the stack in the worst case",
+    "A map from close → open keeps the matching logic one line instead of three branches",
+    "Single-type parentheses can use a counter; mixed types require a stack",
+  ]}
+/>

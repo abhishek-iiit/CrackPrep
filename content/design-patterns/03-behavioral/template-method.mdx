@@ -1,0 +1,101 @@
+---
+title: "Template Method"
+number: "03.09"
+summary: "A base class defines the skeleton of an algorithm and subclasses fill in steps — fixed order, varying details."
+status: published
+free: true
+difficulty: core
+estMinutes: 12
+tags: [behavioral, inheritance, hooks]
+updated: "2026-09-15"
+---
+
+## Same pipeline, different middle steps
+
+Every data export job in your ETL service follows the same choreography: open connection, read batch, transform, write batch, log metrics, close connection. Two export types differ only in transform — CSV quoting vs Avro schema validation. Copy-paste the whole pipeline twice and bug fixes land in one copy first. Extract shared steps into functions and you still pass seven callbacks whose order is nowhere enforced.
+
+Template Method puts the **invariant sequence** in a base class method — often `final` or documented as do-not-override — and declares abstract or overridable **hooks** for the steps that vary. Subclasses implement `transform(batch)`; the base owns `run()` calling hooks in order. The order is structural; you cannot accidentally call `write` before `read`.
+
+Framework code uses this constantly: servlet `service()` dispatching to `doGet`/`doPost`, JUnit `@BeforeEach` / test / `@AfterEach`, game loops with `update`/`render` overrides.
+
+## Abstract class, template method, hooks
+
+- **Abstract class** — defines `templateMethod()` calling hook methods in fixed order.
+- **Concrete subclasses** — override hooks (`loadData`, `parse`, `save`) not the template.
+- **Hook methods** — optional overrides with sensible defaults in the base (empty `onError`, default retry count).
+
+<Steps>
+<Step title="Client calls templateMethod on subclass">
+`new CsvExportJob().run()` — polymorphism picks the subclass hooks.
+</Step>
+<Step title="Base runs fixed skeleton">
+`connect(); batch = read(); out = transform(batch); write(out); finally { close(); }` — subclasses cannot skip `close` without overriding the whole template (which you forbid).
+</Step>
+<Step title="Subclass hooks supply variation">
+`CsvExportJob.transform` quotes fields; `AvroExportJob.transform` validates against schema. Shared error handling and metrics stay in the base.
+</Step>
+</Steps>
+
+```typescript
+abstract class ExportJob {
+  run() {
+    this.connect();
+    try {
+      const batch = this.read();
+      this.write(this.transform(batch));
+    } finally {
+      this.close();
+    }
+  }
+  protected abstract read(): Row[];
+  protected abstract transform(rows: Row[]): Buffer;
+  protected connect() { /* default */ }
+  protected close() { /* always runs */ }
+}
+```
+
+Hollywood Principle: "Don't call us, we'll call you." Subclasses do not drive the flow; the base calls them at the right time.
+
+<Callout type="gotcha">
+Overriding the template method itself — or a hook you did not know the base relies on — breaks invariants. Mark the skeleton `final`, document which hooks exist, and resist adding new abstract hooks to a stable base without a major version bump — every subclass must implement them.
+</Callout>
+
+## Template Method vs Strategy
+
+03.08 Strategy composes behaviour at runtime — swap objects. Template Method bakes variation into a class hierarchy — swap types. Prefer Strategy when algorithms change per instance or from config; prefer Template Method when the **sequence is sacred** and variation is always a specialised subtype (framework extension point). Composition over inheritance pushes many Template Method cases toward Strategy plus a plain `run()` function — valid refactor when subclass count explodes.
+
+## Template Method vs State
+
+03.07 State swaps behaviour when lifecycle phase changes at runtime. Template Method fixes behaviour at compile time via subclass. An order in `ShippedState` is State; an export job that is always CSV is Template Method.
+
+<Tradeoff
+  forTitle="Reach for Template Method when"
+  againstTitle="Avoid Template Method when"
+  forItems={[
+    "Multiple classes share an identical multi-step process and differ only in specific steps",
+    "Step order is a safety or correctness invariant — connect before read, finally always closes",
+    "You are building a framework and third parties extend via overrides, not composition",
+    "Shared cross-cutting steps (logging, metrics, retry) should not be duplicated in every subclass",
+    "Hooks are a stable, small set — two to five variation points, not twenty"
+  ]}
+  againstItems={[
+    "Algorithms differ entirely in structure — not the same skeleton — use 03.08 Strategy instead",
+    "You need runtime algorithm selection per object — inheritance cannot swap without recreating the instance",
+    "Deep subclass trees fight each other — diamond problems, fragile base class when the parent adds a new abstract hook",
+    "Testing requires instantiating heavy base classes — pure functions and Strategy inject easier",
+    "Language lacks good abstract class support — compose a pipeline of functions with explicit ordering"
+  ]}
+/>
+
+## In an interview
+
+Say: "All export jobs share connect-read-transform-write — I would lock that sequence in a base `run()` and let CSV and Avro override only `transform`." Expect Template Method vs Strategy — fixed inheritance vs composed swap. Mention `final` skeleton and fragile base class as the cost. Name the misuse: template with one step — that is a single abstract method, not a template — or a hierarchy when a function pipeline would be five lines.
+
+<KeyTakeaways items={[
+  "Template Method defines the skeleton of an algorithm in a base class and lets subclasses override specific steps without changing order.",
+  "The invariant sequence lives in one place — bug fixes and resource cleanup (finally blocks) apply to all subclasses automatically.",
+  "Hooks are the extension points; the template method itself should be treated as non-overridable infrastructure.",
+  "Use when process structure is identical and variation is step-local; use 03.08 Strategy when whole algorithms swap at runtime.",
+  "Fragile base class problem: adding a new abstract hook breaks every subclass — treat hook sets as published API.",
+  "Framework lifecycle methods (init/test/teardown, doGet/doPost) are Template Method even when the name is not used."
+]} />

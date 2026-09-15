@@ -1,0 +1,87 @@
+---
+title: "Best Time to Buy and Sell Stock"
+number: "01.02"
+summary: "One transaction, one forward pass: track the cheapest buy so far and the best profit it could sell for."
+status: published
+free: true
+difficulty: intro
+estMinutes: 9
+tags: [array, greedy]
+updated: "2026-09-15"
+---
+
+## One buy, one sell, no lookahead
+
+Each element of `prices` is the stock price on day `i`. You may buy once and sell once on a later day. Return the maximum profit, or 0 if no profitable trade exists.
+
+The trap is simulating every buy day against every future sell day — O(n²). For n = 10⁵ that is tens of billions of pairs. The constraint is telling you to do better.
+
+The insight is temporal, not combinatorial. When you stand on sell day `i`, the best buy for that sell is the **minimum price on any day before i**. You do not need to remember which day achieved the minimum until you update the answer — you only need the number.
+
+## Running minimum, running best profit
+
+Keep two scalars: `minPrice` (cheapest buy seen so far) and `maxProfit` (best profit achievable so far). Scan left to right. At each price, first update `maxProfit` with `price - minPrice`, then update `minPrice` with `min(price, minPrice)`.
+
+Order within the iteration matters for correctness on a single day, but the usual pattern is: treat today as a sell candidate against yesterday's minimum, then fold today into the minimum for tomorrow.
+
+Example: `[7, 1, 5, 3, 6, 4]`. After day with price 1, `minPrice = 1`. On day 5, profit 4 beats prior best. On day 6, profit 5 is the answer.
+
+<Callout type="gotcha">
+Returning negative profit when prices only fall — e.g. `[7, 6, 4, 3, 1]` — is wrong. The problem allows skipping the trade; answer is 0, not -6.
+</Callout>
+
+## Solution
+
+```ts
+function maxProfit(prices: number[]): number {
+  let minPrice = Infinity;
+  let maxProfit = 0;
+
+  for (const price of prices) {
+    maxProfit = Math.max(maxProfit, price - minPrice);
+    minPrice = Math.min(minPrice, price);
+  }
+
+  return maxProfit;
+}
+```
+
+Time **O(n)**, space **O(1)** — two integers, no auxiliary structures.
+
+<Tradeoff
+  forTitle="One-pass greedy when"
+  againstTitle="Brute force pairs when"
+  forItems={[
+    "Exactly one buy and one sell with sell strictly after buy",
+    "n up to 10⁵ where O(n²) will not finish",
+    "You only need the profit scalar, not the actual days",
+    "Prices are arbitrary nonnegative integers — no special structure assumed",
+    "This is the base case before k-transaction DP variants",
+  ]}
+  againstItems={[
+    "Interviewer wants you to derive the recurrence from scratch first",
+    "Follow-up requires returning buy/sell day indices — still one pass, but track argmin",
+    "Multiple transactions allowed (03.43 Best Time to Buy and Sell Stock IV) — different state machine",
+    "Input is tiny and the point is to write the double loop cleanly",
+    "Cooldown or transaction fees change the transition — greedy no longer suffices",
+  ]}
+/>
+
+## In an interview
+
+State the constraint clearly: one purchase, one sale, sale after purchase, maximize profit or return 0. Walk through `[7, 1, 5, 3, 6, 4]` and name the running minimum aloud.
+
+Before coding, say that for each day as sell date the optimal buy is the min price seen so far — O(n) total. Flag the all-decreasing case returning 0.
+
+Follow-ups: unlimited transactions (greedy capture every uphill), at most k transactions (DP), cooldown, fee per trade. The common bug is initializing `maxProfit` to `-Infinity` and forgetting the "no trade" option.
+
+<KeyTakeaways
+  items={[
+    "Best Time to Buy and Sell Stock reduces to tracking the minimum price seen so far while updating best profit at each step",
+    "The invariant: when considering day i as sell day, the optimal buy is the cheapest price in prices[0..i-1]",
+    "One pass, O(n) time, O(1) space — the template for single-transaction stock problems",
+    "If every day is a new low, answer is 0 because you may skip the trade entirely",
+    "k-transaction and cooldown variants replace this greedy with DP — this lesson is the one-transaction base case",
+    "Update max profit before or after min price on the same day, but never sell before you could have bought",
+  ]}
+/>

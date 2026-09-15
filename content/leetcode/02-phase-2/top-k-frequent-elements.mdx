@@ -1,0 +1,97 @@
+---
+title: "Top K Frequent Elements"
+number: "02.24"
+summary: "Sorting all frequencies is O(n log n); a size-k heap or bucket index finds the top k in O(n log k) or O(n)."
+status: published
+free: true
+difficulty: core
+estMinutes: 13
+tags: [heap, hash-map, bucket-sort]
+updated: "2026-09-15"
+---
+
+## You only need k winners, not a full ranking
+
+Given an integer array, return the k most frequent elements. Any order is fine. n can be up to 10⁵, k up to the number of distinct values.
+
+Sorting all unique elements by frequency is O(u log u) where u is distinct count — often acceptable, but it computes a total order you do not need. If u ≈ n and k is 3, you sorted 10⁵ items to learn that three numbers dominate. The constraint n = 10⁵ signals that O(n log n) passes but O(n) or O(n log k) is the intended pattern — especially when follow-ups stream elements or shrink k.
+
+## Count, then select k
+
+**Step 1:** one pass with a hash map → frequency count.
+
+**Step 2:** extract top k. Two standard ways:
+
+1. **Min-heap of size k** keyed by frequency. For each `(num, freq)`, push; if size > k, pop the smallest freq. What remains are the k largest. O(n log k).
+
+2. **Bucket sort by frequency.** Array indexed 0..n where bucket[i] holds numbers appearing exactly i times. Scan buckets from index n down until you collect k elements. O(n) time and space — frequencies are bounded by n.
+
+The heap invariant: the root is the **weakest** survivor among the current top k — any new element must beat it to enter.
+
+<Steps>
+<Step title="Build frequency map">
+  One pass: `map.set(num, (map.get(num) ?? 0) + 1)`.
+</Step>
+<Step title="Maintain min-heap of size k">
+  Compare on frequency. Pop when oversized.
+</Step>
+<Step title="Drain heap into result">
+  Order does not matter — extract all k entries.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function topKFrequent(nums: number[], k: number): number[] {
+  const freq = new Map<number, number>();
+  for (const n of nums) freq.set(n, (freq.get(n) ?? 0) + 1);
+
+  // Min-heap by frequency — simulated with sort slice for clarity
+  const entries = [...freq.entries()];
+  entries.sort((a, b) => a[1] - b[1]); // ascending by freq
+  return entries.slice(-k).map(([num]) => num);
+}
+```
+
+Interview implementations usually use a real heap; the sort above is O(u log u) and acceptable when u ≪ n. With a binary min-heap of size k: time **O(n + u log k)**, space **O(u + k)**.
+
+Bucket-sort variant: time **O(n)**, space **O(n)** — buckets indexed by frequency, walk high to low.
+
+<Tradeoff
+  forTitle="Min-heap of size k when"
+  againstTitle="Bucket sort by frequency when"
+  forItems={[
+    "k is much smaller than distinct count — O(n log k) beats sorting all frequencies",
+    "You do not know the max frequency ahead of time but k is modest (single digits to hundreds)",
+    "Memory for O(n) buckets is a concern in a memory-constrained follow-up",
+    "Elements stream in — heap merges naturally with sliding frequency updates",
+    "Generalizes to 'top k by custom score' where bucket indices are not bounded by n",
+  ]}
+  againstItems={[
+    "Frequencies are bounded by n — bucket index is a direct O(1) lookup per count",
+    "You want guaranteed O(n) after counting — bucket scan from n downward collects k items",
+    "k is close to u — heap savings vanish; full sort is simpler to code",
+    "Integer keys only and n ≤ 10⁵ — bucket array of size n + 1 is fine on the judge",
+    "Interviewer asks for sorted output by frequency — bucket walk gives descending order for free",
+  ]}
+/>
+
+## In an interview
+
+Example: `[1,1,1,2,2,3], k=2` → `[1,2]`. Confirm order does not matter and k is always valid.
+
+Say the two phases aloud: count first, select second. Before coding, pick heap vs bucket — if n ≤ 10⁵ and frequencies ≤ n, mention both; default to heap for generality.
+
+Proactive bug: using a **max-heap of all elements** — still O(u log u). The trick is heap **size k**, not heap everything. Another: returning keys from the frequency map without handling ties — any k among tied frequencies is usually acceptable; confirm with interviewer.
+
+Follow-ups: k closest points, top k in a data stream, single-element frequency (just the map).
+
+<KeyTakeaways items={[
+  "Phase 1 is always a frequency hash map — O(n) one pass.",
+  "Phase 2 selects k largest frequencies: min-heap of size k gives O(n log k); bucket sort by count gives O(n).",
+  "The min-heap root holds the cutoff — pop when size exceeds k to evict the least frequent survivor.",
+  "Bucket sort works because frequency is at most n, so index i can store all numbers appearing i times.",
+  "Full sort of distinct elements is acceptable when u is small but misses the intended optimization at n = 10⁵.",
+  "Same pattern extends to 'top k by any score' — 02.26 Kth Largest uses similar selection on raw values.",
+]} />

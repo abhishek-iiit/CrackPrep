@@ -1,0 +1,106 @@
+---
+title: "Interpreter"
+number: "03.03"
+summary: "When rules read like a mini-language, an interpreter turns sentences in that grammar into an evaluable tree instead of a forest of conditionals."
+status: published
+free: true
+difficulty: deep
+estMinutes: 18
+tags: [behavioral, dsl, parsing]
+updated: "2026-09-15"
+---
+
+## Business rules that outgrow `if` statements
+
+A pricing engine starts simple: "10% off if member." Then: "20% off members buying more than three items on Tuesday unless SKU is excluded." Then a compliance team adds region-specific tax strings. Six months later you have four hundred lines of nested boolean logic, no one person who understands it, and every new promotion requires a deploy because the rules live in code.
+
+The underlying shape is not arbitrary logic — it is a **language** with a tiny vocabulary (AND, OR, comparisons, literals) and a grammar. Interpreter gives that language first-class representation: each grammar production becomes a class, and evaluation is walking the tree those classes form.
+
+This is not "build a general-purpose programming language." It is for **bounded domains** where the set of constructs is small, stable, and owned by the product — search filters, access policies, workflow conditions, spreadsheet formulas.
+
+## Expressions, nonterminals, and the context
+
+The classic structure maps grammar rules to classes:
+
+- **Abstract expression** — declares `interpret(context)`.
+- **Terminal expression** — leaves of the tree (literals, variable lookups like `$cart.total`).
+- **Nonterminal expression** — composes other expressions (AND, OR, greater-than).
+- **Context** — holds variable bindings and anything else evaluation needs (the cart, the user, the clock).
+
+<Steps>
+<Step title="Parse text into a syntax tree">
+A lexer splits `"member AND total > 100"` into tokens; a parser (hand-rolled or generated) builds a tree of expression objects. Parsing happens once per rule change, not on every cart checkout.
+</Step>
+<Step title="Client builds or loads the tree">
+Rules stored in a database often arrive as strings — parse at save time, cache the tree, ship the serialised AST if startup time matters.
+</Step>
+<Step title="Interpret against context">
+Call `root.interpret(context)`. Each node reads children, returns a value or boolean. Short-circuit AND/OR in the node implementation, not in a generic walker, or you lose lazy evaluation.
+</Step>
+</Steps>
+
+```typescript
+interface Expression {
+  interpret(ctx: Context): boolean;
+}
+
+class And implements Expression {
+  constructor(private left: Expression, private right: Expression) {}
+  interpret(ctx: Context) {
+    return this.left.interpret(ctx) && this.right.interpret(ctx);
+  }
+}
+
+class GreaterThan implements Expression {
+  constructor(private field: string, private value: number) {}
+  interpret(ctx: Context) {
+    return ctx.getNumber(this.field) > this.value;
+  }
+}
+```
+
+In practice most teams stop at a parser generator (PEG.js, ANTLR) plus a small evaluator — the GoF class-per-rule layout is the conceptual model, not a mandate to hand-write twenty expression classes when a table-driven parser is clearer.
+
+<Callout type="warn">
+User-authored expressions are code injection waiting to happen. Sandboxing, allowlists of functions, CPU/time limits on evaluation, and rejecting unbounded recursion in the grammar are not optional extras — they are part of the design.
+</Callout>
+
+## When a rules engine beats a hand-rolled interpreter
+
+If non-engineers edit rules daily, need versioning, and want conflict detection, buy or embed a real rules engine (Drools, json-rules-engine, Open Policy Agent for policy-as-data). Interpreter shines when the grammar is **yours**, small, and embedded — not when you need a full RETE network and audit trail out of the box.
+
+## Grammar changes are API changes
+
+Adding a new operator means a new expression class, parser branch, tests, and documentation for whoever writes rules. That cost is acceptable when releases are rare; it hurts when marketing wants a new predicate every sprint. Know which side of that line you are on before committing.
+
+<Tradeoff
+  forTitle="Reach for Interpreter when"
+  againstTitle="Avoid Interpreter when"
+  forItems={[
+    "Rules are written as composable expressions in a fixed, small grammar — not arbitrary scripts",
+    "Non-developers need to author or edit rules stored as strings without redeploying application code",
+    "The same grammar is evaluated millions of times and parsing once plus caching the AST amortises cost",
+    "You need to inspect, serialise, or diff rules as structured trees rather than opaque bytecode",
+    "The domain vocabulary maps cleanly to a class hierarchy — comparisons, booleans, a handful of functions"
+  ]}
+  againstItems={[
+    "The 'language' is really three conditions — hard-code them and move on",
+    "Users want loops, imports, or Turing-complete power — give them a real sandboxed runtime instead",
+    "A mature rules engine with versioning, UI, and conflict resolution already fits the org",
+    "Grammar churn is weekly and every new token requires parser, evaluator, and migration work",
+    "Security review cannot tolerate eval-style execution of strings from untrusted sources"
+  ]}
+/>
+
+## In an interview
+
+Say: "The promotion rules have outgrown conditionals — I would model them as an expression tree evaluated against a cart context." Sketch lexer → parser → `interpret()`. Expect questions on performance (parse once, evaluate many), safety (no `eval`), and how this differs from Strategy (03.08 Strategy picks one algorithm; Interpreter composes many predicates into one decision). Name the trap: building a full language when the product only needed five named filters — that is over-engineering with a parser attached.
+
+<KeyTakeaways items={[
+  "Interpreter represents grammar rules as a composable object tree and evaluates it by calling interpret on the root.",
+  "It fits bounded domain languages — filters, policies, formulas — not general-purpose scripting.",
+  "Parse at rule-save or startup, evaluate at request time; never parse the same string on every hot-path call if you can avoid it.",
+  "User-supplied expressions require sandboxing, allowlists, and resource limits — treat them as untrusted code.",
+  "When rule authors need versioning, UI, and conflict detection, a dedicated rules engine often beats a custom interpreter.",
+  "Adding grammar constructs is an API change — count that maintenance cost before choosing this over simple configuration."
+]} />

@@ -1,0 +1,157 @@
+---
+title: "YouTube"
+number: "02.02"
+summary: "Resumable upload, async transcoding pipeline, CDN origin for video, and ABR manifests for the video-platform interview prompt."
+status: published
+free: true
+difficulty: deep
+estMinutes: 21
+tags: [video, cdn, transcoding]
+updated: "2026-09-15"
+---
+
+## "Design YouTube" is an upload pipeline disguised as a website
+
+The homepage and the search bar are the visible product. The interview is about everything that happens after someone hits upload: getting a multi-gigabyte file off a phone on a bad connection, turning it into six renditions at different bitrates, storing those segments, and serving them through a CDN so a viewer in Mumbai and a viewer in Ohio both start playback within a few seconds without you running one origin server per continent. Interviewers use this prompt to test async job pipelines, the read/write asymmetry of video (write once, read millions), and whether you know that "streaming" means segmented files plus a manifest, not a single MP4 over HTTP.
+
+## Clarify: creators, viewers, and what "live" means
+
+> "I'll cover video upload, transcoding, storage, and playback with adaptive bitrate. Out of scope: live streaming, recommendations, comments, and monetization. Creators upload; viewers watch on web and mobile. Correct?"
+
+**Functional requirements:**
+
+- Upload a video (title, description, visibility)
+- Transcode into multiple resolutions/bitrates
+- Stream playback with quality adaptation to bandwidth
+- Search and fetch video metadata (title, thumbnail, view count) — mention briefly, do not deep-dive ranking
+
+**Non-functional requirements:**
+
+- Max video length? Assume 60 minutes; max file size 12 GB (forces resumable upload)
+- Upload can take minutes; **playback start latency** target under 3 seconds on a decent connection
+- Availability 99.9% for playback — downtime is visible to billions
+- Durability: once published, video must not be lost
+- Support 1080p and 720p at minimum; 4K as a stretch mention
+
+**Read/write ratio:** extreme. One upload, potentially millions of views. This is a read-path system with a bursty, heavy write front door.
+
+## Capacity: one upload fans out to many reads
+
+| Assumption | Value |
+|---|---|
+| DAU | 200M |
+| Uploads per day | 500k (0.25% of DAU upload one video) |
+| Avg raw upload size | 500 MB |
+| Views per uploaded video (avg) | 1,000 over lifetime |
+| Avg watch duration | 5 min of 10 min video |
+| Transcoded renditions | 4 (144p, 360p, 720p, 1080p) |
+| Total storage multiplier after transcode | ~1.5× raw (lower renditions are smaller) |
+
+**Upload ingest:** 500k × 500 MB ≈ **250 TB/day raw** ≈ **3 GB/s average**, ×5 peak (evenings) ≈ **15 GB/s peak upload**. Same lesson as 02.01 Google Drive: direct-to-object-store, resumable chunks, no bytes through the API tier.
+
+**Transcode jobs:** 500k new videos/day ≈ **6 jobs/s average**, ×5 ≈ **30 transcode jobs/s peak**. Each job produces 4 renditions — 120 output files/s peak. This is a worker pool problem, not an API problem. Assume 10 minutes of wall-clock transcode per hour of video; a 10-minute upload ≈ 1–2 minutes on a modern GPU farm. Queue depth spikes when a region's upload volume jumps.
+
+**Playback reads:** 200M DAU × 5 videos/day ≈ **1B views/day** ≈ **12k views/s average**, ×3 peak ≈ **35k views/s**. Each view consumes ~50 MB of segment data over 5 minutes (1080p ABR average) ≈ **1.7 TB/s peak egress** — you do not serve this from one datacenter. CDN carries 95%+ of bytes; origin is miss fill and long-tail cold storage.
+
+**Storage:** 250 TB/day raw × 1.5 transcode multiplier ≈ **375 TB/day new storage**. Five-year retention of everything ≈ **680 EB** — say out loud that tiering and dedup change this; the point is object storage plus lifecycle policies to cold tier, not a single Postgres row per byte.
+
+## High-level design
+
+<Steps>
+<Step title="Upload init">
+Creator calls `POST /videos`. Metadata service creates a video record (`processing`), returns `video_id` and pre-signed chunk URLs. Thumbnail extraction can wait until transcode completes.
+</Step>
+<Step title="Resumable chunk upload">
+Client uploads chunks directly to raw object storage. On complete, metadata service enqueues a transcode job on 01.08 Distributed Message Queue with `{video_id, raw_path, profile: [360p, 720p, 1080p]}`.
+</Step>
+<Step title="Transcode workers">
+Workers pull jobs, read raw file, encode each rendition with FFmpeg-style pipelines (GPU-accelerated). Output: segmented files — typically 2–10 second `.ts` or `.m4s` chunks per rendition — written to processed object storage. Worker updates job status; on success, metadata flips to `published`.
+</Step>
+<Step title="Manifest generation">
+A packaging step writes an HLS (`.m3u8`) or DASH (`.mpd`) manifest listing segment URLs per rendition. The master manifest points to rendition-specific media playlists. Store manifests alongside segments in the CDN origin bucket.
+</Step>
+<Step title="Playback">
+Viewer hits `GET /watch?v={id}`. API returns metadata plus manifest URL. Video player fetches master manifest from CDN, picks initial rendition based on estimated bandwidth, downloads segments sequentially. Player switches renditions mid-stream when buffer health changes — that is ABR.
+</Step>
+</Steps>
+
+| Component | Role |
+|---|---|
+| Metadata DB | Video title, status, uploader, view count, manifest path |
+| Raw object store | Original upload, immutable |
+| Processed object store | Transcoded segments per rendition |
+| Transcode queue + workers | Async pipeline, horizontally scaled |
+| CDN | Edge cache for segments and manifests; origin shield optional |
+| View counter | Async increment via queue — not synchronous on every segment fetch |
+
+## Deep dive: transcoding pipeline and adaptive bitrate
+
+### Why transcode is async
+
+A 60-minute 4K upload cannot block an HTTP request. The upload API's job is to accept bytes and enqueue work. The creator sees `processing` until workers finish; notify via push or poll. Failure handling: retry with backoff, dead-letter queue for corrupt uploads, idempotent job keys on `video_id`.
+
+**Popular video optimization:** after a video crosses a view threshold (say 10k views/day), eagerly warm CDN edges — pin hot segments. Long-tail video stays cold in object storage; first viewer in a new region pays a cache-miss latency tax.
+
+### Segmented streaming and ABR
+
+A single progressive MP4 forces one bitrate — too high and mobile buffers stall; too low and desktop looks bad. **Adaptive bitrate** serves short segments at multiple quality levels; the player switches between renditions every few seconds.
+
+The master HLS manifest looks conceptually like:
+
+```text
+#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360
+360p/playlist.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720
+720p/playlist.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080
+1080p/playlist.m3u8
+```
+
+The player estimates throughput from segment download times and steps up or down. Mention buffer-based switching: if the buffer drops below 5 seconds, downgrade; if it stays above 20 seconds, try upgrading.
+
+### CDN placement
+
+Segments are immutable (named by hash or `{video_id}/{rendition}/{seq}.ts`). Immutable content gets aggressive CDN caching — `Cache-Control: max-age=31536000`. Manifests for unpublished videos are private; published manifests cache with shorter TTL if you allow mid-flight re-transcode (usually you do not — publish is immutable).
+
+Origin shield: one CDN node per region pulls from origin on miss, so origin sees one request per segment per region, not one per edge POP.
+
+<Callout type="tip">
+View counts do not belong on the synchronous playback path. Log segment requests to a stream processor or increment in 01.03 Distributed Cache with periodic flush. A viewer should never wait on a DB write to start watching.
+</Callout>
+
+<Tradeoff
+  forTitle="Pre-transcode fixed renditions when"
+  againstTitle="Transcode-on-the-fly (just-in-time) when"
+  forItems={[
+    "Videos are watched many times after upload — amortize transcode cost across millions of views",
+    "Playback latency must be under 3 seconds — segments are already sitting in CDN cache",
+    "Client ecosystem is heterogeneous (old phones to 4K TVs) — a fixed ladder of renditions covers known targets",
+    "CDN caching works because segments are immutable and finite in count per video",
+    "Worker pool sizing is predictable: jobs per upload, not jobs per concurrent viewer",
+  ]}
+  againstItems={[
+    "Catalog is huge and long-tail — most videos are watched zero or one times; pre-transcoding wastes compute",
+    "Storage cost of 4 renditions × millions of unwatched videos exceeds transcode cost of on-demand",
+    "Live streaming — there is no 'after upload' window; JIT or live-segment encoding is the only option",
+    "Personalized per-viewer encoding (different crops, watermarks) makes pre-baking impractical",
+  ]}
+/>
+
+## In an interview
+
+Lead with: "Upload is write-once through a resumable pipeline to object storage; playback is read-many through a CDN serving segmented ABR files." Draw the upload path and the playback path as two arrows that meet at storage — not one loop through your API.
+
+Expect: "How does the player pick quality?" (throughput estimate + buffer health, switch renditions via manifest). "What if transcode fails?" (retry, mark video failed, notify creator). "How do you handle a viral video?" (CDN absorbs egress; origin shield; optionally disable low renditions to save origin bandwidth — a desperation lever, mention and move on).
+
+Name the failure mode: **thundering herd on publish** — a creator with 50M subscribers publishes; millions request the same first segment simultaneously. CDN pre-warming and staggered notification beat scaling origin. Also: **cold-start transcode backlog** — if the queue depth exceeds SLA, new uploads sit in `processing` for hours; monitor queue age, not just queue length.
+
+<KeyTakeaways
+  items={[
+    "YouTube's core asymmetry is write-once (500k uploads/day), read-millions (1B views/day) — design the CDN path first",
+    "Upload is resumable chunked ingest to raw object storage; transcode is an async worker pipeline on a message queue",
+    "Playback is segmented HLS/DASH with a master manifest — ABR switches renditions based on bandwidth and buffer depth",
+    "Immutable segments cache forever at the CDN edge; view counts and analytics go async, never on the playback critical path",
+    "At ~35k views/s peak, origin egress without a CDN is impossible — 95%+ byte delivery must be edge-cached",
+    "Viral publish causes a first-segment thundering herd; pre-warm CDN and monitor transcode queue age, not just depth",
+  ]}
+/>

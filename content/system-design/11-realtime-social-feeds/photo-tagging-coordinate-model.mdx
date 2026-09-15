@@ -1,32 +1,112 @@
 ---
 title: "Photo Tagging Coordinate Model"
 number: "11.11"
-summary: "Photo Tagging Coordinate Model — notes in progress."
-status: draft
+summary: "Why face tags store normalized coordinates on the image, not pixels, and how resize, crop, and privacy turn a point into a real data model."
+status: published
 free: true
 difficulty: core
 estMinutes: 12
+tags: [photos, coordinates, tagging, media]
+updated: "2026-09-15"
 ---
 
-## The problem
+## A tag is a person plus a place on an image
 
-What breaks without this, and the situation that forces the decision.
+Photo tagging — the box or point that says "this is Alex" on a group shot — looks like a UI feature. The data model underneath has to survive the image being resized for a feed thumbnail, cropped for a story, served at 1x/2x/3x device densities, and rotated after upload. If you store "Alex is at pixel (842, 310) on the uploaded file," every derivative size is wrong unless you recompute tags per rendition. Teams that ship pixel coordinates on day one spend month two migrating to normalized coordinates after the CDN resize path in 13.02 Image CDN And Resizing goes live.
 
-## How it works
+The other half of the problem is not geometry: a tag is a social edge (photo P mentions user U) with privacy and notification consequences. Coordinates without identity are captions. Identity without coordinates is a plain people-list on the photo. Both fields belong together, with different failure modes.
 
-The mechanism, step by step.
+## Store normalized coordinates, not device pixels
 
-## Tradeoffs
+Represent the tag anchor in a coordinate space that is independent of the rendered pixel grid. The usual choice: origin at the top-left of the **original** image (or of the uncropped master), x and y in `[0, 1]` as fractions of width and height. A face box becomes `(x, y, w, h)` all normalized; a pin-style tag might store only `(x, y)` with a fixed UI hotspot size.
+
+```text
+photo_tags
+  photo_id
+  tagged_user_id     # null if custom text label
+  label_text         # optional plain-text tag
+  x                  # 0..1 from left
+  y                  # 0..1 from top
+  w, h               # optional box, 0..1
+  created_by
+  created_at
+  status             # pending | approved | rejected  (if confirmation required)
+```
+
+When the client renders a 320×320 thumbnail of a 4000×3000 master, it maps `px = x * rendered_width`. When the CDN serves a different width, the same row still works. When EXIF orientation is applied at ingest, normalize coordinates in the **post-orientation** master space and never expose the pre-rotate pixel grid to clients — mixed orientations are how tags drift off faces after upload.
+
+<Callout type="gotcha">
+Crops break naive normalization. If the feed shows a center crop and the story shows a face-aware crop, a tag at `(0.1, 0.2)` on the master may be outside the cropped frame. Either store tags only relative to the master and clip/hide when outside the viewport, or store per-rendition overrides (rare; expensive). Clipping on render is the usual rule: if the mapped box is outside the visible crop, do not show the chip.
+</Callout>
+
+## Write path and identity
+
+<Steps>
+  <Step title="Authorize against the photo and the tagged user">
+    Only people allowed to edit the photo (owner, collaborator) create tags. Tagging a user may require that user's approval before the tag is public — model that as `status`, not as a missing row, so you can show "pending" to the author.
+  </Step>
+  <Step title="Persist the edge and the geometry together">
+    One write creates the social mention and the coordinates. Splitting them invites a notification that points at a photo with no place to put the chip.
+  </Step>
+  <Step title="Notify and fan out as product requires">
+    "You were tagged" is async work (08.01 Delegation And Async Work). Do not block upload or tag-save on push delivery.
+  </Step>
+  <Step title="Render via master coordinates × current viewport">
+    Clients fetch tags with the photo metadata, multiply by the displayed image size, and account for CSS object-fit / object-position the same way they account for crop.
+  </Step>
+</Steps>
+
+Multiple tags per photo are normal; uniqueness is usually `(photo_id, tagged_user_id)` so the same person is not tagged twice, while still allowing many people per photo. Custom text labels ("Mom") without user ids skip the privacy graph but still need coordinates.
+
+## Privacy and deletion
+
+A tag is personal data about the tagged person, not only about the uploader. Untag must be available to the tagged user in most products — delete the row (or mark rejected), remove the chip, and stop using the mention in search/"photos of you." Deleting the photo cascades all tags. Deleting or renaming soft-deleted users (03.13 Soft Delete) should hide chips that point at tombstoned accounts.
+
+Search indexes that power "photos of U" are derived from the tag edge, similar in spirit to 11.09 Hashtag Extraction And Tag Store — extract on write, do not parse images at query time. Coordinates do not belong in the search index; the edge does.
+
+| Approach | Survives resize | Survives crop | Notes |
+| --- | --- | --- | --- |
+| Absolute pixels on upload file | No | No | Breaks at first CDN width |
+| Normalized on master | Yes | Clip/hide if outside | Default choice |
+| Normalized on each rendition | Yes | Yes | Heavy; only if crops are semantically different assets |
+| Face-detection re-run per rendition | Yes | Yes | Costly; use for suggestions, not as sole storage |
+
+## Suggestions vs committed tags
+
+Many apps suggest tag positions via on-device or server face detection. Treat suggestions as ephemeral UI until the user confirms — do not write speculative tags that notify people. When you do write, store the user-confirmed coordinates (user may nudge the box), not only the detector output. Detector schemas change; confirmed tags are product data.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Normalized master coordinates when"
+  againstTitle="Pixel or per-rendition coordinates when"
+  forItems={[
+    "The same photo is served at many widths through a resize CDN",
+    "You want one tag row to drive feed, detail, and mobile densities without migrations",
+    "Crops are viewports over a master, and hiding off-crop tags is acceptable",
+    "Clients can do simple multiply mapping and you control EXIF orientation at ingest",
+    "Tag volume is modest (tens per photo, not computer-vision polygons at video rate)",
+  ]}
+  againstItems={[
+    "Each crop is a published asset with its own identity (editorial crops that change meaning)",
+    "You only ever display one fixed resolution and will not resize — rare for consumer social",
+    "You need pixel-perfect overlays on a canvas editor locked to one bitmap",
+    "Legacy data already locked to pixels and a bulk migrate has not been funded yet",
+    "Real-time video frame tagging where master still frames are not the coordinate space",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+State the coordinate space first: "Tags are normalized x/y on the master image after orientation fix; renderers multiply by display size; off-crop tags are clipped." Then add the social edge: unique person per photo, optional approval state, untag for the tagged user.
 
-<KeyTakeaways items={["", "", ""]} />
+Follow-ups: what happens after CDN resize (nothing to the row); who can see pending tags; whether face detection writes rows (no until confirm). If they mention stories vs feed crops, explain clipping rather than inventing a second coordinate system unless the crop is a separate asset.
+
+<KeyTakeaways
+  items={[
+    "Photo tags bind a person (or label) to a location — store both, or you only have either a mention list or a dumb hotspot",
+    "Use normalized coordinates on the post-orientation master so CDN resizes do not invalidate tags",
+    "Map to pixels at render time; clip tags that fall outside the current crop instead of rewriting geometry per rendition",
+    "Enforce uniqueness per tagged user per photo and model approval as status when consent matters",
+    "Untag and photo deletion are privacy operations on the edge, with search/'photos of you' derived from that edge",
+    "Face-detection suggestions stay ephemeral until confirmed — confirmed coordinates are the durable product data",
+  ]}
+/>

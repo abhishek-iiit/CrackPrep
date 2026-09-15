@@ -1,0 +1,108 @@
+---
+title: "Cheapest Flights Within K Stops"
+number: "03.10"
+summary: "Shortest cheap path with a hop cap breaks Dijkstra — Bellman-Ford for k+1 rounds or BFS on (node, stops used)."
+status: published
+free: true
+difficulty: deep
+estMinutes: 19
+tags: [graph, dynamic-programming, shortest-path]
+updated: "2026-09-15"
+---
+
+## Fewest dollars is not fewest edges — and Dijkstra ignores the stop limit
+
+There are `n` cities and flights `[from, to, price]`. Find the **cheapest price** from `src` to `dst` with **at most k stops** (at most k+1 edges). If no such route exists, return -1.
+
+03.09 Network Delay Time finds shortest **time** to all nodes with unconstrained hops. Here you minimize **cost** subject to an **edge-count cap**. Running Dijkstra and stopping when dist[dst] stabilizes can pick a cheap route that uses too many flights — or miss that a slightly costlier 2-hop beats a 1-hop that blocks a required third segment.
+
+Two clean approaches: **Bellman-Ford for k+1 relaxation rounds** (each round allows one more edge), or **BFS level-by-level** on states `(city, stopsUsed)` tracking best cost per stop layer.
+
+## Bellman-Ford with k+1 rounds
+
+Initialize `dist[src] = 0`, others Infinity. Repeat **k+1 times**: copy `dist` to `prev`, for each flight `(u, v, w)`, if `prev[u]` is finite, try `dist[v] = min(dist[v], prev[u] + w)`.
+
+Using `prev` snapshot each round ensures you add **at most one edge per round** — the standard trick for "shortest path with at most L edges."
+
+<Steps>
+<Step title="Initialize distances">
+  `dist[src] = 0`; all other cities Infinity.
+</Step>
+<Step title="Relax k+1 layers">
+  Outer loop `i = 0..k`. Inner loop all flights. Read from `prev` copy so paths do not use more than i+1 edges in one iteration.
+</Step>
+<Step title="Answer at dst">
+  Return `dist[dst]` if finite, else -1.
+</Step>
+</Steps>
+
+<Callout type="note">
+A modified Dijkstra storing `(cost, node, stops)` in the heap also works — pop while stops ≤ k, skip stale entries. Bellman-Ford is shorter to write when k is small and E is moderate.
+</Callout>
+
+## Solution
+
+```ts
+function findCheapestPrice(
+  n: number,
+  flights: number[][],
+  src: number,
+  dst: number,
+  k: number
+): number {
+  let dist = new Array(n).fill(Infinity);
+  dist[src] = 0;
+
+  for (let i = 0; i <= k; i++) {
+    const prev = [...dist];
+    for (const [u, v, w] of flights) {
+      if (prev[u] === Infinity) continue;
+      dist[v] = Math.min(dist[v], prev[u] + w);
+    }
+  }
+
+  return dist[dst] === Infinity ? -1 : dist[dst];
+}
+```
+
+Time **O(k × E)** — k+1 rounds over all flights. Space **O(n)** for distance arrays.
+
+Alternative: priority queue BFS on `(cost, node, stops)` with best-cost pruning per `(node, stops)` — also **O(k × E log V)** with a heap.
+
+<Tradeoff
+  forTitle="Bellman-Ford k rounds when"
+  againstTitle="Dijkstra or unconstrained shortest path when"
+  forItems={[
+    "Hard cap on number of edges (stops) — each round adds at most one hop",
+    "k is small (≤ 100) and E ≤ 10⁴ — O(kE) fits time limits",
+    "Implementation must be short under interview pressure",
+    "Negative prices are not in the problem — rounds still work for non-negative weights",
+    "You already explained 03.09 and need the constrained variant in one extra loop",
+  ]}
+  againstItems={[
+    "No stop limit — revert to 03.09 Dijkstra from src",
+    "k is large (near n) and graph is sparse — multi-state Dijkstra may prune better",
+    "Negative edge weights — full Bellman-Ford n rounds, not k+1 snapshot trick alone",
+    "You need the actual path, not just cost — track parent pointers per layer",
+    "All flights cost 1 — BFS on hop count first, ignore price until dst reached",
+  ]}
+/>
+
+## In an interview
+
+Restate: cheapest route from src to dst, at most k stops (k+1 flights). Example where the cheapest overall route uses too many hops.
+
+Contrast with Network Delay Time: same graph feel, but hop cap breaks vanilla Dijkstra. Propose k+1 rounds of Bellman-Ford with prev snapshot.
+
+Follow-ups: return the route, unlimited stops (Dijkstra), or count paths within k stops. Bug: relaxing from current `dist` instead of `prev` within one round — allows two hops in a single iteration.
+
+<KeyTakeaways
+  items={[
+    "Cheapest Flights Within K Stops caps path length in edges — at most k stops means at most k+1 flights.",
+    "Bellman-Ford for k+1 rounds with a prev snapshot each round enforces the hop limit correctly.",
+    "Plain Dijkstra from 03.09 does not respect the stop constraint without a (node, stops) state.",
+    "Time O(k × E) and space O(n) — competitive when k is modest.",
+    "Relax from prev not dist inside one round — otherwise you chain multiple edges per layer.",
+    "Return -1 when dst stays unreachable within the hop budget.",
+  ]}
+/>

@@ -1,32 +1,98 @@
 ---
 title: "Backup And Restore Strategy"
 number: "14.08"
-summary: "Backup And Restore Strategy — notes in progress."
-status: draft
+summary: "How to set RPO and RTO, tier what you protect, and prove restores work — the organizational strategy that sits above any one database's backup tooling."
+status: published
 free: true
 difficulty: core
 estMinutes: 12
+tags: [backups, rpo, rto, disaster-recovery]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Tooling without targets is how you discover the gap during an outage
 
-What breaks without this, and the situation that forces the decision.
+Every team eventually buys or enables a backup feature. Strategy starts earlier: how much data loss is tolerable (**RPO** — recovery point objective), how long until service returns (**RTO** — recovery time objective), which systems matter most, and how you will *prove* those numbers. 14.07 Database Backups And Restore covers engine mechanics; 14.09 Disaster Recovery covers region-level failover. This lesson is the portfolio view — what to protect, how often, where copies live, and the drills that keep the story honest.
 
-## How it works
+An RPO of zero and an RTO of five minutes for everything is a budget fantasy. Strategy is prioritization with numbers attached.
 
-The mechanism, step by step.
+## RPO and RTO as design inputs
 
-## Tradeoffs
+**RPO** drives replication and backup frequency: nightly backups imply up to ~24 h of loss unless continuous replication/WAL archiving fills the gap. **RTO** drives architecture: cold restore from object storage into a new cluster might be hours; a standing warm standby might be minutes; active-active might be seconds at much higher cost.
+
+| Tier | Example systems | Typical RPO/RTO posture |
+| --- | --- | --- |
+| Tier 0 | Payments, auth, primary datastore | Continuous change capture; warm standby; frequent restore drills |
+| Tier 1 | Core product reads/writes | PITR + daily base; monthly full restore timed |
+| Tier 2 | Internal tools, analytics raw | Daily/weekly backups; restore best-effort |
+| Tier 3 | Disposable caches, rebuildable indexes | Often no backup — rebuild from source of truth |
+
+Say explicitly what you will **not** restore: CDN caches, Redis ephemerals, derived search indexes you can rebuild (09.10 Search Index Synchronization territory). Backing up rebuildable derived data inflates cost and false confidence.
+
+## The copy has to survive what kills production
+
+Keep backups in a different failure domain: separate account or project, separate region for serious threats, immutability/versioning against deletion ransomware. Retention should match legal and product needs (14.10, 14.11) — not "infinite because storage is cheap," which becomes infinite restore-test surface and infinite breach scope.
+
+Encrypt backups, restrict who can `DeleteBackup`, and alert when the latest valid restore point exceeds RPO. A calendar reminder is not monitoring.
+
+## Prove it with restore drills
+
+<Steps>
+  <Step title="Inventory and classify">
+    List datastores, owners, tier, current backup method, and last successful restore test with measured duration.
+  </Step>
+  <Step title="Set RPO/RTO per tier">
+    Write numbers product and legal accept. Cost the architecture those numbers imply before declaring them.
+  </Step>
+  <Step title="Automate backup health">
+    Failures, age of newest restorable point, size anomalies, cross-region replication lag for backup artifacts.
+  </Step>
+  <Step title="Schedule restores">
+    Restore into isolated environments on a cadence proportional to tier. Record wall-clock RTO and fix gaps (runbooks, parallelism, pre-provisioned capacity).
+  </Step>
+  <Step title="Feed DR and incidents">
+    Drill results update 14.09 playbooks; missed RPOs become error-budget and investment conversations (14.02).
+  </Step>
+</Steps>
+
+<Callout type="note">
+Game-day restores should include identity and networking — a perfect data file you cannot reach because DNS, secrets, or IAM were not in the runbook does not meet RTO. The application stack is part of restore strategy, not an afterthought to the dump.
+</Callout>
+
+## Application-consistent multi-store problems
+
+If one user action writes to Postgres *and* object storage *and* a queue, independently restoring one system to 10:00 and another to 10:05 yields subtle corruption. Strategy either (a) accepts approximate consistency and has repair jobs, (b) uses a single logical unit of backup with coordinated freeze, or (c) designs workflows to be rebuildable from a log of record. Ignoring cross-store RPO is how "successful restores" still break the product.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Tighten RPO/RTO (more standbys, continuous replication) when"
+  againstTitle="Accept colder, cheaper restore when"
+  forItems={[
+    "Data loss or long downtime has direct revenue, safety, or contractual cost exceeding standby spend",
+    "Regulators or customers have explicit recovery commitments",
+    "Restore drills already show you miss targets with colder backups",
+    "The datastore is Tier 0 and rebuild-from-scratch is impossible",
+    "Incidents repeatedly burn error budget on recovery time rather than on the initial fault",
+  ]}
+  againstItems={[
+    "Data is reconstructible from an upstream source of truth within acceptable time",
+    "System is Tier 2/3 and overnight loss is an accepted business posture",
+    "Budget cannot fund warm capacity and product explicitly accepts colder RTO",
+    "Complexity of continuous multi-region replication would create more outages than it prevents at current maturity",
+    "You have not yet fixed basic backup monitoring — buy correctness before exotic RPO",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Lead with objectives: "I classify systems into tiers with explicit RPO and RTO, keep backups in a separate failure domain, and I treat measured restore drills as the only valid evidence." Distinguish this from engine-level WAL mechanics (14.07) and from full regional DR (14.09). Mention cross-store consistency as a follow-up you are ready for.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Backup strategy starts with per-tier RPO and RTO — numbers that drive architecture and cost — not with a tool selection",
+    "Do not back up what you can rebuild; do not leave Tier 0 on nightly dumps alone if RPO is minutes",
+    "Store copies in a separate failure domain with access controls that survive production account compromise",
+    "A strategy is unproven until timed restore drills include data, identity, networking, and application bring-up",
+    "Monitor restore-point age and backup anomalies continuously; calendars do not detect silent failure",
+    "Multi-store products need an explicit story for coordinated or repairable recovery — independent RPOs can disagree",
+  ]}
+/>

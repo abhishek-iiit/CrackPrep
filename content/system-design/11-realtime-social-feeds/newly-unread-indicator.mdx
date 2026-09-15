@@ -1,32 +1,100 @@
 ---
 title: "Newly-Unread Indicator"
 number: "11.08"
-summary: "Newly-Unread Indicator — notes in progress."
-status: draft
+summary: "Why a badge count is not a query over every unread row, and how a watermark or counter keeps 'you have new stuff' cheap under constant writes."
+status: published
 free: true
 difficulty: core
 estMinutes: 12
+tags: [unread, badges, watermarks, counters]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The red dot is not a SELECT COUNT
 
-What breaks without this, and the situation that forces the decision.
+Products train users to glance at a badge — notifications, messages, a "new" pip on a feed tab — and decide whether to open anything. That glance happens on every app launch, every nav render, often from a cold mobile client. If "is there anything new?" means scanning the notifications table for rows newer than the user's last visit, you have turned the hottest read in the product into a range query against a write-heavy table. It works at a thousand users. At tens of millions of daily opens, it is how a notifications database spends its CPU answering a boolean.
 
-## How it works
+The indicator has two different jobs that get conflated. One is a **presence** signal: is there anything unseen (the red dot, or a boolean). The other is a **count** signal: how many (the number in the badge). Presence can be answered with a watermark. Count needs a counter or a bounded enumeration. Designing for count when the product only shows a dot wastes work; designing for a precise unbounded count when the UI caps at "9+" wastes more.
 
-The mechanism, step by step.
+## Watermark for presence
 
-## Tradeoffs
+Store, per user (and often per channel — notifications vs DMs vs a specific conversation), the high-water mark of what they have already seen: a timestamp, a monotonically increasing notification id, or a Snowflake-style id from 04.10 Snowflake ID Design. New items carry ids greater than the watermark. "Anything new?" is then a comparison, not a scan: either keep a `latest_item_id` updated on write and compare it to `user.last_seen_id`, or probe "exists an item with id > last_seen" with a limit-1 query against an indexed `(user_id, id)` key.
+
+<Steps>
+  <Step title="On write, advance the channel's tip">
+    When a notification (or message, or feed item marked as badge-worthy) is created for a user, update a small per-user tip record: `latest_id` / `latest_at`. This is a single-row upsert keyed by user — cheap, and the only write the badge path needs beyond the item itself.
+  </Step>
+  <Step title="On read of the badge, compare tip to watermark">
+    Load `user.last_seen_id` and `user.latest_id`. If `latest_id > last_seen_id`, show the dot (or fetch a count — next section). Two key-value gets, cacheable aggressively with a short TTL or invalidate on write.
+  </Step>
+  <Step title="On open / mark-read, move the watermark forward">
+    When the user opens the surface, set `last_seen_id = latest_id` (or to the id of the last item they actually viewed, if partial read matters). Do not delete unread rows just to clear a badge — that couples retention to UI state.
+  </Step>
+</Steps>
+
+Partial reads complicate watermarks: the user clears the badge by opening the list but has not scrolled through everything. Products usually accept "opened the surface ⇒ clear the badge" as the rule, and keep per-item read state only where the list itself must show unread styling. Mixing "badge clear" with "every row is read" in one mechanism is how you get badges that never clear or that clear too aggressively.
+
+## Counters when the number matters
+
+If the UI shows `3` or `9+`, maintain an integer per user (or per conversation): increment on new unseen item, decrement or reset on mark-read. The counter is a denormalized view of unread rows — it will drift unless every path that creates, deletes, or expires an item updates it. Soft deletes, moderation takedowns, and TTL expiry are the usual drift sources; 03.13 Soft Delete makes this worse if "deleted" rows still counted as unread until a sweeper runs.
+
+A practical compromise for badges: store an exact counter up to a cap (e.g. 99), and display "99+" beyond that. The product rarely needs the difference between 140 and 141 unseen notifications, and capping avoids a hot counter under notification storms. For chat, per-conversation unread counts are often exact because the numbers stay small and the conversation is the natural partition — see the modeling pressure in 11.05 Social Network Database Modeling.
+
+| Signal | Store | Read cost | Failure mode |
+| --- | --- | --- | --- |
+| Presence (dot) | Watermark + tip id | 1–2 key gets | Stale cache shows a ghost dot until TTL/invalidation |
+| Exact count | Counter or COUNT query | Counter get, or expensive COUNT | Drift after deletes/expiry; COUNT melts the DB |
+| Capped count | Counter with saturating increment | Counter get | Under-reports during storms — usually fine for badges |
+| Per-thread chat unread | Counter per conversation | Get for open threads only | Must update on read receipts and message deletes |
+
+<Callout type="warn">
+Invalidating a cached badge on every notification write is correct and can still melt a cache cluster if one user receives a burst — a viral reply storm, a broken job retrying notifications. Coalesce tip updates (last-write-wins on `latest_id`) and rate-limit cache invalidation fan-out; the badge can lag a second without anyone treating it as data loss.
+</Callout>
+
+## What you should not do
+
+Do not compute the badge with `SELECT COUNT(*) FROM notifications WHERE user_id = ? AND read = false` on every app open. That query is correct and hostile: it touches every unread row's index entries, contends with writers inserting new notifications for the same user, and cannot be cached safely without the same invalidation traffic a counter needs — so you paid for a scan and still need the invalidation story.
+
+Do not use the home-timeline cursor from 11.07 Feed Generation Push Pull Hybrid as a substitute for a notification watermark unless the product truly means "new feed posts" by the same badge. Feeds, notifications, and chat are different channels with different write rates and different mark-read semantics; one watermark shared across them clears the wrong thing.
+
+## Multi-device and mark-read races
+
+The same user on phone and laptop will mark-read on one device while the other still shows a badge. Last-write-wins on the watermark is usually enough: both devices poll or receive a push that the watermark moved. If you need read receipts for chat, that is a different, stricter protocol — per-message acknowledgements — not a badge watermark. Keep badge state eventually consistent across devices; keep receipt state explicit.
+
+Concurrent "new item" and "mark all read" is the classic race: mark-all sets `last_seen = latest`, then a delayed writer bumps `latest` with an item that arrived earlier but was processed later. Prefer ids that order by causality (or by a single writer per user inbox), and make mark-all "set last_seen to max(last_seen, current_latest)" under a conditional write so a stale mark-all cannot move the watermark backwards.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Prefer a watermark (presence) when"
+  againstTitle="Prefer a maintained counter when"
+  forItems={[
+    "The UI only needs a dot or pip — yes/no is enough to drive the open decision",
+    "Unread volume can spike and an exact number would be noisy or capped in the UI anyway",
+    "You want the badge path to stay two key-value reads, independent of how many unseen rows exist",
+    "Mark-read means 'opened the surface,' not 'acknowledged every row'",
+    "Deletes and TTLs are common and you do not want a counter that must decrement on every expiry path",
+  ]}
+  againstItems={[
+    "The product surfaces an exact or capped count that users rely on (chat unread, email-style inbox)",
+    "Presence alone is insufficient — empty-looking badges when the count is the feature",
+    "Unread sets stay small and partitioned (per conversation), so counter updates are cheap and local",
+    "You already have a single writer path per inbox and can keep the counter transactional with inserts",
+    "Drift is detectable and repairable with a periodic reconcile against source rows",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Introduce the badge as a different read path from the notifications list: "I will not COUNT unread rows on every launch; I will keep a per-user watermark and a tip id so presence is a comparison." If they ask for a number in the badge, upgrade to a capped counter and name delete/expiry drift before they do.
 
-<KeyTakeaways items={["", "", ""]} />
+Follow-ups to pre-empt: multi-device clear, mark-all races, whether muted or marketing notifications bump the tip (product rule — usually a `badgeable` flag on write), and cache invalidation under storms. Tie it back to feed design only if the badge literally means new feed content; otherwise keep the channel separate.
+
+<KeyTakeaways
+  items={[
+    "A newly-unread indicator is a hot, tiny read — answering it with COUNT over unread rows couples badge latency to inbox size",
+    "Presence needs a watermark plus a tip id: compare last-seen to latest, then advance the watermark when the user opens the surface",
+    "Counts need a denormalized counter (often capped); budget for drift when items are deleted, expired, or moderated away",
+    "Do not share one watermark across feed, notifications, and chat unless the product truly treats them as one channel",
+    "Mark-all and concurrent inserts need monotonic ids and conditional watermark updates so a stale clear cannot hide new items",
+    "Cache the badge aggressively but coalesce invalidations — a second of badge lag is preferable to a cache stampede on a notification burst",
+  ]}
+/>

@@ -1,32 +1,114 @@
 ---
 title: "Seen Filtering Bloom Vs Exact Sets"
 number: "12.07"
-summary: "Seen Filtering Bloom Vs Exact Sets — notes in progress."
-status: draft
+summary: "How matching and nearby feeds avoid re-showing the same entity — and when a Bloom filter's false positives are acceptable versus when you need an exact set."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [bloom-filter, matching, dedup]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The second filter on every card swipe
 
-What breaks without this, and the situation that forces the decision.
+A nearby or recommendation response that keeps resurfacing the same restaurant, the same profile, or the same job posting feels broken even when the geo and ranker are correct. **Seen filtering** — excluding ids the user has already been shown, dismissed, or matched with — is a first-class part of the matching path, not a UI convenience.
 
-## How it works
+The structure question is always the same: for this user (or session), hold a set of ids that must not appear again, and probe it for every candidate before you return the page. The set can be exact or probabilistic. That choice is this lesson. The Bloom filter mechanics are 04.13 Bloom Filters; here the subject is when each belongs in a recs / nearby product.
 
-The mechanism, step by step.
+## Where "seen" lives in the request
 
-## Tradeoffs
+Typical flow for a "people nearby" or discovery feed:
+
+1. Geo or recall produces candidate ids (12.01, 12.08).
+2. Ranker scores them.
+3. **Seen filter** drops ids in the user's seen / passed / matched set.
+4. Remaining ids are truncated to page size and *then* added to seen (or added on impression callback — product choice).
+
+If you mark seen at serve time, you will not reshuffle the same page on refresh. If you mark on true impression, you avoid burning ids the client never rendered — at the cost of more complex client ACK paths.
+
+Session-scoped seen (swipe deck for one sitting) and durable seen (never show this profile again) are different stores. Confusing them either leaks repeats across sessions or permanently tombstones someone after a single accidental impression.
+
+## Exact sets
+
+An exact set stores the ids themselves — Redis `SET`, a hash set in the app, a column family row of ids, a bitmap if ids are dense integers.
+
+| Property | Exact set |
+| --- | --- |
+| False drop of a fresh id | Impossible |
+| False keep of a seen id | Impossible |
+| Memory | O(n × id size); tens of bytes per id in managed runtimes, less in Redis packed encodings / bitmaps |
+| Delete / undo | Natural — `SREM`, clear bit |
+| Merge across devices | Set union |
+
+Use exact sets when **mistakenly hiding an unseen candidate is a product bug**: dating apps that must not soft-ban a profile because of a hash collision, inventory that must not mark an item purchased, ads frequency caps with contractual guarantees.
+
+At 10,000 seen ids per active user with 8-byte ids, raw storage is 80 KB before overhead — often fine in Redis per hot user. At 10 million seen content ids for a power user on a long-lived video feed, exact sets get expensive and you start looking at Bloom filters, chunked bitmaps, or tiered "recent exact + older probabilistic" designs.
+
+## Bloom filters for seen
+
+A Bloom filter answers "definitely not seen" vs "probably seen" (04.13). In a seen-filter role:
+
+- **Definitely not seen** → safe to show (modulo other filters).
+- **Probably seen** → skip (or re-check an exact store).
+
+False positives mean **you hide something the user has never seen**. That is usually acceptable for "don't reshuffle the same restaurants tonight" and painful for "don't permanently exclude a rare matching profile".
+
+False negatives are impossible: you will not re-show something that was inserted — unless you rebuild wrong or expire the filter.
+
+Sizing reminder from 04.13: about **10 bits per id for ~1%** false positives (~1.2 MB per million ids). A per-user filter for 100k seen items at 1% is roughly 120 KB — often cheaper than the exact set, with the semantics trade attached.
+
+### Hybrid patterns that show up in production
+
+- **Recent exact, older Bloom.** Last 7 days of impressions in a Redis set; lifetime history in a Bloom rebuilt nightly. Undo and "show me again" work on the recent window; long tail only needs soft dedup.
+- **Bloom then exact.** Filter says probably seen → check exact authoritative store. Cuts load on the exact store when most candidates are new.
+- **Session Bloom, durable exact.** Session deck uses a disposable filter; matches and blocks go to exact durable sets.
+
+<Callout type="gotcha">
+Inserting into a Bloom filter at candidate-generation time rather than at impression time permanently (for the life of the filter) risks hiding ids the user never saw if the client failed to render the page. Pair Bloom-backed seen with clear TTL/rebuild policy, and prefer exact sets for irreversible decisions (block, match, purchase).
+</Callout>
+
+## Decision table
+
+| Requirement | Prefer |
+| --- | --- |
+| Contractual / irreversible exclusion | Exact |
+| Soft "try not to repeat" at huge cardinality | Bloom |
+| User can undo a pass | Exact (or counting Bloom — rarely worth it; prefer exact) |
+| Memory-bound per-user state on device or edge | Bloom |
+| Need to list what was seen | Exact — Bloom cannot enumerate |
+| Cross-session merge of two histories | Exact union, or OR of compatible Blooms with same `m,k` |
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Filter seen with a Bloom filter when"
+  againstTitle="Keep an exact seen set when"
+  forItems={[
+    "Cardinality is large and soft dedup is enough — repeating an unseen item rarely is better than blowing the memory budget",
+    "The filter is session-scoped or regularly rebuilt, so false-positive tombstones do not last forever",
+    "A false 'probably seen' only costs diversity, not correctness of billing or matching eligibility",
+    "You already understand sizing: bits per key for target p, and n is bounded (04.13)",
+    "Devices or edge nodes need a compact digest of history",
+  ]}
+  againstItems={[
+    "Hiding an id the user never saw violates a product or legal guarantee",
+    "You need deletes, undo, or enumeration of seen ids",
+    "Per-user n is small enough that an exact Redis set is cheap and simpler",
+    "Ids must be removed when content is deleted from the corpus and rebuilding filters is impractical",
+    "You cannot tolerate silent degradation when n exceeds the design size and p climbs toward 1",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Place seen filtering in the pipeline after recall and before or after ranking — say which and why. Offer exact for match/block and Bloom or hybrid for impression dedup. Quote the 10 bits/key at 1% figure. Name the failure mode: Bloom false positives as over-filtering, exact sets as memory and merge cost. Tie to geo matching: nearby candidates are useless if the top 20 are all in last night's deck.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Seen filtering is part of the matching latency path — candidates you keep reshown are a product failure even when geo is correct",
+    "Exact sets never hide fresh ids and support undo; they cost memory linear in seen count",
+    "Bloom-backed seen can falsely drop unseen ids at rate p; that is acceptable only for soft dedup",
+    "Roughly 10 bits per id buys about 1% false positives — size for the population you will actually insert",
+    "Hybrids (recent exact + lifetime Bloom, or Bloom then exact) are the usual production compromise",
+    "Marking seen on serve vs on impression changes both correctness and client protocol — pick explicitly",
+  ]}
+/>

@@ -1,32 +1,89 @@
 ---
 title: "Tail Latency"
 number: "02.12"
-summary: "Tail Latency — notes in progress."
-status: draft
+summary: "Why the average hides the number users actually feel, and how fanning out to many backends turns a rare slow response into the common case."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [latency, percentiles, fan-out]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The average was never the number that mattered
 
-What breaks without this, and the situation that forces the decision.
+A service can report a mean latency of 50 ms and still be making a meaningful fraction of its users wait a full second. The average is dominated by the common case — most requests really do finish quickly — while a long thin tail of slow ones barely moves it. If p50 is 40 ms, p99 might be 400 ms, and p999 might be 2 seconds, on the same service, at the same time. One in a hundred requests, or one in a thousand, hitting a multi-second response is not a rounding error; at any real traffic volume it is thousands of bad experiences a day, and it is invisible in a dashboard that only plots the mean.
 
-## How it works
+The tail gets worse, not better, as a system grows more distributed, for a specific and counterintuitive reason: fanning a single request out to many backends means the response is only as fast as the slowest of them, and slow responses that are individually rare become collectively common once there are enough backends in the fan-out.
 
-The mechanism, step by step.
+## Why fan-out amplifies a rare problem into a common one
 
-## Tradeoffs
+<Formula label="Probability at least one of N calls is slow">P(≥1 slow) = 1 − (1 − p)^N</Formula>
+
+Here `p` is the probability any single backend call lands in the slow tail, and `N` is the number of backends the request fans out to. Take `p` = 1% — a call that hits its own p99 threshold — and see what happens as `N` grows.
+
+| Fan-out `N` | P(at least one call is slow) |
+| --- | --- |
+| 1 | 1.0% |
+| 10 | 1 − 0.99¹⁰ ≈ 9.6% |
+| 100 | 1 − 0.99¹⁰⁰ ≈ 63.4% |
+| 400 | 1 − 0.99⁴⁰⁰ ≈ 98.3% |
+
+At a fan-out of 100, a response that is individually a rare 1-in-100 event for any one backend becomes the norm for the request as a whole: nearly two out of three requests are dragged down to the slow path by at least one straggler. This is the shape of the problem in any system that fans a request out widely — a search query hitting a hundred shards, a page assembling data from a dozen internal services — and it is why "the p99 of each dependency is fine" is not the same claim as "the p99 of the request that calls all of them is fine." The numbers above are a model, not a measurement of any particular system — they assume the backend calls are independent, which real ones are not entirely, but the direction and rough magnitude of the effect hold up in practice.
+
+## Where the tail actually comes from
+
+The slow calls compounding above are not random noise; they usually trace back to a short list of causes. Garbage collection pauses in managed runtimes stall a process for tens to hundreds of milliseconds at unpredictable moments. A background process competes for the same resource — 07.09 LSM Tree Storage Engine's compaction is a clean example, where a write stall from compaction debt turns a request that would have taken 2 ms into one taking 900 ms. Shared-resource contention from a noisy neighbor on the same host or disk. Network jitter and retransmits on a busy link. A cold cache or a cold connection pool entry that happens to be the one this particular request draws.
+
+## Mitigating it once you cannot eliminate it
+
+<Steps>
+  <Step title="Send a hedged request after a delay">
+    Issue the primary request, start a timer around a high percentile of normal latency — near the p95 or p98, not the median — and if no response has arrived by then, send a duplicate request to a different replica. Take whichever response arrives first and cancel the other.
+  </Step>
+  <Step title="Cancel the loser, not just ignore it">
+    A hedge that is not cancelled keeps consuming resources on a backend that no longer matters to the caller. Propagating cancellation is what keeps hedging from quietly doubling load.
+  </Step>
+  <Step title="Cap how much traffic can be hedged">
+    Hedging every request roughly doubles offered load on average, which only works if there is real spare capacity to absorb it. Triggering the hedge at a high percentile, and capping the fraction of requests allowed to hedge at all, keeps the technique from becoming its own capacity problem.
+  </Step>
+  <Step title="Bound fan-out itself">
+    Fewer backends per request directly shrinks the P(≥1 slow) curve above. Where fan-out width is a design choice rather than a fixed requirement, keeping it smaller trades completeness or precision for a shorter tail.
+  </Step>
+</Steps>
+
+<Callout type="warn">
+Hedging is a second bet on the same outcome, and it is easy to make it a bad one. A system already near saturation has no spare capacity for a wave of duplicate requests, and triggering hedges too aggressively — at the median instead of a high percentile, or for every request instead of a small fraction — can push a system that was merely slow into one that is overloaded, which is a worse failure than the tail latency it was meant to fix.
+</Callout>
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Invest in tail-latency mitigation when"
+  againstTitle="Don't bother when"
+  forItems={[
+    "The request fans out to many backends, so the fan-out formula above is actively working against you",
+    "There is a real SLA on a high percentile — p99 or tighter — not just on the mean",
+    "Spare capacity exists to absorb hedged requests without pushing the system toward overload",
+    "The cost of a slow response is high enough to justify the engineering and resource cost of hedging or cancellation plumbing",
+  ]}
+  againstItems={[
+    "The workload is fan-out of one or a small, fixed number of calls, where the amplification effect barely applies",
+    "Only the mean or median latency is actually contractual, and the tail, while present, is not what anyone is measuring against",
+    "The system has no spare capacity, so any hedging technique would trade a latency problem for a capacity one",
+    "The dominant cause of tail latency is a single shared bottleneck that hedging cannot route around, like a single-writer database — a hedge to a different replica does not help when there is only one true source",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Bring up the tail before being asked about it: "The mean will look fine here; the number I actually care about is p99, and it gets worse as I fan this request out to more backends, not better." If pushed on why, walk through the compounding formula out loud — a call with a 1% chance of being slow, fanned out to a hundred backends, makes a slow response the majority outcome rather than the exception. Then name a mitigation and its cost in the same breath — hedged requests trade extra load for a shorter tail, and only make sense with spare capacity to spend.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Average latency is dominated by the common fast case and can look fine while a real fraction of requests wait far longer — p99 and p999 are the numbers users actually feel",
+    "A request that fans out to N backends is only as fast as its slowest call, so P(at least one is slow) = 1 − (1 − p)^N grows quickly with N even when p is small",
+    "At p = 1% and a fan-out of 100, roughly two-thirds of requests get dragged into the slow path by at least one straggler",
+    "Common causes of tail latency include GC pauses, background jobs like compaction competing for the same resource, noisy-neighbor contention, and cold caches",
+    "Hedged requests trade extra load for a shorter tail, and only work when triggered at a high percentile with real spare capacity to absorb the duplicate work",
+    "Bounding fan-out width is a direct lever on tail latency, because it directly shrinks the amplification formula rather than working around it",
+  ]}
+/>

@@ -1,32 +1,97 @@
 ---
 title: "Disaster Recovery"
 number: "14.09"
-summary: "Disaster Recovery — notes in progress."
-status: draft
+summary: "How to survive loss of a region or provider zone — standby topologies, failover criteria, and the drills that separate DR theatre from recoverable systems."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 14
+tags: [disaster-recovery, failover, multi-region, rto]
+updated: "2026-09-15"
 ---
 
-## The problem
+## A second region that has never received traffic is a hope, not a plan
 
-What breaks without this, and the situation that forces the decision.
+Disaster recovery (DR) is the capability to continue or restore service after a large-scale failure — an availability zone gone dark, a region offline, a provider control-plane event, a corrupted primary that replication cheerfully copied everywhere. Backups (14.07, 14.08) recover *data*; DR recovers *service*, which also needs compute, DNS, secrets, queues, and people who know the order of operations.
 
-## How it works
+The expensive mistake is buying multi-region replication and never failing over until a real disaster, when DNS TTLs, cold caches, license servers, and forgotten stateful workers all surface at once.
 
-The mechanism, step by step.
+## Topologies and what they buy
 
-## Tradeoffs
+| Topology | Data posture | Failover speed | Cost / complexity |
+| --- | --- | --- | --- |
+| Backup/restore to another region | Cold; RPO tied to backup | Hours+ | Lowest steady cost |
+| Pilot light | Minimal core in DR region; data replicated | Tens of minutes–hours after scale-out | Low–medium |
+| Warm standby | Scaled-down stack taking replicated data | Minutes | Medium |
+| Hot standby / active-passive | Full capacity ready; traffic flipped | Minutes or less | High |
+| Active-active | Serves traffic in multiple regions | Fail *away* from damaged region | Highest; conflict and latency design required |
+
+Active-active is not "warm standby with a marketing name." It demands session affinity or global data design, conflict rules, and latency budgets between regions. Most products that need DR do not need active-active on day one; they need a warm standby with a rehearsed flip.
+
+## Failover is a product decision
+
+<Steps>
+  <Step title="Define the disaster declaration">
+    Who can declare, on what signals (multi-AZ failure, provider status, data corruption), and what is *not* a DR event (single-node failure the HA layer handles).
+  </Step>
+  <Step title="Promote data plane">
+    Promote a replica carefully — ensure replicas were not poisoned by replicated bad writes if the disaster is logical corruption. Sometimes the answer is PITR in-region, not regional failover.
+  </Step>
+  <Step title="Point traffic">
+    DNS, anycast, or global load balancer shifts. Account for TTL and client sticky behavior; lower TTLs before you need them.
+  </Step>
+  <Step title="Bring dependent systems">
+    Queues, object storage failover, feature flag defaults, signing keys for media (13.07), cron leaders — the shadow inventory that breaks first-time failovers.
+  </Step>
+  <Step title="Operate degraded and communicate">
+    Some features may stay off. Status page and IC roles (14.03) apply; DR is an incident with a bigger blast radius.
+  </Step>
+</Steps>
+
+<Callout type="gotcha">
+Asynchronous cross-region replication means failover can lose the last few seconds or minutes of writes — that loss *is* your RPO. Pretending async replication gives RPO zero sets false expectations; sync cross-region commits buy lower RPO at a latency tax on every write.
+</Callout>
+
+## Corruption versus outage
+
+Regional outage: promote the other region's replica. Logical corruption or ransomware that replicated everywhere: promoting the replica makes things worse. Keep delayed replicas or immutable point-in-time backups that are not immediately overwritten by continuous replication. DR runbooks must branch on "region dead" versus "data poisoned."
+
+## Drills beat documents
+
+Run scheduled failover games: flip staging globally, or fail a non-critical region in production during a maintenance window. Measure actual RTO. Fix automation gaps (infrastructure as code for the DR region, sealed secrets, capacity quotas). Update runbooks where humans stumbled. A DR plan last edited two years ago is fiction.
+
+Dependencies on a single global control plane (one identity provider, one DNS host) need their own DR story or they become the hidden SPOF inside your multi-region diagram.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Invest in warm/hot multi-region DR when"
+  againstTitle="Stay with colder backup-based recovery when"
+  forItems={[
+    "Contractual or revenue impact of multi-hour regional loss exceeds continuous standby cost",
+    "RTO targets cannot be met by provisioning from backups after declaration",
+    "You will fund and calendar real failover drills, not only buy the topology",
+    "Critical path dependencies can also fail over or degrade gracefully in the DR region",
+    "Product can articulate an RPO under async replication (or pay for sync)",
+  ]}
+  againstItems={[
+    "Business accepts hours of downtime and backup RPO for this system",
+    "Engineering maturity cannot yet operate dual regions without creating more incidents",
+    "Data gravity or licensing makes a second hot region impractical this year",
+    "The dominant risk is logical corruption — delayed backups matter more than hot standby",
+    "Active-active is being proposed for résumé reasons without conflict and latency design",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Frame DR as recovering *service* in another failure domain with an explicit RPO/RTO and a tested failover runbook. Name the topology you choose and why (usually warm standby before active-active). Call out async replication data loss and the corruption-versus-outage branch. "We replicate to another region" without drills and DNS/TTL planning is the answer interviewers punish.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Disaster recovery restores service across a large failure domain; backups alone restore data into a void unless compute and traffic shift with them",
+    "Choose topology from RTO/RPO and cost — pilot light, warm standby, hot standby, or active-active are different engineering commitments",
+    "Async cross-region replication implies nonzero RPO on failover; sync replication trades write latency for less loss",
+    "Runbooks must distinguish regional outage from replicated logical corruption — the mitigations are opposites",
+    "Failover includes DNS, secrets, queues, and third-party dependencies, not only the primary database promote",
+    "Untested DR is speculative; timed drills are what make RTO a fact rather than a slide",
+  ]}
+/>

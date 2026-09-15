@@ -1,32 +1,89 @@
 ---
 title: "Search Index Sharding"
 number: "09.11"
-summary: "Search Index Sharding — notes in progress."
-status: draft
+summary: "How to split an inverted index across machines so query fan-out, rebalance cost, and hot terms stay under control."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 15
+tags: [search, sharding, partitioning, inverted-index]
+updated: "2026-09-15"
 ---
 
-## The problem
+## One machine runs out of RAM before the corpus does
 
-What breaks without this, and the situation that forces the decision.
+An inverted index wants postings in memory or on fast local disk for the terms that appear in queries (09.02 Inverted Index And Posting Lists). A corpus of tens of millions of documents with rich fields does not fit that budget forever. Vertical growth buys time; it does not buy a second copy of the index for availability, and it does not parallelize a query that has to scan a long posting list. Sharding is how search systems split the index so each node owns a slice, queries fan out, and capacity grows with nodes rather than with a larger box.
 
-## How it works
+The trap is treating search sharding like OLTP sharding. Document-id ranges and hash partitions both work — but the query path always has to **merge** ranked candidates from every shard that might hold a match, which makes fan-out and per-shard latency first-class design constraints (02.12 Tail Latency), not afterthoughts.
 
-The mechanism, step by step.
+## Document shards versus term shards
 
-## Tradeoffs
+Two partitions show up in textbooks. Production search almost always picks one as the primary.
+
+| Strategy | What each shard owns | Query behavior | Pain point |
+| --- | --- | --- | --- |
+| Document-partitioned | A subset of documents; full postings for those docs | Fan out to all shards (or a routing subset), merge top-k | Hot documents and uneven doc sizes skew memory |
+| Term-partitioned | A subset of vocabulary terms | Route only to shards holding query terms | Multi-term queries need scatter-gather of partial postings; rebalance is brutal |
+
+**Document partitioning** is the default in Elasticsearch, Solr, and most managed search products: every shard is a self-contained mini-index over its documents. A query is broadcast (or sent to replicas of each shard), each shard returns a local top-k, and a coordinator merges scores. Term partitioning can reduce work for rare single-term queries, but conjunctions and phrase queries become distributed intersection problems. Prefer document partitioning unless you have a specialized reason and the operational muscle for term moves.
+
+## Routing, replicas, and what "shard" actually means
+
+A practical cluster has three layers people collapse into one word:
+
+1. **Primary shards** — the partition of the corpus. Number is often fixed at index creation; changing it means reindexing.
+2. **Replica shards** — copies of a primary for read throughput and availability. Fail a node; promote or serve from a replica.
+3. **Routing** — optional hash of a routing key (tenant id, customer id) so related documents land on the same shard and some queries can skip the full fan-out.
+
+Without routing, every search hits every primary (or one replica per primary). That is correct and expensive: p99 is dominated by the slowest shard. With routing, a tenant-scoped admin search can hit one shard; a global site search still fans out. Do not advertise routing as a free latency win for the public query box.
+
+<Callout type="warn">
+Choosing the primary shard count too low forces an early reindex when the corpus grows; choosing it absurdly high multiplies merge overhead and heap pressure for tiny shards. A defensible starting heuristic for many products is "enough primaries that each holds a comfortable memory footprint under peak posting size" — tens of GB per shard is a common ballpark in self-hosted clusters, not a universal law — then grow with replicas before you grow with primaries.
+</Callout>
+
+## Skew, hot terms, and rebalancing
+
+Even with hash-based document assignment, load is not equal. A celebrity product, a viral post, or a stopword-adjacent term with a huge posting list on one shard makes that node's CPU and GC the cluster p99. This is the search cousin of hot partitions (04.06 Hot Partitions): the symptom is one shard's queue depth climbing while others sit idle.
+
+Mitigations that actually ship:
+
+- **More replicas** on hot indices so reads spread, if the hotness is query-driven.
+- **Index-time routing** that splits known heavy tenants across shards deliberately when one tenant would otherwise own a hotspot.
+- **Oversharding slightly** so rebalance and rolling restarts move smaller units — paid for with more file handles and merge work.
+- **Separate indices** by freshness or type (hot catalog vs. archival docs) instead of one mega-index, so operational load is isolated.
+
+Rebalancing after adding nodes is a bandwidth and I/O event. Plan it like a migration: throttle shard moves, watch search latency during the move, and never assume "the cluster will just absorb it" during a traffic peak.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Shard the index when"
+  againstTitle="Stay on fewer larger nodes when"
+  forItems={[
+    "The working set of postings no longer fits comfortably in one machine's memory and disk budget at acceptable query latency",
+    "Query QPS needs horizontal read scale via replicas, and a single primary cannot absorb the fan-in even with caching",
+    "Availability requires surviving a node loss without taking the whole corpus offline",
+    "Different tenants or indices have different SLOs and you can isolate them onto separate indices or routing groups",
+    "You are willing to operate merge-path complexity: fan-out, partial failures, and shard-level monitoring",
+  ]}
+  againstItems={[
+    "The corpus and QPS still fit one well-provisioned node with headroom, and a second node is only for a cold replica",
+    "Every query would still fan out to all shards, and the merge overhead would dominate any parallel speedup at current size",
+    "The team cannot yet staff shard-aware ops — rebalance, mapping changes, and split-brain during yellow/red cluster states",
+    "A simpler path is splitting by index (time-based or type-based) rather than hashing documents inside one index",
+    "You are about to pick a primary shard count you cannot change without a full reindex, and the growth story is still unknown",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Open with capacity, not with Elasticsearch vocabulary: "The inverted index has to be partitioned by document so each node holds a slice; queries fan out and a coordinator merges top-k." Mention replicas for reads and availability, and say why term-partitioning is usually the wrong default. When asked about skew, name hot documents and slow shards driving p99. When asked how you add capacity, distinguish "add replicas" (read scale) from "reindex with more primaries" (write/storage scale) — conflating those two is the most common interview stumble on this topic.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Search sharding exists because one machine cannot hold and serve the whole inverted index forever at a fixed latency budget",
+    "Document-partitioned shards are the production default; each shard is a mini-index and queries merge local top-k results",
+    "Term-partitioned indexes complicate multi-term queries and rebalancing; reach for them only with a specialized reason",
+    "Replicas buy read throughput and availability; changing primary shard count usually means a reindex",
+    "Cluster p99 follows the slowest shard — hot documents and uneven postings are the search form of hot partitions",
+    "Routing can limit fan-out for scoped queries but does not remove broadcast cost from global search",
+  ]}
+/>

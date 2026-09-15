@@ -1,0 +1,137 @@
+---
+title: "LFU Cache"
+number: "02.30"
+summary: "LRU tracks recency only; LFU buckets keys by hit count and evicts from the least-frequent, oldest bucket."
+status: published
+free: true
+difficulty: deep
+estMinutes: 22
+tags: [design, hash-map, linked-list]
+updated: "2026-09-15"
+---
+
+## LRU evicts the stale — LFU evicts the unpopular
+
+Design an LFU cache: `get` and `put` in O(1), evict the **least frequently used** key on overflow; tie-break by **least recently used** among tied frequencies. Capacity up to 10⁴; operations up to 10⁵.
+
+LRU (02.29) drops whatever has not been touched longest — a one-time scan evicts a hot key that happened to sit idle. LFU keeps a key that has been accessed 10⁴ times over one touched twice, even if the frequent key was not the very last get. Tracking frequency per key is O(1) with a map, but finding the minimum frequency key is O(n) if you scan — you need **frequency buckets**: each freq maps to a doubly linked list of keys at that freq, plus a `minFreq` pointer.
+
+## Three maps and bucket lists
+
+Structures:
+
+- `keyMap: key → {value, freq, nodeRef}` — O(1) lookup and freq read.
+- `freqMap: freq → DoublyLinkedList of keys` — all keys sharing that count; MRU at head for tie-break eviction from tail.
+- `minFreq` — lowest frequency present; updated on insert (always 1) and when the minFreq bucket empties after eviction or promotion.
+
+**get(key):** bump freq: remove key from `freqMap[oldFreq]`, append to `freqMap[oldFreq+1]`, update minFreq if old bucket empty and oldFreq was min.
+
+**put(key, value):** if exists, update value and treat as get bump. Else insert at freq 1; if over capacity, evict tail of `freqMap[minFreq]`, then set minFreq = 1 for new key.
+
+<Steps>
+<Step title="get — increment frequency">
+  Remove from old freq list, push front of new freq list, fix minFreq.
+</Step>
+<Step title="put new — seed at freq 1">
+  Insert at head of freq 1 list; evict LRU in minFreq bucket if full.
+</Step>
+<Step title="put existing — update value + bump freq">
+  Same as get after assigning new value.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+class LFUCache {
+  private capacity: number;
+  private minFreq = 0;
+  private keyMap = new Map<number, { value: number; freq: number }>();
+  private freqMap = new Map<number, Map<number, true>>(); // freq -> key set (insertion order)
+
+  constructor(capacity: number) {
+    this.capacity = capacity;
+  }
+
+  get(key: number): number {
+    if (!this.keyMap.has(key)) return -1;
+    this.touch(key);
+    return this.keyMap.get(key)!.value;
+  }
+
+  put(key: number, value: number): void {
+    if (this.capacity === 0) return;
+    if (this.keyMap.has(key)) {
+      this.keyMap.get(key)!.value = value;
+      this.touch(key);
+      return;
+    }
+    if (this.keyMap.size >= this.capacity) {
+      const minBucket = this.freqMap.get(this.minFreq)!;
+      const evictKey = minBucket.keys().next().value as number;
+      minBucket.delete(evictKey);
+      if (minBucket.size === 0) this.freqMap.delete(this.minFreq);
+      this.keyMap.delete(evictKey);
+    }
+    this.keyMap.set(key, { value, freq: 1 });
+    if (!this.freqMap.has(1)) this.freqMap.set(1, new Map());
+    this.freqMap.get(1)!.set(key, true);
+    this.minFreq = 1;
+  }
+
+  private touch(key: number): void {
+    const entry = this.keyMap.get(key)!;
+    const f = entry.freq;
+    this.freqMap.get(f)!.delete(key);
+    if (this.freqMap.get(f)!.size === 0 && f === this.minFreq) this.minFreq++;
+    entry.freq++;
+    const nf = entry.freq;
+    if (!this.freqMap.has(nf)) this.freqMap.set(nf, new Map());
+    this.freqMap.get(nf)!.set(key, true); // re-insert at end for LRU tie-break
+  }
+}
+```
+
+JavaScript `Map` preserves insertion order — delete and re-insert moves key to MRU end; evict `keys().next()` for LRU among min freq. Time **O(1)** average per op. Space **O(capacity)**.
+
+<Callout type="gotcha">
+Production LFU often uses approximate counters (Redis LFU) because exact per-key freq at billions of keys is expensive. LeetCode expects exact integer frequencies with LRU tie-break within each bucket.
+</Callout>
+
+<Tradeoff
+  forTitle="LFU when"
+  againstTitle="LRU when"
+  forItems={[
+    "Repeatedly accessed keys should survive one-off bursts that touch many cold keys once",
+    "Workload has hot set plus long tail — protect the hot set from scan pollution",
+    "Eviction policy spec explicitly says least frequently used with LRU tie-break",
+    "Cache serves read-heavy skewed distribution (CDN, database buffer pool patterns)",
+    "One-time sequential scan should not displace a key with thousands of hits",
+  ]}
+  againstItems={[
+    "Recency alone predicts future use — LRU is simpler and often as good (02.29)",
+    "Frequency counters need extra bookkeeping — three structures vs two for LRU",
+    "New entries start at freq 1 and die quickly — some LFU variants use aging or window LFU",
+    "Implementation time in interview is tight — LRU is the default recommendation unless LFU is named",
+    "Access pattern is uniformly random — no policy wins predictably",
+  ]}
+/>
+
+## In an interview
+
+Contrast with 02.29 LRU in one sentence: LRU evicts last touch time; LFU evicts lowest hit count, LRU among ties.
+
+Draw freq buckets `{1: [A,B], 2: [C]}` and show get(A) moving A to freq 2. Explain `minFreq`: only increases when the min bucket empties without a new freq-1 insert resetting it to 1.
+
+Proactive bug: incrementing freq without removing from old bucket — double membership. Another: forgetting to reset `minFreq = 1` on every new key insert.
+
+Follow-ups: cap frequency counter, time-decayed frequency, combine LFU with TTL.
+
+<KeyTakeaways items={[
+  "LFU evicts the least frequently used key; ties break by least recently used within that frequency.",
+  "keyMap stores value and freq; freqMap maps frequency → collection of keys at that count.",
+  "minFreq tracks the current minimum frequency present — bump it only when the min bucket empties.",
+  "get and put on existing keys increment freq: remove from old bucket, add to new (MRU side).",
+  "New keys enter at freq 1 and reset minFreq to 1 — they are eviction candidates until accessed again.",
+  "More moving parts than 02.29 LRU; reach for LFU when the problem names frequency or hot-set protection explicitly.",
+]} />

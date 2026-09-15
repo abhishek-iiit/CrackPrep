@@ -1,0 +1,123 @@
+---
+title: "Kth Largest Element in an Array"
+number: "02.26"
+summary: "Full sort finds one order statistic in O(n log n); a size-k min-heap or quickselect targets only the kth rank."
+status: published
+free: true
+difficulty: core
+estMinutes: 14
+tags: [heap, quickselect, array]
+updated: "2026-09-15"
+---
+
+## Full sort is overkill for one rank
+
+Return the kth largest element in an unsorted array. k is valid (1-indexed from largest). n up to 10⁵.
+
+Sorting descending and indexing `[k-1]` is O(n log n) — passes on LeetCode, but the question is about **selection**, not sorting. When k is 1 you want the max in O(n); when k is n you want the min. A heap of size k or quickselect adapts to k instead of paying log n factor on the entire array.
+
+Note: "kth largest" is not the same as the kth index in ascending sorted order. For `[3,2,1,5,6,4], k=2`, the answer is 5 (largest is 6, second largest is 5).
+
+## Min-heap of size k
+
+Scan the array. Maintain a min-heap of at most k elements (smallest of the current top-k at root). For each value:
+
+- If heap size < k, push.
+- Else if value > root, pop root and push value.
+- Else skip.
+
+After the scan, the root is the kth largest — the smallest among the k biggest survivors.
+
+Quickselect alternative: partition around a pivot (like quicksort) but recurse only into the half containing the kth rank. Average **O(n)**, worst **O(n²)** without random pivot — mention it, heap is safer under interview time pressure.
+
+<Steps>
+<Step title="Initialize empty min-heap">
+  Heap compares numeric value — smallest at top.
+</Step>
+<Step title="For each num in nums">
+  Push if room; else replace root only when num is larger.
+</Step>
+<Step title="Return heap root">
+  Root is the kth largest element.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function findKthLargest(nums: number[], k: number): number {
+  const heap: number[] = [];
+
+  const push = (v: number) => {
+    heap.push(v);
+    let i = heap.length - 1;
+    while (i > 0) {
+      const p = (i - 1) >> 1;
+      if (heap[p] <= heap[i]) break;
+      [heap[p], heap[i]] = [heap[i], heap[p]];
+      i = p;
+    }
+  };
+
+  const popMin = (): number => {
+    const top = heap[0];
+    heap[0] = heap.pop()!;
+    let i = 0;
+    while (true) {
+      let s = i, l = 2 * i + 1, r = l + 1;
+      if (l < heap.length && heap[l] < heap[s]) s = l;
+      if (r < heap.length && heap[r] < heap[s]) s = r;
+      if (s === i) break;
+      [heap[i], heap[s]] = [heap[s], heap[i]];
+      i = s;
+    }
+    return top;
+  };
+
+  for (const num of nums) {
+    push(num);
+    if (heap.length > k) popMin();
+  }
+  return heap[0];
+}
+```
+
+Time **O(n log k)**, space **O(k)**. Quickselect: average **O(n)**, space **O(1)** if in-place.
+
+<Tradeoff
+  forTitle="Min-heap of size k when"
+  againstTitle="Quickselect when"
+  forItems={[
+    "k is small relative to n — log k is tiny and worst case is predictable O(n log k)",
+    "You want to avoid O(n²) pivot pathologies without randomization discussion",
+    "Data streams — heap merges naturally as new elements arrive",
+    "Implementation clarity under time pressure — heap logic is mechanical",
+    "Follow-up asks for top k largest elements — same heap, return all k",
+  ]}
+  againstItems={[
+    "Average O(n) is required and in-place mutation is allowed — quickselect wins",
+    "k is close to n — heap holds almost everything; sort may be simpler",
+    "k = 1 or k = n — single pass max/min is O(n) with no heap",
+    "Memory must be O(1) beyond input — in-place quickselect",
+    "Array is small — sort in O(n log n) is fine and readable",
+  ]}
+/>
+
+## In an interview
+
+Example: `[3,2,3,1,2,4,5,5,6], k=4` → 4. Clarify k is 1-indexed from largest, duplicates count separately.
+
+State both approaches; default to heap unless interviewer pushes for O(n) average. Explain the heap invariant: root is the **weakest** member of the current top-k club.
+
+Proactive bug: using a max-heap of size k and keeping the largest k — you evict the wrong end. You need **min-heap** so the root is the kth largest candidate to evict. Another: off-by-one on k vs zero-indexed sort position.
+
+Follow-ups: kth smallest (max-heap of size k or index n-k), streaming kth largest, 02.24 top k frequent.
+
+<KeyTakeaways items={[
+  "Kth largest equals the smallest element among the k largest — maintain those k in a min-heap.",
+  "Heap size stays at k; each new element compares only against the root.",
+  "Time O(n log k), space O(k) — better than full sort when k ≪ n.",
+  "Quickselect achieves O(n) average by partitioning like quicksort but recursing into one side only.",
+  "Duplicates matter: [3,3,3], k=2 returns 3, not a unique-value concept.",
+  "Same selection pattern as 02.24 Top K Frequent, but keyed on raw value instead of frequency.",
+]} />

@@ -1,32 +1,106 @@
 ---
 title: "DAG Workflow Orchestration"
 number: "08.07"
-summary: "DAG Workflow Orchestration — notes in progress."
-status: draft
+summary: "How a scheduler turns a graph of dependent tasks into per-step retries and backfillable runs, and why the acyclic constraint is the whole point."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: deep
+estMinutes: 20
+tags: [orchestration, dag, scheduling, retries]
+updated: "2026-09-15"
 ---
 
-## The problem
+## One failed step should not mean rerunning the other nine
 
-What breaks without this, and the situation that forces the decision.
+A plain task queue (08.01, 08.02) hands out independent units of work. Each message stands alone; a worker does it or it goes back in the queue. Real pipelines are rarely that flat. A report has to pull data before it can transform it, and transform it before it can load it. A media job has to transcode a video before it can generate thumbnails from the transcoded output. Model that as one queue message doing all three steps inline, and a failure at step three means retrying steps one and two as well — wasted work at best, and a real bug if step one already called a billing API and calling it twice charges the customer twice.
 
-## How it works
+Model it instead as three separate messages, and now something has to know they're related and enforce the order — nothing about a flat queue expresses "not yet." That something is a directed acyclic graph: nodes are tasks, edges mean "must finish successfully before this one starts." Directed, because order matters — extract has to precede transform. Acyclic, because a cycle can never resolve: a task inside a cycle never has all of its upstream dependencies satisfied, so the run doesn't error, it just never progresses. Nothing crashes. Nothing logs a failure. A dashboard just shows a run that has been "in progress" for six hours with zero tasks moving.
 
-The mechanism, step by step.
+## The pieces
 
-## Tradeoffs
+- **DAG definition** — the graph itself, usually declared in code or config, parsed and validated (including a check that no cycle exists) before it's accepted rather than discovered at run time.
+- **Task instance** — one concrete attempt to run one task for one run of the DAG, carrying its own state: queued, running, success, failed, retrying, upstream_failed, skipped.
+- **Scheduler** — the component that walks the graph, decides which task instances are ready (every upstream dependency already terminal in success), and hands them off.
+- **Executor** — actually runs the task, frequently by handing it to a plain task queue underneath (08.02), so the orchestration layer stays about ordering and the execution layer stays about running code.
+- **Logical date** — the date or interval a run represents, kept separate from the wall-clock moment it actually executes. This one field is what makes backfill possible at all.
+
+## The run lifecycle
+
+<Steps>
+  <Step title="A run is created for a schedule interval">
+    The scheduler creates a DAG run tied to a logical date or window — "the 2026-09-14 daily run" — rather than to the moment it happens to execute. A run triggered late, or re-triggered days afterward, still represents that same interval.
+  </Step>
+  <Step title="The scheduler computes what's ready">
+    A topological walk finds every task instance whose upstream dependencies are already terminal in success. At the start of a run, that's the graph's root tasks — the ones with no dependencies at all.
+  </Step>
+  <Step title="Ready tasks are dispatched to the executor">
+    Queued task instances go to workers, often through a plain task queue underneath the DAG layer, so the graph-walking logic never has to know how a task is actually run.
+  </Step>
+  <Step title="A task finishes and the graph re-evaluates">
+    Success unblocks the task's direct downstream dependents. A permanent failure marks direct downstream tasks upstream_failed instead of running them against missing or partial input — an explicit terminal state rather than a task quietly executing on incomplete data.
+  </Step>
+  <Step title="Retries happen at the task grain">
+    A transient failure — a flaky API call, a lock timeout — retries per that task's own policy (attempt count, backoff), without touching any task that already succeeded. This, not the graph itself, is the actual payoff over one monolithic job.
+  </Step>
+  <Step title="The run completes when nothing more can become ready">
+    Either every task succeeded, or the only remaining tasks are permanently blocked by an upstream failure — there's no third outcome.
+  </Step>
+</Steps>
+
+## Backfill is why "execution date" is a separate field
+
+Because a run is keyed by a logical date rather than by when it happened to execute, you can create new runs for a range of past logical dates and let the scheduler execute them exactly as if they'd run on time — reprocessing three months of data after fixing a bug in the transform step, with no special replay code path, just more runs. This only works if tasks are idempotent with respect to their logical date — overwrite the partition for that date, don't append to it — which is the same idempotency requirement that makes ordinary retries safe. A backfill is, mechanically, a retry with an older logical date attached.
+
+<Callout type="gotcha">
+An accidental cycle in a DAG definition is not a runtime error. It is a run that queues forever with every task waiting on a dependency that can never complete, because completing it would require the cycle to have already finished. Nothing in the task itself is wrong, so nothing about it looks like a bug from inside any single task's logs. The only real fix is validating that the graph is acyclic at definition time, before a run is ever created from it — not trying to detect a stall after the fact.
+</Callout>
+
+## Where orchestration actually breaks
+
+The scheduler itself can become the bottleneck. Most implementations poll a shared metadata database to decide what's ready, and running more than one scheduler replica against that same table risks two schedulers both deciding to dispatch the same ready task — the same claim problem 08.06 Postgres SKIP LOCKED Work Queue solves for a plain job table, but here it's usually resolved by keeping exactly one active scheduler via leader election (06.07 Leader Election) rather than letting several race.
+
+Workers die mid-task without reporting failure, leaving a "zombie" task instance that looks like it's still running when it isn't. The scheduler needs a heartbeat or timeout to notice and requeue it — the same visibility-timeout idea as a crashed queue worker, and the same underlying mechanism as a lease expiring (06.08 Distributed Locks And Leases).
+
+A task that unblocks a wide fan-out — one upstream success releasing ten thousand downstream task instances at once — can flood the executor the instant it succeeds. Pacing the dispatch rather than releasing everything simultaneously is a direct application of 02.11 Backpressure to the scheduler's own dispatch loop.
+
+| | Flat task queue | DAG orchestrator |
+| --- | --- | --- |
+| Dependency expression | None — every message is independent | Explicit edges; a task only becomes ready when its upstreams succeed |
+| Retry grain | Whatever unit was enqueued, often the whole job | Per task instance, without touching upstream successes |
+| Historical reprocessing | A one-off script, hand-rolled each time | Backfill: new runs for past logical dates, same code path |
+| Operational overhead | A queue and workers | A queue and workers, plus a scheduler, a metadata store, and DAG validation |
+| Best fit | Independent units of work with no ordering | Multi-step pipelines with real dependencies between steps |
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Reach for DAG orchestration when"
+  againstTitle="A flat queue is enough when"
+  forItems={[
+    "Tasks have genuine dependencies — step three needs step two's output — and a flat queue has no way to express 'not yet'",
+    "A failure in one step should only retry that step, especially when earlier steps have side effects that aren't safe to repeat",
+    "Historical reprocessing is a real, recurring requirement — fixing months of past runs after a bug fix — rather than a one-off script",
+    "Multiple teams contribute steps to the same pipeline and need to see which specific step is late or failing, not just that 'the job' is late",
+    "The workflow runs for minutes to hours end to end, so scheduling overhead measured in seconds is irrelevant next to task runtimes themselves",
+  ]}
+  againstItems={[
+    "Tasks are actually independent — no task's output feeds another — so ordering machinery buys nothing",
+    "Latency matters at the sub-second scale; DAG schedulers evaluate on a polling cadence, not instantly, so they fit batch and pipeline work rather than request-path work",
+    "The workflow is small and linear enough that a short chain of queue messages, each triggering the next, is easier to operate than a scheduler and a metadata store",
+    "Nobody needs to replay historical runs, so the logical-date and backfill machinery is complexity with no payoff",
+    "No one on the team wants to own a second, stateful control-plane service — an orchestrator is real infrastructure, not a library import",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Name it by the retry grain, not the acronym: "Each of these steps can fail independently, and I don't want a failure in step three to force replaying steps one and two — especially since step one calls a billing API — so I'd model this as a DAG with per-task retries rather than one long job." Backfill is the feature most candidates underuse; naming it as the reason logical date is a separate field from execution timestamp reads as real experience rather than vocabulary. Name the failure mode before being asked: an accidental cycle doesn't throw an error, it hangs a run forever with no task ever becoming ready, which is why DAG validation happens at definition time and not after a run stalls.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "A DAG expresses dependencies a flat queue can't — edges mean 'must succeed before this starts', and the graph must be acyclic or some task can never become ready",
+    "Retries happen per task instance, not per pipeline, so a transient failure in one step never forces replaying steps that already succeeded",
+    "Logical date is kept separate from wall-clock execution time specifically so a run can be recreated for a past interval — that separation is what backfill actually is",
+    "An accidental cycle is a silent failure mode, not a runtime error: the run stalls with no task ever satisfying its dependencies, which is why cycles are validated for at definition time",
+    "The scheduler itself needs to avoid double-dispatching the same ready task across replicas, usually solved with a single active scheduler via leader election rather than several racing schedulers",
+    "Tasks must be idempotent with respect to their logical date, because both retries and backfills are just the same task instance executing again",
+  ]}
+/>

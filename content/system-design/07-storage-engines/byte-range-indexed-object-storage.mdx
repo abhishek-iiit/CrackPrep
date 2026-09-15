@@ -1,32 +1,105 @@
 ---
 title: "Byte-Range Indexed Object Storage"
 number: "07.05"
-summary: "Byte-Range Indexed Object Storage — notes in progress."
-status: draft
+summary: "How an exact offset and length turn a blob in object storage into addressable records — and why Range GETs only pay off when the index is already in memory."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 14
+tags: [storage, object-storage, indexing, byte-range]
+updated: "2026-09-15"
 ---
 
-## The problem
+## An object is a bag of bytes until something names a slice of it
 
-What breaks without this, and the situation that forces the decision.
+Object storage is excellent at one thing: hold a large, immutable blob under a key and hand it back. What it does not do is know that bytes 4,192 through 4,511 inside that blob are "the current value for user 42." Without an external index that maps logical keys to byte positions, every read is "download the whole object and search," which is fine for a photo and catastrophic for a multi-gigabyte append log of key-value records.
 
-## How it works
+07.03 File-Backed Dictionary Storage Engine already made the local-disk version of this argument: keep an in-memory map from key to location, seek, read. On object storage the same idea shows up with different verbs. There is no `seek()` into an S3 object the way there is into a file descriptor. There is a **Range GET** — an HTTP request that asks for bytes `[offset, offset+length)` of a named object — and the index has to supply both numbers before that request is issued. Miss either one and you are back to fetching the whole object.
 
-The mechanism, step by step.
+That is byte-range indexed object storage: durable data lives as large immutable objects; an exact index of `(object id, offset, length)` turns point reads into sized range fetches; nothing inside an object is ever edited after it is written.
 
-## Tradeoffs
+## What the index actually stores
+
+For every live key the index holds at least three fields, and usually a fourth for integrity or versioning:
+
+```text
+key → {
+  object_id   // which blob holds the current value
+  offset      // byte start of the record inside that blob
+  length      // how many bytes to fetch
+  checksum?   // optional: verify the slice after download
+}
+```
+
+The record layout itself is the length-prefixed binary shape from 07.04 Custom Binary File Format — crc, sizes, key, value — so a reader that has already fetched exactly `length` bytes can parse and validate without scanning for a delimiter. The index does not store the value. It stores an address into a blob that does.
+
+<Steps>
+  <Step title="Append the record to the active object">
+    Serialize the write and append it at the current end of whichever object is open for writes. Object stores rarely support true append-in-place the way a local file does, so in practice "append" means buffering a segment locally and uploading it as a new immutable object when it fills, or writing through an append-friendly stream layer that still materialises as immutable objects. Either way the durable unit is an object that will never be patched afterward.
+  </Step>
+  <Step title="Record the exact byte range in the index">
+    Once the bytes have a known offset inside a known object id, update the key's index entry to that triple. An overwrite of an existing key does not edit the old bytes — it points the index at a newer range and leaves the old one unreachable, exactly as an append-only local engine does.
+  </Step>
+  <Step title="Serve a read with one Range GET">
+    Look up the key in the index. A miss ends in memory with no object-store call. A hit issues `GET object_id` with `Range: bytes=offset-(offset+length-1)`, downloads only that slice, verifies the checksum if present, and returns the value.
+  </Step>
+  <Step title="Treat tombstones as index removals, not object edits">
+    A delete appends a tombstone record (or simply drops the index entry) and stops pointing at the old range. The old bytes remain inside the object until a merge or compaction rewrites live keys into fresh objects and drops the dead ones — the same space-reclamation problem Bitcask solves with merge (07.08) and LSM engines solve with compaction (07.12).
+  </Step>
+</Steps>
+
+## Why the range has to be exact, and what "exact" costs
+
+A Range GET that overshoots is still a win over downloading the whole object, but the design's real promise is **one sized fetch per point read**. That promise only holds if the index is authoritative about both ends of the interval. Approximate locations — "somewhere in this 64 MiB block" — force you to download a block and search inside it, which is closer to an SSTable sparse-index read (07.11) than to Bitcask's one-seek path. Byte-range indexing, in the sense this lesson means it, is the Bitcask end of that spectrum applied to object storage: exact offset, exact length, one range request.
+
+That exactness has the same bill Bitcask has. The index must be complete and resident (or at least as fast as memory) for every live key, because a cold index lookup before every Range GET turns the "cheap range fetch" into "round trip to the metadata store plus round trip to the object." For workloads with bounded key cardinality this is fine; for billions of small keys the index becomes the scaling limit long before object storage capacity does — call it tens of bytes per key as a ballpark for a compact entry, so a billion keys is tens of gigabytes of index that has to live somewhere hot. When that stops fitting, the design migrates toward sparse, on-disk indexes and Bloom filters rather than exact per-key offsets, which is the conversation that leads into 07.09 LSM Tree Storage Engine.
+
+<Callout type="gotcha">
+Object-store Range GET latency is not local-disk seek latency. A local Bitcask read is one device seek measured in tens or hundreds of microseconds on SSD. A Range GET is an HTTPS round trip to a remote service — typically single-digit to tens of milliseconds depending on region and client placement — before the first byte arrives. The amplification math still works (fetch 200 bytes instead of 2 GiB), but the constant in front of "one I/O" is a network RTT, not a disk seek. Designs that copy Bitcask's "one fetch per read" slogan onto object storage without pricing that RTT discover that p99 is dominated by the network, not by how clever the index is.
+</Callout>
+
+## What this buys relative to "one object per key"
+
+Storing each value as its own object is the naive alternative: key maps to object name, GET the whole object, done. It works until the key count is large. Object stores charge and rate-limit on request count as much as on bytes; millions of tiny objects thrash listing, inflate metadata, and make lifecycle policies and inventory expensive. Packing many records into fewer large objects, then addressing them by byte range, collapses request volume and keeps objects in the size band object stores are actually tuned for — tens of megabytes to low gigabytes per object is a common working range, order-of-magnitude, not a vendor SLA.
+
+| Approach | Point read | Write pattern | Metadata / request cost |
+| --- | --- | --- | --- |
+| One object per key | Full GET of one small object | PUT per write | High object count; listing and lifecycle hurt |
+| Whole-object download + scan | Download entire blob, search | Append or rewrite whole blob | Cheap object count; unusable read cost |
+| Byte-range index into packed objects | One Range GET of exact length | Append into large objects; index updated in place (in memory / metadata DB) | Low object count; index size tracks key cardinality |
+
+The middle row is what you get if you pack records without an index. The bottom row is this lesson. The top row is what you leave behind once packing pays for itself.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Use byte-range indexing into packed objects when"
+  againstTitle="Prefer one object per key or a different engine when"
+  forItems={[
+    "Values are small or medium and key cardinality would explode object count if each value were its own object",
+    "Point reads by exact key dominate, and you can keep an exact (object, offset, length) index hot",
+    "Writes are append-friendly — new versions land at the end of a segment object rather than patching bytes in the middle",
+    "You already pay object-store request costs and need to amortize them across many logical records per physical object",
+    "Immutability of objects is a given — you will reclaim space by rewriting live keys into new objects, not by editing old ones",
+  ]}
+  againstItems={[
+    "Key cardinality is too large for an exact hot index, and you need sparse on-disk indexes plus Bloom filters instead",
+    "Each value is already large enough that packing adds little — a video file or a multi-megabyte blob is already a natural object",
+    "The workload needs range scans over keys; an offset hash index has no key order to exploit",
+    "Per-read latency must stay in the local-disk microsecond band — remote Range GETs add a network RTT you cannot tune away",
+    "You need in-place updates inside a blob; object storage will not give you that, and faking it with rewrite-everything is the wrong tool",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Introduce it by the mismatch, not the API: "Object storage gives me immutable blobs and Range GETs; it does not give me key lookup. So I pack records into large objects and keep an exact in-memory — or metadata-DB — map from key to (object, offset, length), and every point read is one sized Range GET." Then name the two costs before being asked: the index must track every live key, so it scales with cardinality the way Bitcask's keydir does; and each read pays a network RTT, not a local seek. If the interviewer asks what happens when the index no longer fits, the answer is to stop promising exact offsets for every key and move to sparse indexes and filters — which is the LSM read path in 07.11.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Byte-range indexed object storage packs many records into large immutable objects and addresses each live value with an exact (object id, offset, length) triple",
+    "A point read becomes one Range GET of known length; a miss can be answered from the index without touching object storage at all",
+    "Objects are never patched — overwrites and deletes retarget the index and leave old bytes until a merge rewrites live data into fresh objects",
+    "The index size tracks key cardinality, not value size, and must stay hot or every read pays a metadata round trip before the Range GET",
+    "Remote Range GET latency is a network RTT, not a local disk seek — the amplification win is real, but the constant factor is different from Bitcask on local SSD",
+    "When an exact per-key offset index no longer fits, the design graduates to sparse indexes and Bloom filters — the same trade Bitcask gives up to become an LSM tree",
+  ]}
+/>

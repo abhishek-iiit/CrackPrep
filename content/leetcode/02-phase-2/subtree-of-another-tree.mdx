@@ -1,0 +1,109 @@
+---
+title: "Subtree of Another Tree"
+number: "02.16"
+summary: "Walk main tree nodes; at each candidate root, run the full same-tree check from 02.11."
+status: published
+free: true
+difficulty: core
+estMinutes: 12
+tags: [binary-tree, dfs, recursion]
+updated: "2026-09-15"
+---
+
+## Is subRoot embedded anywhere in root?
+
+Given roots `root` and `subRoot`, return whether there is a node in `root` such that the subtree below it is structurally identical to `subRoot` with matching values. A subtree includes the node and all descendants.
+
+Example: `root = [3,4,5,1,2], subRoot = [4,1,2]` → true (the subtree rooted at 4 matches). Same values in a different shape → false.
+
+Brute force: at every node of `root`, run the 02.11 Same Tree check against `subRoot`. If `root` has n nodes and `subRoot` has m nodes, worst case is **O(n × m)** — acceptable when m ≪ n or trees are small; on worst-case equal-size trees that is O(n²).
+
+You cannot solve this with a single simultaneous walk unless you add hashing — KMP on tree traversals exists but is overkill here. The interview pattern is **reuse** the equality test you already know.
+
+## DFS on main tree, same-tree at each stop
+
+Traverse `root` (preorder, inorder, any order that visits every node). At each node, if `isSameTree(node, subRoot)` return true. If any call succeeds, short-circuit true; if the full walk finishes, false.
+
+Edge cases: `subRoot` null is typically true (empty subtree everywhere); `root` null with non-null `subRoot` is false. Duplicate values across `root` mean you cannot stop at the first value match — shape must match too.
+
+<Steps>
+<Step title="Define isSameTree(a, b)">
+  Pairwise null checks, value equality, recurse left-left and right-right — from 02.11.
+</Step>
+<Step title="Define isSubtree(root, subRoot)">
+  If `isSameTree(root, subRoot)` return true. Recurse into left and right with OR short-circuit.
+</Step>
+</Steps>
+
+String trick: serialize both with null markers; check if sub's serialization is a substring of root's. Works but hides structure and needs a delimiter that cannot appear in values — DFS reuse is clearer in interviews.
+
+## Solution
+
+```ts
+class TreeNode {
+  val: number;
+  left: TreeNode | null;
+  right: TreeNode | null;
+  constructor(val?: number, left?: TreeNode | null, right?: TreeNode | null) {
+    this.val = val ?? 0;
+    this.left = left ?? null;
+    this.right = right ?? null;
+  }
+}
+
+function isSubtree(root: TreeNode | null, subRoot: TreeNode | null): boolean {
+  if (subRoot === null) return true;
+  if (root === null) return false;
+
+  function same(a: TreeNode | null, b: TreeNode | null): boolean {
+    if (a === null && b === null) return true;
+    if (a === null || b === null) return false;
+    if (a.val !== b.val) return false;
+    return same(a.left, b.left) && same(a.right, b.right);
+  }
+
+  return (
+    same(root, subRoot) ||
+    isSubtree(root.left, subRoot) ||
+    isSubtree(root.right, subRoot)
+  );
+}
+```
+
+Time **O(n × m)** worst case. Space **O(h₁ + h₂)** stack from nested recursion.
+
+<Tradeoff
+  forTitle="DFS + same-tree at each node when"
+  againstTitle="Serialize and substring-match when"
+  forItems={[
+    "You already have 02.11 Same Tree — composition is fast to write and explain",
+    "m is much smaller than n — early matches may appear near the top",
+    "Values repeat — you need full structural check, not first value hit",
+    "Interview time favors clear recursion over rolling hash setup",
+    "Trees up to 10³–10⁴ nodes — O(n×m) passes on typical judges",
+  ]}
+  againstItems={[
+    "Many queries on the same large root — preprocess root serialization or hash",
+    "Worst-case identical chains force full comparison at every node — consider tree hashing",
+    "Delimiter collision risk if values are arbitrary strings in serialization",
+    "Interviewer asks for O(n) amortized — advanced: encode to Euler tour + KMP",
+    "subRoot is a path not a full subtree — different problem (path check only)",
+  ]}
+/>
+
+## In an interview
+
+Define "subtree" precisely: includes root of match and all descendants. Example where value 4 appears twice but only one location matches shape.
+
+Say: "I'll walk every node of the big tree; whenever values might align, I run the same-tree verifier." Mention OR short-circuit so you stop on first success.
+
+Bug: matching only values without structure; forgetting that an empty `subRoot` should be true. Follow-ups: count occurrences; weighted subtree sum match; stream edits to root and re-query.
+
+<KeyTakeaways items={[
+  "Subtree check = try 02.11 Same Tree at every node of the main tree.",
+  "Value equality at one node is insufficient — entire shapes must match.",
+  "Short-circuit on first successful same-tree call.",
+  "O(n×m) worst case, O(h) stack; good enough for standard constraints.",
+  "Serialization substring works but delimiter and null encoding must be bulletproof.",
+  "Empty subRoot is universally a subtree; non-empty subRoot in empty root is false.",
+]} />

@@ -1,32 +1,90 @@
 ---
 title: "Distributed Cache Design"
 number: "05.02"
-summary: "Distributed Cache Design — notes in progress."
-status: draft
+summary: "A shared remote cache that every application instance talks to — one copy of the cached truth, partitioned across nodes, with a network hop instead of fifty local copies."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 14
+tags: [caching, redis, sharding, memcached]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Fifty local caches are not one cache
 
-What breaks without this, and the situation that forces the decision.
+An application-local cache is fast — sub-microsecond, no network, no serialization. Put fifty instances behind a load balancer and you have fifty independent copies of whatever each one happened to load. A deploy empties all of them at once. An invalidation on instance twelve leaves the other forty-nine still serving the old value. A hot key is hot on every instance that has seen it, so you pay the memory cost fifty times for the same popular profile.
 
-## How it works
+A distributed cache exists to fix that topology: one shared remote store — Redis or Memcached, typically — that every application instance talks to over the network. Invalidation is a single write. Memory is spent once. A miss on one instance that another instance already filled is a hit for everyone. The price is a network round trip, usually around a millisecond on a local network — cheap next to a database query, expensive next to an in-process map. 05.01 Caching Layers places this tier in the stack; this lesson is about how the tier itself is built.
 
-The mechanism, step by step.
+## Placement: who owns which key
 
-## Tradeoffs
+A single cache node is a single point of failure and a single memory ceiling. Past a few tens of gigabytes of hot data, or past the availability you can tolerate from one process, you shard.
+
+The dominant placement strategy is consistent hashing: hash the key, walk a ring of virtual nodes, land on a physical cache node. When a node joins or leaves, only the keys that hashed near that node's positions move — roughly `1/N` of the keyspace for an `N`-node cluster, not a full reshuffle. 04.07 Consistent Hashing covers the ring mechanics; here what matters is the operational consequence. A naive `hash(key) % N` remaps almost every key when `N` changes, which turns a scale-out into a cluster-wide cache miss storm that lands on the database at once.
+
+Client libraries usually own the routing: the application hashes the key and opens a connection to the right shard. Proxy-based routing (Twemproxy, Envoy) sits in the middle instead, which simplifies clients at the cost of another hop and another thing that can fail. Either way, the application must treat the cache as a set of shards whose membership can change, not as a single hostname forever.
+
+| Topology | Memory ceiling | Failure blast radius | Key remapping on scale |
+| --- | --- | --- | --- |
+| One node | One machine's RAM | Total cache outage | None — there is nothing to remap |
+| `hash % N` shards | Sum of shards | One shard's keys | Nearly everything when N changes |
+| Consistent-hash ring | Sum of shards | One shard's keys (plus neighbors if replicas) | ~1/N of keys |
+| Replicated shards | Sum / replica factor | Survives a node loss for replicated keys | Same as the placement scheme underneath |
+
+Replication is a separate knob from sharding. A primary with async replicas lets a failover keep serving reads for keys that were replicated, at the cost of memory multiplied by the replica count and a window where a just-written key may not yet be on the replica you fail over to. Many production Redis deployments run Redis Cluster (hash slots, gossip, automatic failover) or a managed equivalent rather than hand-rolling the ring; the design decisions — slot count, replica factor, what happens on a slot migration — are the same ones whether you configure them yourself or a cloud product does.
+
+## What lives in the cache, and what does not
+
+A distributed cache is not a database with a short memory. It has no durable write-ahead log you can rely on for recovery after a crash (persistence options exist in Redis; treating them as your durability story is a different product). Values should be derived answers you can rebuild from the source of truth: a rendered profile JSON, a session blob with a short TTL, a precomputed feed page, a rate-limit counter that can reset on loss.
+
+Size the working set explicitly. If the hot set is 40 GB and you have 64 GB of cache RAM after OS and fragmentation overhead, you fit. If the hot set is 200 GB, you are designing an eviction problem, not a cache that "holds everything important" — 05.03 Cache Eviction Policies is what decides which 40 GB stay. Over-provisioning RAM "so nothing ever evicts" works until the working set grows; then eviction arrives as a surprise rather than a designed policy.
+
+Hot keys deserve their own sentence. A celebrity profile or a flash-sale inventory counter hashed to one shard can saturate that node's CPU and network while the rest of the cluster is idle. Mitigations are local: read replicas for that key, application-local caching in front of the distributed tier for the hottest keys only, or splitting the logical key into `N` random sub-keys and aggregating on read. The failure mode is not "the cache is slow" — it is one shard's p99 climbing while dashboards still show average cluster load as fine.
+
+<Callout type="gotcha">
+A cache miss is not free just because the cache is shared. Under a deploy, a failover, or a cold start after a flush, every instance misses together and the database sees a synchronized wave. Design the miss path — timeouts, concurrency limits, and whether a miss may stampede — as carefully as the hit path. 05.05 Cache Concurrency Control and 05.06 Cache Availability And Database Fallback cover the two halves of that story.
+</Callout>
+
+## Redis versus Memcached, at the design level
+
+Both are remote in-memory stores used as distributed caches. The interview-relevant differences are few and load-bearing:
+
+- **Data model.** Memcached is a pure key-value slab allocator. Redis adds structures — lists, sets, sorted sets, hashes, streams — which means counters, leaderboards, and session maps can live as native operations instead of read-modify-write of a blob.
+- **Persistence and replication.** Redis can snapshot or AOF and run replicas; Memcached is memory-only by design. If you need the cache to survive a restart with a warm set, that is a Redis conversation. If you treat every restart as a cold start and rebuild from the database, either works.
+- **Threading.** Classic Memcached is multi-threaded; Redis historically ran a single-threaded command loop (I/O threads help networking, not parallel command execution of arbitrary Lua). High connection counts and CPU-heavy commands behave differently under each model — a slow `KEYS *` or a big `SORT` on Redis stalls that shard for everyone.
+
+Pick the one whose data model matches the operations, then design sharding and failure the same way for both. "We use Redis" is not a design; "we shard by consistent hash over eight nodes with one replica each, treat loss of a shard as a partial miss storm, and bound miss concurrency at the client" is.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Use a distributed cache when"
+  againstTitle="Stay local or skip the cache when"
+  forItems={[
+    "Many application instances must share one view of cached data, and per-process copies would multiply memory or diverge on invalidation",
+    "The working set fits in a small cluster's RAM and is read far more often than it changes",
+    "Invalidation has to be one write visible to every instance, not a best-effort broadcast to fifty processes",
+    "A ~1 ms network hop is acceptable next to the database cost you are avoiding",
+    "You can name what happens on total cache loss — the database can absorb the miss rate, or you have a degradation plan",
+  ]}
+  againstItems={[
+    "A single process owns the traffic path and an in-process cache already hits hard enough without the operational cost of a fleet",
+    "The data must be durable across crashes — that is a database or a durable store, not a cache with optional persistence",
+    "Every read is unique or changes constantly, so the hit rate cannot pay for the network hop and the cluster",
+    "Correctness requires the source of truth on every read and a stale shared copy would be a bug, not a tradeoff",
+    "The team cannot yet operate sharding, failover, and hot-key incidents — adding the tier without the miss-path design just moves the outage",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Introduce the distributed cache by the problem local caches create: duplicated memory, divergent invalidation, cold deploys. Then place the keys — consistent hashing, what fraction moves on scale-out — and name the failure mode out loud: loss of a shard is a partial miss storm onto the database, not a clean 500 from the cache. Expect follow-ups on hot keys, Redis versus Memcached, and whether the cache is a soft dependency. The strongest answers treat the cluster topology and the miss path as part of the same design, not as an afterthought once "add Redis" is on the board.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "A distributed cache replaces per-process copies with one shared remote store so invalidation and memory are paid once, at the cost of a network hop",
+    "Shard with consistent hashing so scale-out remaps roughly 1/N of keys instead of nearly all of them under hash-modulo",
+    "Size for the hot working set; eviction and hot keys are design inputs, not surprises that appear after launch",
+    "Redis and Memcached differ mainly in data model, persistence options, and threading — the sharding and failure story is the same shape for both",
+    "A cold cache, a flush, or a lost shard turns into synchronized database load unless the miss path is bounded and designed",
+    "Say what the system does when the cache is gone before you draw the cache on the diagram",
+  ]}
+/>

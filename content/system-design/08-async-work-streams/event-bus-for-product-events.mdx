@@ -1,32 +1,88 @@
 ---
 title: "Event Bus For Product Events"
 number: "08.03"
-summary: "Event Bus For Product Events — notes in progress."
-status: draft
+summary: "How publishing a product fact once, instead of wiring every consumer into the producer, keeps an N-consumer system from becoming an N-times-M integration problem."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [event-bus, pub-sub, events, messaging]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The integration count that grows faster than the feature count
 
-What breaks without this, and the situation that forces the decision.
+When "user signed up" needs to trigger a welcome email, a CRM sync, a fraud check, and an analytics record, the naive approach makes the signup handler call all four, directly, in order. It works, until a fifth consumer shows up, and now the signup handler — code owned by the accounts team — has to import and call code owned by the growth team. The signup path's latency is now the sum of five systems' latencies, and its uptime is the intersection of five systems' uptimes: if the CRM sync is down, does signup fail too? Nobody decided that on purpose; it fell out of wiring things together directly.
 
-## How it works
+Multiply this across a product with a few dozen event types and a few dozen teams that each want to react to some subset of them, and the integration count grows roughly as producers times consumers — every new consumer touches every relevant producer's code, and every producer's on-call rotation inherits the failure modes of services it doesn't own.
 
-The mechanism, step by step.
+An event bus breaks the multiplication. A producer publishes one thing — "user signed up," with a defined shape — to a shared channel, once, and does not know or care who's listening. Consumers subscribe independently, add themselves without the producer's code ever changing, and a producer that goes quiet doesn't take any consumer down with it, because the two are no longer connected by a function call.
 
-## Tradeoffs
+## Publish once, let consumers show up independently
+
+Mechanically, this is the multi-consumer half of 08.02 Task Queue Vs Event Stream: a product event bus is usually implemented as a stream, precisely because "many independent consumers, some of which don't exist yet" is the stream's whole reason to exist.
+
+<Steps>
+  <Step title="The producer commits its own state change">
+    The signup handler writes the user row. This is unrelated to the event bus and has to succeed or fail on its own terms — a broken event bus should never be the reason a signup fails.
+  </Step>
+  <Step title="The producer publishes the event, matching a contract">
+    "user.signed_up" is published with a fixed shape — user id, signup timestamp, plan tier — described by an event contract, so every consumer can rely on what fields exist without reading the producer's source. 02.08 Event Contracts covers designing that shape so it can change later without breaking existing subscribers.
+  </Step>
+  <Step title="Each subscriber reads independently, at its own pace">
+    The welcome-email service, the fraud checker, and the analytics pipeline each hold their own position in the log. One falling behind — the fraud checker doing a slow external lookup — has no effect on how fast the welcome email goes out.
+  </Step>
+  <Step title="A new consumer subscribes without touching the producer">
+    Six months later, a recommendations team wants to seed a new user's cold-start profile from signup events. They add a new consumer group and start reading from whatever offset makes sense — from now on, or from the beginning of retained history. The signup handler is never touched.
+  </Step>
+</Steps>
+
+## The write that has to happen twice, safely
+
+The step that actually breaks in production is the seam between step one and step two: committing the user row and publishing the event are two separate writes to two separate systems, and a crash between them either loses the event (state changed, nobody told) or fires an event for a state change that then rolled back (told, but nothing changed). Neither is rare enough to ignore at real traffic.
+
+The standard fix is the outbox pattern: write the event into an outbox table in the same database transaction as the state change, so both commit atomically or neither does, and a separate process reads the outbox and publishes to the bus — reading the database's own replication log directly, change data capture, achieves the same guarantee without an explicit outbox table. Either way, the guarantee moves from "hope the two writes both happen" to "one atomic write, plus a publisher that retries until it succeeds," which is a much easier thing to reason about at 3am.
+
+The other real cost is fan-out amplification. One signup now causes N downstream systems to do work, where N is however many teams have subscribed — a number the accounts team, which owns the producer, has no visibility into and no way to budget for. A backfill or an incident replay that re-publishes a day of signup events doesn't cost the producer anything extra, but it multiplies into N times that load on every subscriber simultaneously, which is worth explicitly load-testing before relying on replay as a recovery tool.
+
+<Callout type="warn">
+Ordering is only guaranteed within whatever key you partition by — typically the entity id, so all of one user's events arrive in order relative to each other. It is not guaranteed across different users' events, and consumers that assume a global order across the whole bus will occasionally see them interleaved in a way that looks like a bug but is the bus working as designed.
+</Callout>
+
+Schema change is the other recurring failure mode. A producer renaming a field or changing its type breaks every subscriber that reads it, and because subscribers are decoupled by design, the producer team often has no list of who's affected. The discipline that prevents this is treating the event shape as a public contract — additive changes only, old fields kept until every known consumer has migrated, and a version marker on the event type when a real breaking change is unavoidable. 02.08 Event Contracts spells that discipline out in full; here it's enough to know that decoupling producers from consumers doesn't decouple them from each other's assumptions about the data.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Publish to a shared event bus when"
+  againstTitle="Keep a direct call or integration when"
+  forItems={[
+    "More than one or two consumers care about the same fact, or you expect that number to grow over the product's life",
+    "Consumers should be addable without the producer's code, deploy schedule, or on-call rotation being involved",
+    "The producer's own success must not depend on any consumer being available",
+    "You want new systems to be able to bootstrap from history instead of only from now on",
+    "The event represents something that happened, not an instruction only one system should carry out",
+  ]}
+  againstItems={[
+    "There is exactly one consumer today and no credible reason to expect a second",
+    "The caller needs a synchronous answer back — a bus is one-way and does not fit a request/response shape",
+    "The two systems are owned by the same team and a direct call is simpler to trace and debug than an asynchronous hop",
+    "You cannot yet solve the dual-write problem between the state change and the publish, so a direct call is more honest about the guarantee you actually have",
+    "The operational cost of running or subscribing to a bus — schema governance, offset monitoring, retention policy — outweighs a genuinely small, stable consumer list",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Introduce the bus by the coupling it removes, not by naming a product: "instead of the signup handler calling the CRM, the fraud check, and analytics directly, I'll have it publish one 'user signed up' event and let each of those subscribe independently — that way a slow fraud check can't add latency to signup, and a new consumer next quarter doesn't touch this code at all." Expect to be asked how the event actually gets published reliably, and answer with the outbox pattern rather than "the handler publishes it after saving" — that answer is where the dual-write bug lives, and naming it before being asked is the signal that you've hit this in practice.
 
-<KeyTakeaways items={["", "", ""]} />
+If asked what happens when a consumer needs a stronger guarantee than the bus gives — say, a payment step that cannot tolerate at-least-once delivery — say plainly that the bus is the wrong tool for that step, and it belongs on the synchronous path or behind an idempotency key, not bolted onto pub/sub because pub/sub is already there.
+
+<KeyTakeaways
+  items={[
+    "A shared event bus replaces N-times-M point-to-point integrations with one publish per producer and independent subscriptions per consumer",
+    "Producers should not know or care who is listening, which is what lets consumers be added later without touching the producer's code",
+    "Committing a state change and publishing its event are two separate writes; the outbox pattern (or change data capture) is what keeps them from disagreeing after a crash",
+    "Ordering is guaranteed only within a partition key, usually the entity id — not globally across the whole bus",
+    "Event shape is a public contract the moment more than one consumer depends on it, and breaking it silently breaks every subscriber the producer doesn't know about",
+    "A bus multiplies one producer action into N consumer reactions, which makes replay and backfill genuinely expensive operations, not free ones",
+  ]}
+/>

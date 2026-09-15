@@ -1,0 +1,112 @@
+---
+title: "Validate Binary Search Tree"
+number: "02.18"
+summary: "BST means every node sits inside open bounds passed down from ancestors — not just immediate children."
+status: published
+free: true
+difficulty: core
+estMinutes: 14
+tags: [binary-tree, bst, dfs]
+updated: "2026-09-15"
+---
+
+## Local order is not global order
+
+Determine whether a binary tree is a valid BST: for every node, all values in the left subtree are **strictly less** than the node's value and all values in the right subtree are **strictly greater**. LeetCode uses strict inequality — duplicates fail.
+
+Classic counterexample: `[5,1,4,null,null,3,6]`. Node 4 sits in the right child slot of root 5, but `4 < 5`, so 4 belongs in the left subtree of 5. Parent check `1 < 5` and `3 < 4` all pass locally — the violation is against an ancestor bound, not the immediate parent.
+
+The trap: checking only `left.val < node.val < right.val`. A deep node can violate an ancestor bound while satisfying its parent.
+
+Inorder traversal of a valid BST yields **strictly increasing** values — compare each node to the previous. That works in O(n) with O(h) stack. The bounds approach passes `(min, max)` down: at each node, `min < val < max`, left child gets `(min, val)`, right gets `(val, max)`. Use **open bounds** with `-Infinity`/`Infinity` or null sentinels; duplicates break strict BST unless you use `<=` on one side consistently.
+
+## Bounds DFS or inorder scan
+
+**Bounds:** recurse with valid range. Fail fast on first violation.
+
+**Inorder:** iterative or recursive inorder, track `prev`; if `node.val <= prev` (strict BST), return false.
+
+Both O(n) time, O(h) space.
+
+<Steps>
+<Step title="Choose strict bounds">
+  Left child max becomes current val; right child min becomes current val.
+</Step>
+<Step title="Check before recursing">
+  If val out of range, return false immediately.
+</Step>
+<Step title="Recurse both children with tightened bounds">
+  Null children skip — empty subtree is valid.
+</Step>
+</Steps>
+
+<Callout type="gotcha">
+  `[2, 2, 2]` fails strict validation — both children equal the root. If the problem allowed duplicates in left subtree only, the comparison operator changes; LeetCode 98 is strict.
+</Callout>
+
+## Solution
+
+```ts
+class TreeNode {
+  val: number;
+  left: TreeNode | null;
+  right: TreeNode | null;
+  constructor(val?: number, left?: TreeNode | null, right?: TreeNode | null) {
+    this.val = val ?? 0;
+    this.left = left ?? null;
+    this.right = right ?? null;
+  }
+}
+
+function isValidBST(root: TreeNode | null): boolean {
+  function validate(node: TreeNode | null, low: number, high: number): boolean {
+    if (node === null) return true;
+    if (node.val <= low || node.val >= high) return false;
+
+    return (
+      validate(node.left, low, node.val) &&
+      validate(node.right, node.val, high)
+    );
+  }
+
+  return validate(root, -Infinity, Infinity);
+}
+```
+
+Time **O(n)**. Space **O(h)** recursion stack.
+
+<Tradeoff
+  forTitle="Min/max bounds DFS when"
+  againstTitle="Inorder predecessor check when"
+  forItems={[
+    "You want to fail at the first out-of-range node without full sorted walk",
+    "Tree is skewed — inorder still O(n) but bounds mirror the BST definition directly",
+    "Follow-up asks where the violation is — bounds path records the offending node",
+    "Integer values may hit INT_MIN/INT_MAX — use null parent bound or long arithmetic in other languages",
+    "Same bounds pattern extends to insert/delete validation in a BST API",
+  ]}
+  againstItems={[
+    "You already implement iterative inorder for 02.19 — one pass reuses that machinery",
+    "Problem allows duplicates with non-strict left — inorder `<=` check is easier to tweak",
+    "You must return the sorted order anyway — inorder collects and validates at once",
+    "Morris traversal required for O(1) space — inorder threading, not bounds",
+    "Interviewer starts with 'check left and right child' — use their wrong answer to motivate bounds",
+  ]}
+/>
+
+## In an interview
+
+Draw the `[5,1,4,null,null,3,6]` counterexample where local checks pass at 4 but global placement under 5 fails. Confirm strict vs non-strict inequality.
+
+Say: "Each node must fall inside an open interval inherited from ancestors, not just beat its immediate children."
+
+Bug: using `node.val` as both bounds incorrectly (`<=` on wrong side); integer overflow when using min/max sentinel values in Java — in TypeScript `Infinity` is fine. Follow-ups: find the invalid node; validate with duplicates allowed on left; recover a BST by swapping two nodes.
+
+<KeyTakeaways items={[
+  "Valid BST requires every node to satisfy global bounds from all ancestors, not just parent comparisons.",
+  "Pass (low, high) down: left gets (low, node.val), right gets (node.val, high) for strict BST.",
+  "Inorder traversal must be strictly increasing — equivalent O(n) check.",
+  "Duplicates with strict inequality fail — [2,2,2] is invalid on LeetCode 98.",
+  "O(n) time, O(h) space; fail fast on first violation.",
+  "02.19 Kth Smallest and 02.20 LCA assume this property holds on the input.",
+]} />

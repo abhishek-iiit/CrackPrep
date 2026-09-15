@@ -1,0 +1,87 @@
+---
+title: "Sum of Two Integers"
+number: "01.11"
+summary: "Add without + or carry chains: XOR builds the sum bit-by-bit while AND-and-shift propagates carries until nothing is left."
+status: published
+free: true
+difficulty: core
+estMinutes: 12
+tags: [bit-manipulation, math]
+updated: "2026-09-15"
+---
+
+## Addition is two separate jobs
+
+Given two integers `a` and `b`, return their sum — but you cannot use `+` or `-`. The constraint is not about arithmetic being hard; it is about showing you understand what addition actually does at the bit level.
+
+At each bit position, two inputs produce a **sum bit** (0 if they differ, 1 if they agree) and a **carry out** (1 only when both are 1). Grade-school addition processes column by column, propagating carries leftward. That propagation is exactly what `+` hides from you. The interview wants the decomposition: compute sum bits and carry bits separately, then repeat until carries vanish.
+
+For `a = 5` (`101`) and `b = 3` (`011`): XOR gives `110` (partial sum, missing the carry into bit 2), AND-shift gives `010` (the carry). XOR again → `100`, carry → `100`. One more round → sum `1000` = 8. Three iterations for 3-bit numbers; at most 32 for 32-bit ints.
+
+## XOR for sum bits, AND-shift for carries
+
+**Invariant:** at each step, `a` holds the bits that are correct so far (sum without pending carries), and `b` holds carries still to propagate. When `b` becomes 0, `a` is the answer.
+
+- **XOR (`a ^ b`):** sum bits at every position, ignoring carries from lower bits.
+- **AND then left-shift (`(a & b) << 1`):** positions where both bits were 1 become carries in the next column.
+
+<Steps>
+<Step title="Save carries before overwriting">`carry = (a & b) << 1` — positions where both bits were 1 become carries in the next column.</Step>
+<Step title="XOR into partial sum">`a = a ^ b` — sum bits at every position, ignoring incoming carries.</Step>
+<Step title="Propagate carries">Set `b = carry` and repeat until `b === 0`. At most 32 rounds for 32-bit integers.</Step>
+</Steps>
+
+<Callout type="gotcha">
+JavaScript/TypeScript numbers are IEEE-754 doubles, but LeetCode treats inputs as **signed 32-bit integers** and expects a signed 32-bit result. After the loop, if you need strict 32-bit behavior on negative numbers, mask with `0xffffffff` and re-sign-extend — most accepted solutions on this problem skip that because test cases stay in the easy range, but mention it if the interviewer asks about `-1 + 1`.
+</Callout>
+
+## Solution
+
+```ts
+function getSum(a: number, b: number): number {
+  while (b !== 0) {
+    const carry = (a & b) << 1;
+    a = a ^ b;
+    b = carry;
+  }
+  return a;
+}
+```
+
+Time **O(1)** — bounded by word width (32 iterations max). Space **O(1)**.
+
+## Bit-parallel add versus built-in operators
+
+<Tradeoff
+  forTitle="Bit manipulation when"
+  againstTitle="Use + when"
+  forItems={[
+    "The prompt explicitly bans arithmetic operators — the pattern is the point",
+    "You are implementing hardware-style adders or understanding carry propagation",
+    "You need the same XOR/AND decomposition for other bit tricks (subtraction via two's complement)",
+    "Input fits in a fixed word size so iteration count is constant",
+  ]}
+  againstItems={[
+    "No operator ban — `a + b` is one instruction and correct for all edge cases",
+    "You are summing many values where a loop of bit-adds multiplies constant factors unnecessarily",
+    "Floating-point or BigInt semantics matter — bit tricks assume fixed-width integers",
+    "Readability beats showing off; production code should not reimplement addition",
+  ]}
+/>
+
+## In an interview
+
+Restate: sum two integers without `+` or `-`. Walk through `5 + 3` on paper — XOR gives partial sum, AND-shift gives carry, loop until carry is zero. Code the three-line loop. Mention that this mirrors a half-adder (XOR + AND) chained into a ripple-carry adder.
+
+Follow-ups: subtract without `-` (add the two's complement: `~b + 1` via the same loop), multiply without `*` (Russian peasant / shift-add), or "why does this terminate?" (carries move left and eventually fall off the top).
+
+The bug to name first: forgetting to shift the carry left — `(a & b)` without `<< 1` double-counts at the same bit position instead of propagating to the next.
+
+<KeyTakeaways items={[
+  "Addition splits into XOR (sum bits without carry) and AND-then-shift (carry bits); repeat until carry is zero.",
+  "The loop invariant is: `a` is the correct sum so far, `b` is pending carries — when `b` hits 0, you are done.",
+  "Complexity is O(1) in word size: at most 32 iterations for 32-bit integers, not O(log n) in the magnitude of the numbers.",
+  "This is the software version of a ripple-carry adder — the same decomposition hardware uses.",
+  "On negative numbers in JS/TS, mention 32-bit masking if the interviewer pushes; most LC tests stay in the non-negative range.",
+  "The family extends to subtract (XOR with flipped b plus carry-in) and to other carry-propagation problems.",
+]} />

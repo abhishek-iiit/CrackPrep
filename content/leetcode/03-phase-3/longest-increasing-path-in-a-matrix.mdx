@@ -1,0 +1,123 @@
+---
+title: "Longest Increasing Path in a Matrix"
+number: "03.39"
+summary: "Strictly increasing paths cannot cycle — DFS with memo turns each cell into O(1) after one full exploration of its increasing neighbors."
+status: published
+free: true
+difficulty: deep
+estMinutes: 18
+tags: [dfs, memoization, matrix]
+updated: "2026-09-15"
+---
+
+## Increasing edges mean DAG — memoize the DAG
+
+Given an `m × n` integer matrix, find the longest path moving up/down/left/right where each step goes to a **strictly larger** value. Values can repeat in the matrix, but you cannot revisit cells.
+
+`[[9,9,4],[6,6,8],[2,1,1]]` → 4: path `1 → 2 → 6 → 9` (or through 8 depending on layout).
+
+Naive DFS from every cell without memo revisits subproblems exponentially. Because moves only go to **strictly higher** values, there is **no cycle** — the graph is a DAG. `dfs(r,c)` = 1 + max DFS of valid larger neighbors, cached in `memo[r][c]`.
+
+Each cell computed once → **O(m · n)** total after memoization.
+
+## DFS + memo from every start
+
+Four directions. From `(r,c)`, try neighbors with strictly greater value. Take max chain length + 1. Track global max over all starting cells.
+
+<Steps>
+<Step title="Allocate memo[m][n] initialized to 0 (uncomputed)">
+  Zero means not yet visited by DFS; path length is at least 1 everywhere.
+</Step>
+<Step title="For each cell, dfs(r,c) if memo unset">
+  Explore four neighbors with matrix[nr][nc] > matrix[r][c].
+</Step>
+<Step title="Return global maximum memo value">
+  Longest path may start anywhere — not only corners.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function longestIncreasingPath(matrix: number[][]): number {
+  const m = matrix.length;
+  const n = matrix[0].length;
+  const memo = Array.from({ length: m }, () => Array(n).fill(0));
+  const dirs = [
+    [0, 1],
+    [0, -1],
+    [1, 0],
+    [-1, 0],
+  ];
+
+  function dfs(r: number, c: number): number {
+    if (memo[r][c]) return memo[r][c];
+    let best = 1;
+    for (const [dr, dc] of dirs) {
+      const nr = r + dr;
+      const nc = c + dc;
+      if (
+        nr >= 0 &&
+        nr < m &&
+        nc >= 0 &&
+        nc < n &&
+        matrix[nr][nc] > matrix[r][c]
+      ) {
+        best = Math.max(best, 1 + dfs(nr, nc));
+      }
+    }
+    memo[r][c] = best;
+    return best;
+  }
+
+  let ans = 0;
+  for (let r = 0; r < m; r++) {
+    for (let c = 0; c < n; c++) {
+      ans = Math.max(ans, dfs(r, c));
+    }
+  }
+  return ans;
+}
+```
+
+Time **O(m · n)**. Space **O(m · n)** for memo and recursion stack in worst case.
+
+Topological sort + DP is an equivalent O(mn) approach if recursion depth is a concern on tall matrices.
+
+<Tradeoff
+  forTitle="DFS + memo when"
+  againstTitle="Topological sort DP when"
+  forItems={[
+    "Strictly increasing rule guarantees DAG — memoized DFS is the natural interview path",
+    "Implementation is short — four neighbors, one comparison, one cache write",
+    "Each cell computed once — O(mn) without explicit graph build",
+    "01.30 Number of Islands DFS skill transfers; here edges are value-directed",
+    "Follow-ups ask for path reconstruction — store parent pointers during DFS",
+  ]}
+  againstItems={[
+    "Recursion depth may hit engine limits on snake-shaped increasing paths — use iterative topo sort",
+    "Matrix is huge and sparse in memory — coordinate compression first",
+    "Interviewer wants explicit Kahn topological order before DP",
+    "03.39 allows equal values adjacent — only strict > moves; BFS on non-increasing fails",
+    "01.18 Longest Increasing Subsequence is 1D sequence LIS — different from grid path LIS",
+  ]}
+/>
+
+## In an interview
+
+Walk 3×3 example → 4. Confirm 4-direction, strict increase, no reuse.
+
+State DAG argument before coding — cycles impossible, so memo is safe.
+
+Follow-ups: print path, k longest paths, wrap-around torus (changes problem). Bug: using `>=` instead of `>` which creates cycles and infinite recursion without memo guards.
+
+<KeyTakeaways
+  items={[
+    "Longest Increasing Path in a Matrix is DFS with memo on a DAG induced by strictly larger neighbors",
+    "No cycles because values strictly increase along edges — each cell's dfs runs once",
+    "dfs(r,c) = 1 + max dfs of up to four larger neighbors; answer is max over all starts",
+    "O(m·n) time and space; topological DP is an equivalent linear alternative",
+    "Strict > is required — equal neighbors would allow cycles and break memo termination",
+    "Related grid DFS family includes 01.30 Number of Islands; 01.18 LIS is the 1D subsequence version",
+  ]}
+/>

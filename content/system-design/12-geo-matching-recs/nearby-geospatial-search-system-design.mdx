@@ -1,32 +1,122 @@
 ---
 title: "Nearby Geospatial Search System Design"
 number: "12.01"
-summary: "Nearby Geospatial Search System Design — notes in progress."
-status: draft
+summary: "How to turn 'find things within N km of me' into an indexable query — and why a naive distance scan over every row dies at the first city-scale load."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: deep
+estMinutes: 18
+tags: [geospatial, search, indexing]
+updated: "2026-09-15"
 ---
 
-## The problem
+## "Find restaurants near me" is a filter problem wearing a map costume
 
-What breaks without this, and the situation that forces the decision.
+A nearby search looks like a map feature. Underneath it is a retrieval problem with a hard constraint: for a query point `(lat, lon)` and a radius `R`, return the entities whose distance to the query is at most `R`, ranked somehow — distance, rating, availability — and do it in tens of milliseconds while the catalog has millions of rows that move.
 
-## How it works
+The naive design is one SQL query: `SELECT * FROM places WHERE haversine(lat, lon, :qLat, :qLon) < :R ORDER BY distance LIMIT 50`. At a few thousand places that works. At a few million it is a sequential scan that recomputes a trigonometric formula on every row, and the p99 climbs with the table, not with the radius. Indexing latitude alone or longitude alone does not help: a bounding box on one axis still leaves a strip of the planet to scan.
 
-The mechanism, step by step.
+What you actually need is a way to turn a circle on the earth into a small set of candidate keys that an ordinary index — B-tree, sorted set, inverted index — can resolve without looking at most of the catalog. Everything in this module is a variant of that idea.
 
-## Tradeoffs
+## Clarify the product before the index
+
+Nearby search is not one API. Three product shapes share the same word and almost no of the same constraints:
+
+- **Static catalog, user moves.** Restaurants, ATMs, charging stations. The entities update slowly; the query point changes every request. Index the entities; query by the user.
+- **Moving entities, static query regions.** Delivery drivers, scooters, live vehicles. The query is often "who is inside this zone right now", and the write rate dominates. You need a hot path that can absorb location updates at tens of thousands per second — 12.04 Redis GEO Spatial Hot Path — and a colder durable store behind it.
+- **Both sides move.** Matching riders to drivers, dating apps' "people near me", live multiplayer. Freshness becomes a non-functional requirement of its own: a driver who was 200 m away thirty seconds ago may already be across town.
+
+Ask for the radius distribution early. A 500 m food-delivery radius and a 50 km hotel search are different systems. Small radii fit coarse grid cells and Redis GEO. Large radii force multi-cell fan-out, and the candidate set explodes unless you tighten ranking or add secondary filters first.
+
+Ask for update rate next. A place that changes address weekly can live in Postgres with a geohash column. A fleet that pings every 5–15 seconds cannot: the write path is the product, and the read path has to tolerate slightly stale positions.
+
+## The query shape that actually scales
+
+Almost every production nearby search follows the same skeleton, regardless of which grid or store sits underneath.
+
+<Steps>
+  <Step title="Resolve the query into candidate cells">
+    Encode the query point into one or more spatial cells — geohash prefixes, H3 hexes, S2 cells — sized so that a cell's diameter is on the order of the search radius, or a little larger. Include the query cell and its neighbours; a circle centred near a cell edge otherwise misses half its hits. 12.02 Geohash Prefix Spatial Index and 12.03 Geospatial Grid Systems H3 S2 Geohash cover how those cells are chosen.
+  </Step>
+  <Step title="Fetch candidates by cell key">
+    Look up entities keyed by cell id in a B-tree, a sorted set, or a document index. This is an equality or prefix query, not a distance formula — cheap, indexable, and the reason the approach works. The result is an over-approximation: every entity that *might* be inside the circle, plus some that are not.
+  </Step>
+  <Step title="Exact-distance filter">
+    For each candidate, compute the true distance (haversine or equirectangular approximation at city scale) and drop anything outside `R`. This step is O(candidates), so the grid resolution is load-bearing: too coarse and you haul thousands of rows into memory to throw most of them away; too fine and the neighbour fan-out fans out into dozens of keys.
+  </Step>
+  <Step title="Rank and paginate">
+    Sort the survivors — usually by distance, then by a business score — and take the top `k`. Keyset pagination by `(distance, id)` beats offset pagination once result sets get large; offset forces the same work on every page.
+  </Step>
+  <Step title="Apply product filters last or push them into the index">
+    Open-now, cuisine, price band, "not already shown" — secondary filters either live as additional indexed fields so they prune before the distance pass, or they run after. Running a heavy filter after a huge candidate set is how a 30 ms nearby call becomes 300 ms on a Saturday night.
+  </Step>
+</Steps>
+
+The invariant to keep visible: **the spatial index never returns the exact answer by itself.** It returns a superset. Exact geometry is always a second pass. Designs that forget the second pass ship wrong results; designs that skip the first pass never leave the sequential scan.
+
+## Capacity sketch that decides the store
+
+Take a city-scale food app as a ballpark, not a benchmark: 200,000 restaurants, peak 5,000 nearby queries per second, typical radius 2 km, average ~40 candidates after cell lookup, top-20 returned.
+
+- Candidate fetch is 5,000 × 40 = 200,000 row touches a second — fine for a warm cache or Redis, uncomfortable if every touch is a cold Postgres row fetch.
+- If each restaurant also updates its "open" flag a few times a day, that write load is noise. If each of 50,000 drivers pings location every 10 seconds, that is 5,000 writes/s of geo updates alone — enough to push you off a single primary and onto an in-memory geo structure with async durability.
+
+Those two numbers — query QPS × candidates, and location-update write rate — decide more of the architecture than which grid encoding you prefer.
+
+## Where the design usually splits
+
+| Concern | Static catalog | Live fleet |
+| --- | --- | --- |
+| Source of truth | Postgres / search index with geohash or geography column | Durable store for identity; Redis GEO or similar for last known position |
+| Index refresh | On write of the place row | Continuous; TTL or overwrite on each ping |
+| Freshness SLO | Minutes are often fine | Seconds; stale positions mis-dispatch |
+| Failure mode | Stale open hours, missing new venues | Ghost drivers, empty cells after eviction |
+| Ranking | Distance + rating + availability | Distance + capacity + ETA model |
+
+A hybrid is common and healthy: Redis (or an equivalent) answers "who is near this pin right now", while a relational or document store owns the rich attributes and the audit history. Do not make Redis the system of record for a driver identity; do not make Postgres the hot path for 5k location pings a second.
+
+<Callout type="gotcha">
+Cell-edge bias is the bug that survives every code review that only tests the happy path. A query whose point sits near a geohash or H3 boundary will under-recall unless you explicitly query neighbours — typically the 8 adjacent cells for a square grid, or the ring of hex neighbours for H3. Under-recall looks like "the app shows nothing" for users who happen to stand on the wrong side of an invisible line. Over-covering neighbours and filtering by exact distance is the correct default; optimising neighbour count comes after you have measured candidate-set size.
+</Callout>
+
+## Consistency and "seen" as first-class requirements
+
+Nearby search products almost always need a second filter that is not geographic: do not show the same restaurant three times in a session, do not re-recommend a profile the user already passed, do not dispatch a driver who was offered thirty seconds ago. That is 12.07 Seen Filtering Bloom Vs Exact Sets — and it belongs in the same latency budget as the geo query, because it runs on every response.
+
+Matching and ranking beyond pure distance — who gets which nearby candidate — is 12.08 Matching And Recommendation Algorithms. Distance gets you candidates; the product is usually a ranker on top.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Invest in a cell-indexed nearby path when"
+  againstTitle="Stay with a simpler scan or single-store query when"
+  forItems={[
+    "The catalog is large enough that a full distance scan cannot hit the latency budget — typically hundreds of thousands of rows and up",
+    "Query QPS is high and the hot working set of cells fits in a cache or in-memory geo structure",
+    "Radii are bounded and known, so you can pick a cell resolution that keeps candidate sets in the tens to low hundreds",
+    "Entities move fast enough that an in-memory hot path is cheaper than beating a disk-backed primary with writes",
+    "You need the same nearby primitive from more than one product surface and can share one index shape",
+  ]}
+  againstItems={[
+    "The whole catalog fits in memory and a linear haversine pass already clears p99 — adding cells is ceremony",
+    "Queries are rare and analytical: a nightly job or a PostGIS scan is enough",
+    "Search radii vary over orders of magnitude with no stable default, so any fixed cell size is wrong for most queries",
+    "Exact polygonal containment is the product (delivery zones, municipal boundaries) — that is geofencing, not radius search; see 12.05",
+    "You cannot afford eventual consistency on locations and every write must be transactionally coupled to non-geo state in one primary",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Open with the query shape, not the logo of a geo library: "I will index entities by spatial cell, fetch the query cell plus neighbours, then exact-distance filter and rank." State the radius and the update rate as assumptions. Then name the failure modes before you are asked: cell-edge misses if you skip neighbours, candidate explosion if the cell is too coarse, and write-path collapse if a live fleet is hammering a disk primary.
 
-<KeyTakeaways items={["", "", ""]} />
+If the prompt is rideshare or delivery, split hot location from durable identity in the first minute. If it is "Yelp nearby", a geohash column plus PostGIS or a search index is usually enough — and saying so shows judgment, not lack of ambition.
+
+<KeyTakeaways
+  items={[
+    "Nearby search scales by turning a radius query into a small set of cell-key lookups, then applying exact distance on the candidates — never by scanning the catalog with haversine",
+    "Static catalogs and live fleets share the query shape but not the store: disk-backed indexes for slow-changing places, in-memory geo structures for high-rate location pings",
+    "Always query neighbouring cells; cell-edge bias is the classic silent under-recall bug",
+    "Cell resolution is a latency knob — too coarse floods the exact-distance pass, too fine multiplies key lookups",
+    "Clarify radius distribution, update rate, and freshness SLO before picking Redis GEO, PostGIS, or a search index",
+    "Distance only produces candidates; seen-filtering and ranking are part of the same product path, not follow-up polish",
+  ]}
+/>

@@ -1,0 +1,98 @@
+---
+title: "Subsets"
+number: "03.02"
+summary: "2^n subsets hide in a binary choice tree — backtrack with a start index so each subset appears once."
+status: published
+free: true
+difficulty: core
+estMinutes: 12
+tags: [backtracking, recursion, array]
+updated: "2026-09-15"
+---
+
+## Include or skip — 2^n choices without duplication
+
+Given an integer array of **distinct** elements, return all subsets (the power set). For `[1, 2, 3]` the answer has eight entries: `[]`, `[1]`, `[2]`, `[1,2]`, `[3]`, `[1,3]`, `[2,3]`, `[1,2,3]`.
+
+Brute force: iterate every bitmask from 0 to 2^n−1 and collect elements where the bit is set. That works in **O(n × 2^n)** and is a valid interview answer when n ≤ 20. The backtracking version teaches the same 2^n tree with a clearer path to **Subsets II** (duplicates) and to combination problems that share the start-index invariant.
+
+## Start index, push at every node
+
+At each recursive call, record the current `path` as one subset — not only at leaves. Then, for every index `i` from `start` onward, include `nums[i]` and recurse from `i + 1`.
+
+The invariant: elements in `path` appear in the same relative order as in `nums`, so `[1,3]` is generated once and `[3,1]` never appears as a separate branch.
+
+<Steps>
+<Step title="Snapshot the current path">
+  Before exploring children, `result.push([...path])`. Every prefix is a valid subset.
+</Step>
+<Step title="Extend from start only">
+  Loop `i` from `start` to n−1. Push `nums[i]`, call `backtrack(i + 1)`, pop.
+</Step>
+<Step title="Empty input">
+  An empty `nums` still yields `[[]]` — one subset, the empty set.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function subsets(nums: number[]): number[][] {
+  const result: number[][] = [];
+  const path: number[] = [];
+
+  function backtrack(start: number): void {
+    result.push([...path]);
+    for (let i = start; i < nums.length; i++) {
+      path.push(nums[i]);
+      backtrack(i + 1);
+      path.pop();
+    }
+  }
+
+  backtrack(0);
+  return result;
+}
+```
+
+Time **O(n × 2^n)** — 2^n subsets, each copied in up to O(n). Space **O(n)** recursion depth, excluding output.
+
+An iterative alternative builds doubling lists: start with `[[]]`, for each `num` append `num` to every existing subset. Same complexity, no recursion — good when stack depth is a concern.
+
+<Tradeoff
+  forTitle="Backtracking when"
+  againstTitle="Bitmask or iterative doubling when"
+  forItems={[
+    "You are warming up for Subsets II, Combination Sum, or other start-index problems",
+    "Interviewers want to see choose-explore-unchoose on a shallow tree",
+    "n is modest (≤ 20) and 2^n output is expected",
+    "You need to add pruning later (e.g., only subsets summing to k)",
+    "Recursive structure mirrors 03.01 Permutations in the same backtracking family",
+  ]}
+  againstItems={[
+    "You prefer a loop-only solution with no recursion stack",
+    "Bitmask iteration is faster to code under time pressure and n ≤ 20",
+    "You only need subset count, not enumeration — then 2^n is one line of math",
+    "Input has duplicates — use Subsets II skip logic instead of this bare template",
+    "Follow-up asks for subsets of fixed size k only — combinations template prunes earlier",
+  ]}
+/>
+
+## In an interview
+
+Restate with example: `[1,2,3]` → eight subsets including empty. Confirm distinct elements and that `[1,2]` and `[2,1]` count as one subset.
+
+Explain the start-index rule before coding — it is the same anti-permutation trick as 01.21 Combination Sum, but without a target to prune against. Mention you push the path at every node, not only at leaves.
+
+Follow-ups: **Subsets II** (duplicates), **Subsets of size k**, or combine with sum constraints. Bug to flag: recursing from index 0 every time and deduplicating at the end instead of enforcing order during search.
+
+<KeyTakeaways
+  items={[
+    "Subsets backtracking records every prefix as a subset, then extends only from start onward to avoid duplicate sets.",
+    "The start index invariant matches Combination Sum and Combination Sum II — one family of templates.",
+    "Time O(n × 2^n) and space O(n) depth; bitmask iteration is an equivalent O(n × 2^n) approach.",
+    "Distinct input needs no dedup; duplicates require sort plus skip equal neighbors at the same depth.",
+    "Pushing at every recursive frame (not only leaves) is the detail people forget on first attempt.",
+    "Iterative doubling (append num to all existing subsets) avoids recursion with the same asymptotics.",
+  ]}
+/>

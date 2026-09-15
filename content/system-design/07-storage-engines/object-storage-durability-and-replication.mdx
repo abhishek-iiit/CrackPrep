@@ -1,32 +1,89 @@
 ---
 title: "Object Storage Durability And Replication"
 number: "07.19"
-summary: "Object Storage Durability And Replication — notes in progress."
-status: draft
+summary: "Durability is a probability over correlated failures — replication and erasure coding buy independent domains; scrubbing catches latent corruption before the last copy is gone."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: deep
+estMinutes: 18
+tags: [object-storage, durability, replication, erasure-coding]
+updated: "2026-09-15"
 ---
 
-## The problem
+## "Eleven nines" is not a RAID slogan; it is a failure-domain argument
 
-What breaks without this, and the situation that forces the decision.
+Object storage vendors quote annual durability figures on the order of 99.999999999% ("eleven nines") for a given object. That number is not a promise that your specific key is immortal. It is a modeled probability that a given object is lost in a year under assumptions about disk failure rates, repair times, and how independently those failures occur. Change the assumptions — repair takes a week because the cluster is full, three replicas share a rack PDU, bit rot goes undetected for months — and the model stops applying. 01.05 Availability Durability Consistency And Cost separated durability from availability; this lesson is how an object data plane actually buys durability, and what it spends to do so.
 
-## How it works
+07.14 S3-Style Object Storage Architecture acknowledged the data plane. 07.18 Append-Only Object Storage Stream Layer explained how one node stores chunks. Durability begins when one node is not enough.
 
-The mechanism, step by step.
+## Replication versus erasure coding
 
-## Tradeoffs
+**Replication** stores N full copies of the object (or of each chunk) on N failure domains — typically distinct machines, racks, or availability zones. A `PUT` waits until enough replicas are durable (often all N for strongly acknowledged writes, or a quorum). Reads can come from any healthy replica. The space amplification is roughly N: three-way replication means about 3x raw storage for one logical byte, before filesystem overhead.
+
+**Erasure coding** splits the object into K data fragments and computes M parity fragments (common schemes look like 4+2, 6+3, 10+4 — order-of-magnitude examples, not a single vendor truth). Any K of the K+M fragments reconstruct the object. Space amplification drops toward `(K+M)/K` — 1.5x for 4+2, about 1.2x for 10+2 — at the cost of CPU for encode/decode and more complex repair when a fragment is lost.
+
+| | Replication (e.g. 3x) | Erasure coding (e.g. 6+3) |
+| --- | --- | --- |
+| Storage overhead | ~3x | ~1.5x for comparable tolerance of concurrent fragment loss |
+| Repair traffic | Copy a full replica | Reconstruct from K fragments — can be heavy for large objects |
+| Read cost when healthy | One replica read | Reassemble K fragments (or read a cached full object) |
+| Tail latency sensitivity | Low — one slow replica can be ignored | Higher — stragglers among K fragments delay reconstruction |
+| Operational complexity | Lower | Higher — placement of fragments, degraded reads, encode pipelines |
+
+Many systems use both: replicate hot or small objects where overhead is dominated by metadata and seek costs anyway; erasure-code large, cold objects where storage spend dominates the bill. Cross-region copies are often asynchronous replication of whole objects for disaster recovery, sitting above the within-region scheme.
+
+## What "acknowledged durable" must mean
+
+A frontend must not return 200 for a PUT until the durability policy for that storage class is met: N replicas fsynced, or enough fragments written to distinct domains. Acknowledging after a single local write and replicating in the background raises availability of the API and lowers durability until catch-up finishes — a legitimate storage-class choice when named explicitly, a bug when it silently applies to the default class.
+
+Failure domains matter more than the integer N. Three replicas on one rack lose to one top-of-rack failure. Three replicas in one availability zone lose to one zone outage. Placement rules in the partition manager (07.16) encode "no two replicas in the same rack/zone" as constraints on map assignments, not as after-the-fact hopes.
+
+## Silent corruption and repair
+
+Disks do not only fail loudly. Latent sector errors and bit rot leave a replica that still responds but returns wrong bytes. Without detection, a repair process can copy the bad replica over a good one — **healing into corruption**. Scrubbing reads fragments on a schedule, verifies checksums (07.20 End-To-End Checksums), and triggers repair from a known-good copy or from parity before the redundancy budget is gone.
+
+Repair time is part of the durability model. While a replica is missing, the object is one failure closer to loss. Clusters that run at 95% disk full repair slowly because there is nowhere to put reconstructed data; durability collapses not because the coding scheme changed but because mean time to repair blew up. Provisioning free space is a durability control, not only a capacity control.
+
+<Callout type="warn">
+Correlated failures dominate real outages: bad disk firmware batches, a single AZ flood, a mistaken wipe of a whole failure domain. Independent-failure math understates risk when your replicas are correlated. Spread domains deliberately, and treat "we have three copies" as incomplete until you can name three domains.
+</Callout>
+
+## Availability is adjacent but not identical
+
+A durable object can still be unavailable: all local fragments reachable only through a partitioned network path, metadata DB down so the key cannot be resolved (07.17), or the partition map pointing at draining nodes. Conversely, a briefly available stale read does not make the system durable. 06.03 Replication covers the broader distributed-systems vocabulary; object stores specialize it with immutability — once a version is committed, replicas should converge to the same bytes, not to conflicting updates of a mutable row.
+
+Version immutability simplifies durability reasoning: you never have to reconcile two different writes to the same version. Concurrent PUTs create different versions; durability applies per version. The metadata CAS chooses which version is current; the data plane ensures each version that was acknowledged remains readable for as long as policy retains it.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Favor multi-replica durability policies when"
+  againstTitle="Favor leaner erasure coding or fewer copies when"
+  forItems={[
+    "Objects are small or latency-sensitive and full-copy reads beat assembling K fragments",
+    "Operational simplicity and fast repair by whole-object copy matter more than storage efficiency",
+    "You need degraded-mode reads from any single surviving replica without reconstruction CPU",
+    "Failure domains are plentiful and storage cost is secondary to engineer time",
+    "Regulatory or customer contracts demand geographically separate full copies you can name",
+  ]}
+  againstItems={[
+    "Datasets are large and cold, and storage spend dominates the unit economics",
+    "You can tolerate higher decode CPU and more complex degraded reads",
+    "Repair bandwidth and placement software are mature enough to handle fragment rebuilds",
+    "Within-region durability can lean on coding while cross-region DR uses async full copies",
+    "You will enforce scrubbing and free-space headroom so MTTRs stay inside the durability model",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Do not recite "eleven nines" as a magic charm. Say: "I would put replicas or erasure-coded fragments in distinct failure domains, acknowledge only after the durability quorum, and scrub checksums so latent errors do not accumulate." Expect questions about repair time and correlated failure — answer with free-space headroom and rack/AZ placement constraints. If asked replication vs erasure coding, pick from workload temperature and object size, not from fashion.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Quoted durability figures are models over failure rates, repair times, and failure-domain independence — not guarantees for a single key",
+    "Replication stores full copies at roughly N× space cost; erasure coding lowers space overhead by reconstructing from K of K+M fragments",
+    "Acknowledge a PUT only after the storage-class durability quorum; background replication is a named class, not a silent default",
+    "Placement across racks and zones matters more than the raw replica count when failures correlate",
+    "Scrubbing and checksums stop latent corruption from being copied during repair; free space keeps repair fast enough for the model to hold",
+    "Immutable versions simplify durability: concurrent PUTs create new versions instead of conflicting mutations of one object identity",
+  ]}
+/>

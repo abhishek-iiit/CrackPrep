@@ -1,0 +1,101 @@
+---
+title: "Flyweight"
+number: "02.06"
+summary: "Share immutable state across thousands of similar objects so memory scales with unique data, not instance count."
+status: published
+free: true
+difficulty: deep
+estMinutes: 18
+tags: [structural, memory, sharing]
+updated: "2026-09-15"
+---
+
+## A forest with ten million trees should not carry ten million copies of "oak"
+
+A strategy game renders a map with two million tree sprites. Each tree has a position, a health value, an owner — unique. Each also has a mesh, a texture atlas reference, a species name, growth rules — identical across every oak on the map. Naively, two million `Tree` objects each store a full copy of the oak mesh and texture metadata. At roughly 500 bytes of shared data per instance, that is a gigabyte of duplication for information that could live once.
+
+Flyweight splits state into **intrinsic** (shared, immutable, context-free — the oak mesh) and **extrinsic** (per-instance, passed in at use time — x/y coordinates, owner id). One `TreeType` flyweight holds the intrinsic oak data; two million lightweight `Tree` contexts hold extrinsics and a reference to the shared flyweight. Memory scales with unique *types*, not instance *count*.
+
+The pattern shows up anywhere instance count dwarfs variation: text editors (one glyph flyweight per character shape, extrinsic position and color), particle systems, tile maps, connection pools where the heavy socket state is shared infrastructure.
+
+## Factory, flyweight, and client context
+
+Roles:
+
+- **Flyweight** — `TreeType`, `Glyph`. Stores intrinsic state; operations take extrinsic state as parameters (`render(x, y, health)`).
+- **Flyweight Factory** — returns existing flyweights by key (`"oak"`, `"unicode-U+0041"`) or creates once. Usually a map — the cache *is* the pattern.
+- **Client / Context** — holds extrinsic state and a flyweight reference. Often a small struct, not a heavyweight object.
+
+<Steps>
+<Step title="Client requests a flyweight by key">
+`const oak = TreeTypeFactory.get("oak")` — factory returns the singleton oak flyweight, creating it on first miss.
+</Step>
+<Step title="Client stores extrinsic state locally">
+`{ type: oak, x: 120, y: 440, health: 80 }` — four numbers and a reference, not a mesh copy.
+</Step>
+<Step title="Operation passes extrinsic into flyweight">
+`oak.render(ctx, x, y)` — the flyweight uses shared mesh data plus the coordinates supplied at call time.
+</Step>
+<Step title="Renderer iterates contexts, not heavy objects">
+The draw loop walks two million context structs, each delegating render to one of maybe twelve flyweights.
+</Step>
+</Steps>
+
+Order-of-magnitude sanity check, not a benchmark: if intrinsic payload is ~400 bytes and you have 12 unique tree types, shared storage is ~5 KB. Two million naive instances at 400 bytes intrinsic each is ~800 MB before extrinsics. The flyweight trade is bookkeeping and immutability discipline for that gap.
+
+```typescript
+class TreeType {
+  constructor(readonly mesh: Mesh, readonly texture: Texture) {}
+  render(ctx: Canvas, x: number, y: number) {
+    ctx.draw(this.mesh, this.texture, x, y);
+  }
+}
+
+const cache = new Map<string, TreeType>();
+function getTreeType(species: string): TreeType {
+  if (!cache.has(species)) cache.set(species, loadTreeType(species));
+  return cache.get(species)!;
+}
+```
+
+<Callout type="warn">
+Flyweight only works when intrinsic state is truly immutable. If someone mutates the shared oak mesh because one tree on the map is "special," every oak on the map changes. Enforce immutability in the type system or freeze objects at factory creation time.
+</Callout>
+
+Extrinsic state must be supplied by the caller — the flyweight cannot store it without defeating the purpose. That pushes complexity to the render loop or the factory's caller, which now passes coordinates into every method. When extrinsic state is large or the sharing ratio is low (every object is genuinely unique), Flyweight buys nothing.
+
+<Tradeoff
+  forTitle="Reach for Flyweight when"
+  againstTitle="Skip Flyweight when"
+  forItems={[
+    "Instance count is orders of magnitude larger than unique variants — millions of glyphs, tiles, particles, trees",
+    "A clear split exists between heavy immutable shared data and small per-instance coordinates or ids",
+    "Most operations need both intrinsic and extrinsic state passed together at call time anyway (render, collide, serialize)",
+    "Memory or cache footprint is a measured problem, not a hypothetical — profiling shows duplicated static payloads",
+    "A factory cache keyed by type id is natural to the domain and you can enforce immutability on shared objects",
+  ]}
+  againstItems={[
+    "Nearly every instance is unique — sharing ratio near 1:1 means a factory map with no hits",
+    "Intrinsic state must vary per instance after creation — mutating shared flyweights corrupts all contexts",
+    "Extrinsic state is as large as intrinsic state, so per-context storage does not shrink the footprint meaningfully",
+    "The codebase already stores static data in global asset tables; Flyweight adds a pattern layer without new savings",
+    "Concurrency requires per-instance locks on shared flyweights — contention erases the memory win",
+  ]}
+/>
+
+## In an interview
+
+Lead with the memory math: "Two million trees but a dozen species — I'd share mesh data in flyweights and keep position per instance." Draw Factory map on the left, many small context objects pointing to few flyweights. Follow-up: "Flyweight vs Singleton?" Singleton is one instance total; Flyweight is one instance *per distinct intrinsic key*. "vs object pool?" Pool reuses mutable objects over time; Flyweight shares immutable state across simultaneous instances. "Thread safety?" Intrinsic immutability makes reads safe; extrinsic state stays outside the flyweight.
+
+Failure mode: storing extrinsic state inside the flyweight "for convenience" — memory climbs back to the naive model and bugs appear when two contexts overwrite the same slot.
+
+<KeyTakeaways
+  items={[
+    "Flyweight separates intrinsic shared immutable state from extrinsic per-instance state passed in at operation time",
+    "Memory scales with the number of unique flyweight keys, not the number of objects on screen or in the collection",
+    "The Flyweight Factory caches by key — get-or-create is the whole sharing mechanism",
+    "Intrinsic state must never mutate after sharing; one write corrupts every context pointing at that flyweight",
+    "Skip the pattern when instances are mostly unique or extrinsic state is as heavy as the shared payload",
+    "Profile first — Flyweight adds indirection; it pays only when duplicated static data is a real measured cost",
+  ]}
+/>

@@ -1,32 +1,109 @@
 ---
 title: "Hashtag Extraction And Tag Store"
 number: "11.09"
-summary: "Hashtag Extraction And Tag Store — notes in progress."
-status: draft
+summary: "How #tokens leave the post body, land in a tag store built for 'posts by tag,' and stay coherent when casing, spam, and renames disagree."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [hashtags, indexing, extraction, write-path]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The body is not an index
 
-What breaks without this, and the situation that forces the decision.
+A hashtag is a user-facing token in a post — `#DesignSystems`, `#nyc` — and a query surface: show me recent posts with this tag, show me trending tags, autocomplete `#des…`. If the only place the tag lives is inside the post body string, every tag query is either a full-text scan or a hope that a general search index is fresh enough. Social products almost always extract tags on write into a dedicated structure so "posts for tag X" is a keyed lookup, not a parse of millions of bodies at read time.
 
-## How it works
+Extraction sounds trivial — split on `#` — until you hit Unicode, punctuation glued to tokens, camelCase vs lowercase, and spam bots inventing a thousand unique tags per minute. The tag store sounds like a simple many-to-many until cardinality and fan-in show up: one viral tag may point at millions of post ids, and one post may carry a handful of tags that must all succeed or leave a torn index.
 
-The mechanism, step by step.
+## Extract on the write path
 
-## Tradeoffs
+Parse tags when the post is created (and again on edit), normalize them, and persist both the post and the tag links before the post is widely visible. Doing this asynchronously after publish creates a window where the post exists but tag pages miss it — acceptable for trending analytics, usually wrong for the author's expectation that their tagged post appears under the tag immediately.
+
+<Steps>
+  <Step title="Parse candidates from the body (and sometimes caption-only fields)">
+    Scan for `#` followed by allowed characters. Define the alphabet explicitly: letters, numbers, underscore is the common ASCII set; decide Unicode letters up front or you will split `#SãoPaulo` differently on different clients. Strip trailing punctuation (`#news.` → `news`). Cap tags per post (e.g. 5–30) so a paste-bomb cannot write hundreds of index rows.
+  </Step>
+  <Step title="Normalize before any storage key">
+    Case-fold to a canonical form (`#DesignSystems` → `designsystems` or `design_systems` — pick one rule and keep it). Optionally apply NFKC Unicode normalization so visually identical tokens collide. Store a display form (original casing from the first or most common sighting) separately if the UI should not scream lowercase.
+  </Step>
+  <Step title="Upsert the tag row and write the edges">
+    Ensure a `tags` row exists (id, normalized_name, display_name, created_at). Write `post_tags (tag_id, post_id, created_at)` — or the reverse ownership if you prefer post-centric writes. Use the same transaction or an outbox as 08.03 Event Bus For Product Events if posts and tag edges live in different stores.
+  </Step>
+  <Step title="Maintain the read models you actually query">
+    For "recent posts by tag," append `post_id` to a per-tag timeline (Redis list/ZSET, Cassandra partition, etc.), truncated like a feed inbox. For autocomplete, update a prefix index on normalized names. For trending, emit an event into an analytics path — do not make trending a synchronous COUNT on write.
+  </Step>
+</Steps>
+
+Edits and deletes must replay extraction: remove edges for tags that disappeared, add new ones, and ideally remove the post id from per-tag recent lists (or tombstone at read/hydrate time, same pattern as 11.07 Feed Generation Push Pull Hybrid).
+
+## What the tag store is for
+
+Separate concerns that often get one table in a whiteboard drawing:
+
+| Concern | Typical store | Access pattern |
+| --- | --- | --- |
+| Canonical tag identity | SQL/row store: `tags(normalized_name UNIQUE)` | Upsert by name, lookup by name |
+| Post ↔ tag edges | SQL or wide-column: `(tag_id, post_id)` with keys both directions if needed | Write on publish; query posts-by-tag or tags-by-post |
+| Recent posts for a tag | Ordered list / ZSET keyed by `tag_id` | Append on write; range read for tag page |
+| Autocomplete | Prefix trie, completion index, or `LIKE 'foo%'` on a small hot set | Read-heavy, eventually consistent OK |
+| Trending / counts | Sketch or pre-aggregated counters (see 10.01 Counting At Scale) | Async updates; approximate is fine |
+
+The edge table alone is not enough for a snappy tag page once a tag has millions of posts — you need the recent-posts side structure, truncated, the same way home timelines truncate. Deep history can fall back to the edge table or a search index with higher latency.
+
+```text
+# normalization sketch (illustrative)
+"#NYC!!!"  -> extract "NYC!!!" -> strip punct "NYC" -> casefold "nyc"
+"#nyc"     -> "nyc"   (same tag_id)
+"#Nyc"     -> "nyc"   (same tag_id)
+```
+
+<Callout type="gotcha">
+Client-side extraction and server-side extraction will disagree unless they share the same rules. If the mobile app highlights `#foo-bar` as one tag and the server splits on `-`, the author sees a tag that never becomes queryable. Own normalization on the server; treat client highlighting as cosmetic until the write response returns the canonical tag list.
+</Callout>
+
+## Abuse, cardinality, and renames
+
+**Spam unique tags.** Attackers create one-off tags to pollute autocomplete and burn storage. Mitigations: require authenticated accounts, rate-limit distinct new tags per user per day, delay brand-new tags from autocomplete until they have N posts or age, and reserve a moderation path to block prefixes.
+
+**Hot tags.** `#followfriday`-scale tags are hot partitions on the recent-posts list — 04.06 Hot Partitions applies. Shard the per-tag timeline by time bucket (`tag_id + yyyyww`) or accept that mega-tags are served from a specially partitioned path.
+
+**Renames and aliases.** Products rarely rename hashtags globally (users own the token), but they do alias (`#usopen` vs `#usopen2026`) via a redirect or parent tag for curated topics. Keep aliases as a pointer to a canonical `tag_id` so you do not merge posting lists by string rewrite after the fact.
+
+**Case and language.** Case-folding Turkish `I`/`ı` and similar locale traps will merge or split tags incorrectly if you use naive ASCII lowercasing on all languages. If the product is global, pick a Unicode case-fold algorithm and document it; do not invent per-request locale lowercasing for storage keys.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Extract and index tags on write when"
+  againstTitle="Leave tags only in body/search when"
+  forItems={[
+    "Tag pages, tag timelines, or 'posts tagged X' are first-class product surfaces with tight latency",
+    "You need autocomplete over tag names without parsing post bodies",
+    "Normalized identity matters — casing variants should collide on one tag id",
+    "You can bound tags per post and rate-limit new tag creation to keep cardinality sane",
+    "Edits/deletes are rare enough, or you have a clear replay path to keep edges coherent",
+  ]}
+  againstItems={[
+    "Tags are decorative only — never queried except via general full-text search you already run",
+    "Write path latency is scarce and tag indexing would add distributed transactions you cannot afford yet",
+    "The corpus is small enough that search-index tag filters meet the SLA without a dedicated store",
+    "Moderation has not decided normalization rules, and shipping a wrong canonical form would orphan data after a migrate",
+    "Almost all tags are one-off spam and indexing them would amplify abuse cost",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Say extraction is a write-path concern with explicit normalization, not a regex the client owns. Sketch three stores: canonical tag, edges, recent-posts-by-tag. Mention a per-post tag cap and hot-tag sharding without being asked — that signals you have seen viral tags melt a single partition.
 
-<KeyTakeaways items={["", "", ""]} />
+Expect: what happens on edit; whether trending is approximate; how `#Foo` and `#foo` meet; and whether fan-out of "followers of a tag" exists (usually no — tags are not follow graphs unless the product adds that, which is a different system). Point to 11.07 only if they ask how a tag timeline compares to a home timeline: same ordered-list shape, different key, often pure pull of recent posts for that tag id.
+
+<KeyTakeaways
+  items={[
+    "Hashtags must be extracted into a tag store if 'posts by tag' is a real surface — body text is not an index",
+    "Normalize on the server (case-fold, punctuation, Unicode) and return canonical tags so clients cannot fork identity",
+    "Persist canonical tags, post–tag edges, and a truncated recent-posts list per tag; do not make every tag page scan the edge table forever",
+    "Cap tags per post and rate-limit new tag creation or spam will own your cardinality and autocomplete",
+    "Viral tags are hot partitions — time-bucket or specially shard their timelines",
+    "Edits and deletes must replay extraction; hydrate-time skip can paper over stale list entries the way feed deletes do",
+  ]}
+/>

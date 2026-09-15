@@ -1,0 +1,134 @@
+---
+title: "Minimum Window Substring"
+number: "02.02"
+summary: "Expand until t is covered, then shrink from the left; track surplus with a formed counter, not a full map diff every step."
+status: published
+free: true
+difficulty: deep
+estMinutes: 18
+tags: [sliding-window, hash-map, string]
+updated: "2026-09-15"
+---
+
+## Cover every letter of t in the smallest slice of s
+
+Given strings `s` and `t`, return the shortest substring of `s` that contains every character of `t` with at least the required multiplicity — if `t = "AAB"`, the window needs two `A`s and one `B`. Return `""` if no such window exists.
+
+The brute force tries every `(start, end)` pair in `s` and checks whether that slice covers `t`. For |s| = 10⁵ that is on the order of 10¹⁰ windows, each needing a frequency comparison. The judge expects linear time in |s|.
+
+The move is the same two-pointer family as 02.01 Longest Repeating Character Replacement, but the goal flips: you **expand** until the window is valid, then **shrink** to minimize length while it stays valid, recording the best start and length whenever you have a complete cover.
+
+## need, have, and the formed counter
+
+Build `need`: a map from each character in `t` to how many copies the window must hold. Maintain `have` for the current window, but do not compare the two maps on every step — that is O(|Σ|) per move and adds up.
+
+Instead track **`formed`**: how many distinct characters `c` currently satisfy `have[c] === need[c]`. The window is complete when `formed === need.size` (the number of distinct keys in `need`, not |t|).
+
+When `s[right]` enters:
+
+- If it is in `need`, increment `have[c]`. If `have[c]` just reached `need[c]`, increment `formed`.
+
+When `s[left]` leaves during shrink:
+
+- If it is in `need` and `have[c]` was exactly equal to `need[c]`, decrement `formed` before decrementing `have[c]`.
+
+<Steps>
+<Step title="Build need from t and set required = need.size">
+  Characters not in t are invisible to the window logic.
+</Step>
+<Step title="Expand right until formed === required">
+  You now have at least one valid cover ending at right.
+</Step>
+<Step title="While valid, update best and shrink from left">
+  Each successful shrink is a shorter valid window — keep the minimum length and its start index.
+</Step>
+<Step title="Continue until right exhausts s">
+  Return the slice at bestStart of length bestLen, or "" if never formed.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function minWindow(s: string, t: string): string {
+  if (t.length > s.length) return "";
+
+  const need = new Map<string, number>();
+  for (const c of t) {
+    need.set(c, (need.get(c) ?? 0) + 1);
+  }
+
+  const have = new Map<string, number>();
+  const required = need.size;
+  let formed = 0;
+
+  let left = 0;
+  let bestStart = 0;
+  let bestLen = Infinity;
+
+  for (let right = 0; right < s.length; right++) {
+    const c = s[right];
+    if (need.has(c)) {
+      have.set(c, (have.get(c) ?? 0) + 1);
+      if (have.get(c) === need.get(c)) formed++;
+    }
+
+    while (formed === required) {
+      const windowLen = right - left + 1;
+      if (windowLen < bestLen) {
+        bestLen = windowLen;
+        bestStart = left;
+      }
+
+      const leftChar = s[left];
+      if (need.has(leftChar)) {
+        if (have.get(leftChar) === need.get(leftChar)) formed--;
+        have.set(leftChar, have.get(leftChar)! - 1);
+      }
+      left++;
+    }
+  }
+
+  return bestLen === Infinity ? "" : s.slice(bestStart, bestStart + bestLen);
+}
+```
+
+Time **O(|s| + |t|)** — each index enters and leaves the window once; map work is O(1) per character for a fixed alphabet. Space **O(|Σ|)** for the frequency maps, typically O(1) when the alphabet is bounded.
+
+<Tradeoff
+  forTitle="Two-pointer window with formed counter when"
+  againstTitle="Check every substring when"
+  forItems={[
+    "|s| is up to 10⁵ and O(|s|²) cover checks will TLE",
+    "You need the minimum window, not just any window — shrink-after-cover is mandatory",
+    "Multiplicity matters (AAB vs AB) — a plain set of characters is not enough",
+    "The formed counter avoids diffing full maps on every pointer move",
+    "Same machinery handles follow-ups: permutations in window, at-most-k replacements to cover t",
+  ]}
+  againstItems={[
+    "|s| and |t| are both tiny and clarity beats optimization",
+    "t has only distinct characters with multiplicity 1 — a simpler bitmask or set cover can suffice",
+    "You only need to know whether any cover exists, not the minimum length",
+    "Character set is huge and map constant factors dominate — still linear, but a sorted multiset variant may be clearer to explain",
+    "Interviewer asks for the brute force first to establish correctness",
+  ]}
+/>
+
+## In an interview
+
+Walk through `s = "ADOBECODEBANC", t = "ABC"` — expand to `"ADOBEC"`, shrink to `"BEC"`, expand again, shrink to `"BANC"`. State that multiplicity counts: `t = "AABC"` needs two `A`s.
+
+Before coding, write `need` for `t` and define `formed` explicitly. The bug interviewers watch for: incrementing `formed` when `have[c] > need[c]`, or forgetting to decrement `formed` when a character drops below its quota on shrink.
+
+Follow-ups: minimum window covering a *set* without multiplicity; case sensitivity; stream `s` one character at a time. Related: 02.03 Valid Anagram (frequency equality) and 02.04 Group Anagrams (frequency as identity).
+
+<KeyTakeaways
+  items={[
+    "Minimum Window Substring expands until t is fully covered, then shrinks to minimize length while coverage holds",
+    "Track need/have frequencies and a formed counter — not a full map equality check each step",
+    "formed increments only when have[c] reaches need[c]; it decrements when have[c] would drop below need[c] on shrink",
+    "Each index in s enters and leaves the window at most once — O(|s| + |t|) time",
+    "Return empty string when formed never reaches need.size, including when t is longer than s",
+    "The sliding-window cover pattern appears again in permutation-in-string and DNA substring problems with the same two-phase expand-shrink shape",
+  ]}
+/>

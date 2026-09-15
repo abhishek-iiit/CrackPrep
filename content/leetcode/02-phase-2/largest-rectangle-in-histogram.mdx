@@ -1,0 +1,99 @@
+---
+title: "Largest Rectangle in Histogram"
+number: "02.41"
+summary: "Every bar wants to know how far left and right it can stretch at its height — a monotonic stack answers both in one pass."
+status: published
+free: true
+difficulty: deep
+estMinutes: 18
+tags: [stack, array, monotonic-stack]
+updated: "2026-09-15"
+---
+
+## Every subarray is too many rectangles
+
+Given non-negative bar heights, find the area of the largest rectangle whose base lies entirely on the histogram floor. For `[2, 1, 5, 6, 2, 3]`, the answer is 10 — the rectangle spanning heights 5 and 6 at height 5, width 2.
+
+The brute force picks every pair of left and right boundaries and scans the minimum height between them. That is O(n³) if you re-scan each window, O(n²) if you track the running minimum — still too slow for n up to 10⁵.
+
+The reframe: fix a bar at index `i` with height `h`. The widest rectangle using `h` as the limiting height extends from the first bar shorter than `h` on the left to the first bar shorter than `h` on the right. You need, for every index, its **nearest smaller neighbor** on both sides.
+
+## Monotonic increasing stack
+
+Maintain a stack of indices whose heights are strictly increasing. When you see a height smaller than the stack top, that top index's right boundary is found — pop it and compute area using the popped height and the distance to the new top (left boundary).
+
+Sendinel bars of height 0 at both ends (or flush the stack at the end) so every bar eventually gets popped and measured.
+
+<Steps>
+<Step title="Push index i when heights are non-decreasing">
+  The stack stays increasing — each index waits for a shorter bar to its right.
+</Step>
+<Step title="While stack top height > heights[i], pop and compute area">
+  Width = i - newTop - 1 (or i if stack empty). Area = height[popped] × width. Track max.
+</Step>
+<Step title="After the loop, pop remaining indices">
+  Treat the right boundary as n — same width formula with i = n.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function largestRectangleArea(heights: number[]): number {
+  const sentinel = [0, ...heights, 0];
+  const stack: number[] = [];
+  let maxArea = 0;
+
+  for (let i = 0; i < sentinel.length; i++) {
+    while (stack.length > 0 && sentinel[stack[stack.length - 1]] > sentinel[i]) {
+      const h = sentinel[stack.pop()!];
+      const left = stack.length > 0 ? stack[stack.length - 1] : -1;
+      const width = i - left - 1;
+      maxArea = Math.max(maxArea, h * width);
+    }
+    stack.push(i);
+  }
+
+  return maxArea;
+}
+```
+
+Time **O(n)** — each index pushed and popped once. Space **O(n)** for the stack.
+
+<Tradeoff
+  forTitle="Monotonic stack when"
+  againstTitle="Expand-from-center when"
+  forItems={[
+    "n is up to 10⁵ and you need linear time, not O(n²)",
+    "The problem is 'nearest smaller element' on both sides — stack is the canonical tool",
+    "Heights are non-negative integers; width math is straightforward",
+    "Follow-ups include 03.33 Maximal Rectangle (stack per row) and 03.45 Sum of Subarray Minimums",
+    "You already know 02.39 Daily Temperatures — same pop-on-violation pattern, different meaning",
+  ]}
+  againstItems={[
+    "n is small (under a few hundred) and a double loop is easier to explain under time pressure",
+    "You only need the global maximum, not the actual rectangle coordinates — expand-from-center is simpler to code",
+    "Memory is extremely tight and stack allocation is a concern (rare on LeetCode)",
+    "The interviewer asks for O(n²) first as a warm-up before optimizing",
+    "Input is a sparse histogram where most heights are zero — specialized pruning might beat generic stack",
+  ]}
+/>
+
+## In an interview
+
+Restate with a small example: `[2, 1, 5, 6, 2, 3]` → 10. Confirm constraints: n ≤ 10⁵, heights non-negative.
+
+Say out loud that brute force is O(n²) and that fixing bar `i` reduces to finding how far left and right it can extend — nearest smaller element on each side. Introduce the monotonic stack as the structure that delivers those boundaries in one pass.
+
+Mention the off-by-one width bug before coding: width is `i - leftBoundary - 1`, not `i - leftBoundary`. Follow-ups: 03.33 Maximal Rectangle (run this stack on each row of a binary matrix), trapping rain water variants. The bug interviewers watch for is forgetting to flush the stack after the main loop.
+
+<KeyTakeaways
+  items={[
+    "Largest Rectangle in Histogram reduces to nearest-smaller-element on left and right for every bar",
+    "A monotonic increasing stack pops when a shorter bar arrives, fixing the right boundary of the popped bar",
+    "Width at pop time is current index minus stack top minus one (or current index if stack empty)",
+    "Sentinel zeros at both ends guarantee every bar gets popped and measured",
+    "Time O(n), space O(n) — each index enters and leaves the stack exactly once",
+    "Same stack family as 02.39 Daily Temperatures and 02.38 Next Greater Element I; maximal rectangle in a matrix stacks this per row",
+  ]}
+/>

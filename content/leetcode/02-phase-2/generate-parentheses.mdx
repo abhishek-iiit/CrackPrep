@@ -1,0 +1,102 @@
+---
+title: "Generate Parentheses"
+number: "02.49"
+summary: "Track open and close counts — add '(' when opens remain, add ')' only when closes exceed opens."
+status: published
+free: true
+difficulty: core
+estMinutes: 14
+tags: [backtracking, string]
+updated: "2026-09-15"
+---
+
+## Enumerating all strings is exponential; pruning is the whole game
+
+Given `n` pairs of parentheses, generate all combinations of well-formed strings. For n = 3: `["((()))","(()())","(())()","()(())","()()()"]` — five strings, which is the 3rd Catalan number.
+
+Brute force generates all 2^(2n) binary strings of parentheses and filters valid ones — works for n ≤ 8 here but wastes work on invalid prefixes like `())`. The constraint `n ≤ 8` means at most 14 characters; still, backtracking with early pruning is cleaner and scales to slightly larger n in variants.
+
+The invariant at any partial string: `open` counts `(` used, `close` counts `)` used. Valid extensions require `open >= close` always, and `open <= n`, `close <= n`.
+
+## Backtrack with two counters
+
+DFS from empty string. If `open < n`, append `(`. If `close < open`, append `)`. When `len === 2n`, push to results.
+
+<Steps>
+<Step title="Start with open = 0, close = 0, path = ''">
+  Nothing committed yet.
+</Step>
+<Step title="Add '(' if open < n">
+  Increments open; still valid because close ≤ open holds.
+</Step>
+<Step title="Add ')' if close < open">
+  Guarantees the prefix stays balanced — never more closes than opens.
+</Step>
+<Step title="When path length is 2n, record and backtrack">
+  All n pairs used exactly once per side.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function generateParenthesis(n: number): string[] {
+  const result: string[] = [];
+
+  const backtrack = (path: string, open: number, close: number): void => {
+    if (path.length === 2 * n) {
+      result.push(path);
+      return;
+    }
+    if (open < n) {
+      backtrack(path + "(", open + 1, close);
+    }
+    if (close < open) {
+      backtrack(path + ")", open, close + 1);
+    }
+  };
+
+  backtrack("", 0, 0);
+  return result;
+}
+```
+
+Time **O(4ⁿ / √n)** — Catalan growth; each valid string takes O(n) to build. Space **O(n)** recursion depth plus output.
+
+<Tradeoff
+  forTitle="Counter backtracking when"
+  againstTitle="Generate-all-then-filter when"
+  forItems={[
+    "You need only valid strings — pruning invalid prefixes saves exponential waste",
+    "Two counters (open, close) give O(1) validity check per step",
+    "n is small (≤ 8 on LeetCode) but the pattern extends to 03.04 Letter Combinations and 03.01 Permutations",
+    "Recursive structure mirrors the decision tree interviewers expect you to draw",
+    "No hash set or stack needed — pure DFS on implicit tree",
+  ]}
+  againstItems={[
+    "n is tiny (≤ 4) and brute force 2^(2n) filter is fast enough to code in two minutes",
+    "You need lexicographic order without recursion — iterative BFS on (open, close, path) works",
+    "The problem adds other characters or weights — filter approach may be simpler to extend",
+    "Stack depth limits matter in production — iterative queue avoids recursion",
+    "Interviewer wants you to derive Catalan count first before coding generation",
+  ]}
+/>
+
+## In an interview
+
+Restate: n = 2 → `["(())","()()"]`. Confirm well-formed means every prefix has at least as many opens as closes, exactly n of each.
+
+Say out loud that you track open and close counts and only add `)` when `close < open`. Draw the small n = 2 tree before coding — two branches from `(`, then constrained choices.
+
+Follow-ups: generate with different bracket types, count valid strings without generating (Catalan formula), or 03.04 Letter Combinations of a Phone Number (same backtrack skeleton). The bug interviewers watch for is allowing `)` when `close >= open`, producing strings like `())(`.
+
+<KeyTakeaways
+  items={[
+    "Generate Parentheses backtracks with open and close counts — never build invalid prefixes",
+    "Add '(' when open < n; add ')' only when close < open to keep every prefix balanced",
+    "Base case: path length 2n — all n pairs placed",
+    "Output size is the nth Catalan number — O(4^n / sqrt(n)) strings, O(n) depth",
+    "Pruning beats generate-all-filter: invalid branches are never explored",
+    "Template extends to 02.50 Combination Sum II and 03.01 Permutations with different constraints",
+  ]}
+/>

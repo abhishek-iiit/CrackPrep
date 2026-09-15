@@ -1,0 +1,125 @@
+---
+title: "N-Queens"
+number: "03.07"
+summary: "One queen per row — track occupied columns and diagonals so each placement is O(1) to validate."
+status: published
+free: true
+difficulty: deep
+estMinutes: 18
+tags: [backtracking, recursion, matrix]
+updated: "2026-09-15"
+---
+
+## n queens, n rows — column and diagonal collisions are the whole game
+
+Place n queens on an n×n board so no two share a row, column, or diagonal. Return all distinct board configurations as string arrays with `'Q'` and `'.'`.
+
+Brute force tries every cell — C(n², n) placements — and checks all pairs for attacks. The row constraint collapses the search: **exactly one queen per row**. You only choose a column for row `r`, then recurse to row `r + 1`. That cuts the tree to n^n leaves in the worst case before pruning — still large, but structured.
+
+Track three conflict sets: columns used, positive diagonals (row − col constant), negative diagonals (row + col constant). Each placement is O(1) to validate; undo removes the marks on backtrack.
+
+## Row-by-row backtracking
+
+Maintain `cols`, `posDiag`, `negDiag` as Sets (or boolean arrays indexed by column/diag id). At row `r`, try every column `c` not blocked. Place queen, add `c`, `r - c`, `r + c` to sets, recurse, undo.
+
+When `r === n`, convert the `queens[]` column-per-row array into board strings.
+
+<Steps>
+<Step title="Fix one queen per row">
+  `queens[r] = c` stores the column for row r — no need to store empty cells during search.
+</Step>
+<Step title="Check three sets before placing">
+  Skip if `c`, `r-c`, or `r+c` is already occupied.
+</Step>
+<Step title="Build board strings at leaves">
+  For each row, fill `'.'` except column `queens[r]`.
+</Step>
+</Steps>
+
+<Callout type="tip">
+N-Queens II asks for the **count** only — same search, skip board construction at leaves to save time.
+</Callout>
+
+## Solution
+
+```ts
+function solveNQueens(n: number): string[][] {
+  const result: string[][] = [];
+  const queens: number[] = []; // queens[row] = col
+  const cols = new Set<number>();
+  const posDiag = new Set<number>(); // row - col
+  const negDiag = new Set<number>(); // row + col
+
+  function buildBoard(): string[] {
+    return queens.map((c, r) =>
+      ".".repeat(c) + "Q" + ".".repeat(n - c - 1)
+    );
+  }
+
+  function backtrack(row: number): void {
+    if (row === n) {
+      result.push(buildBoard());
+      return;
+    }
+    for (let col = 0; col < n; col++) {
+      if (cols.has(col) || posDiag.has(row - col) || negDiag.has(row + col)) {
+        continue;
+      }
+      cols.add(col);
+      posDiag.add(row - col);
+      negDiag.add(row + col);
+      queens.push(col);
+
+      backtrack(row + 1);
+
+      queens.pop();
+      cols.delete(col);
+      posDiag.delete(row - col);
+      negDiag.delete(row + col);
+    }
+  }
+
+  backtrack(0);
+  return result;
+}
+```
+
+Time **O(n!)** in typical pruning — far less than n^n with early cuts; board build adds O(n²) per solution. Space **O(n)** for sets and recursion, excluding output.
+
+<Tradeoff
+  forTitle="Set-tracked backtracking when"
+  againstTitle="Bitmask columns when"
+  forItems={[
+    "n ≤ 9 on standard constraints — clarity beats micro-optimization",
+    "You must return full board strings, not just counts",
+    "Three-set template extends to other constraint placement problems",
+    "Interview time favors readable Sets over bit manipulation",
+    "Same code drops board building for N-Queens II count variant",
+  ]}
+  againstItems={[
+    "n is larger and you need competitive programming speed — column + diag bitmasks",
+    "Memory of Set objects matters — use fixed boolean arrays sized 2n for diags",
+    "Only count required — avoid buildBoard entirely",
+    "Follow-up is on a pre-partially-filled board — init sets from existing queens first",
+    "Interviewer asks for iterative DFS with explicit stack instead of recursion",
+  ]}
+/>
+
+## In an interview
+
+Restate: all solutions, board as string list. Example n = 4 has two solutions. Emphasize one queen per row — that is the first simplification.
+
+Describe the three attack directions as three sets keyed by column and diagonal identifiers. Mention undo on backtrack before coding.
+
+Follow-ups: **N-Queens II** (count), or "first valid placement only." Bug: using `col + row` for both diagonals — positive diag is `row - col`, negative is `row + col`.
+
+<KeyTakeaways
+  items={[
+    "N-Queens fixes one queen per row — search chooses a column per row, not every cell on the board.",
+    "Track columns and both diagonal families with sets for O(1) conflict checks.",
+    "Positive diagonal id is row minus col; negative is row plus col — mixing them up is the common bug.",
+    "Convert queens[row]=col to board strings only at leaves to keep recursion light.",
+    "N-Queens II uses identical search without board materialization.",
+    "Pruning makes practical runtime much better than the raw n^n upper bound.",
+  ]}
+/>

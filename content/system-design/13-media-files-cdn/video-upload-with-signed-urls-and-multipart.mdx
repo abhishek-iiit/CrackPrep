@@ -1,32 +1,115 @@
 ---
 title: "Video Upload With Signed URLs And Multipart"
 number: "13.04"
-summary: "Video Upload With Signed URLs And Multipart — notes in progress."
-status: draft
+summary: "Large video files need multipart upload and per-part signed URLs so mobile clients can retry, pause, and finish without holding an app server open for gigabytes."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 15
+tags: [video, upload, multipart]
+updated: "2026-09-15"
 ---
 
-## The problem
+## A single PUT does not survive a train tunnel
 
-What breaks without this, and the situation that forces the decision.
+Direct upload (13.01) is the right control-plane shape for video, but a 1–5 GB phone recording cannot rely on one HTTP request. Mobile networks drop. Load balancers and browsers impose timeouts. A failed 90%-complete PUT restarts from byte zero unless you design otherwise.
 
-## How it works
+**Multipart upload** splits the object into independently uploaded parts (typically 8–64 MB each for S3-compatible stores). Each part can be retried; the store assembles them into one object on complete. Combined with **per-part pre-signed URLs**, the client never sends video bytes through your API, and a flaky connection only redoes one part.
 
-The mechanism, step by step.
+## Control plane vs data plane
 
-## Tradeoffs
+Your API owns:
+
+1. Creating an upload session (DB row: user, max size, content type, status).
+2. Starting multipart on the bucket (`CreateMultipartUpload`) and storing `uploadId`.
+3. Minting signed URLs for part number `N` (and only that part).
+4. Receiving the client's list of `{partNumber, etag}` and calling `CompleteMultipartUpload`.
+5. Aborting incomplete sessions and lifecycle-expiring abandoned parts (they cost money).
+
+The client owns: slicing the file, PUT each part, retry, and reporting etags. For browsers, a worker or uploader library handles concurrency (a few parts in parallel — not dozens, or you will trip rate limits).
+
+## Sequence
+
+<Steps>
+  <Step title="Init">
+    Client: `POST /videos/uploads` with size, mime, title. API checks quota, creates `pending` row, `CreateMultipartUpload`, returns `videoId`, `uploadId`, part size recommendation, and maybe the first batch of part URLs.
+  </Step>
+  <Step title="Sign parts in batches">
+    Client requests signed URLs for part numbers `i…i+k` as it goes. Short TTL per batch. Avoid minting 200 URLs up front that expire mid-upload.
+  </Step>
+  <Step title="PUT parts directly">
+    Each response `ETag` is required later. Track progress UI from parts completed. Cap concurrent PUTs (e.g. 3–4).
+  </Step>
+  <Step title="Complete">
+    Client sends ordered etag list. API validates part count vs declared size band, calls `CompleteMultipartUpload`, `HeadObject` verifies final size, marks `uploaded`, enqueues transcoding (13.05).
+  </Step>
+  <Step title="Abort and reap">
+    Client cancel or TTL expiry → `AbortMultipartUpload`. A daily job finds `pending` older than N hours and aborts — incomplete multipart debris is a classic surprise bill.
+  </Step>
+</Steps>
+
+```text
+API: CreateMultipartUpload → uploadId
+Client: PUT part 1 (signed) → ETag1
+Client: PUT part 2 (signed) → ETag2
+...
+API: CompleteMultipartUpload(uploadId, [{1,ETag1},{2,ETag2},...])
+Store: assembles final object
+API: enqueue transcoder
+```
+
+## Part size and limits
+
+S3-compatible systems typically require parts at least 5 MB (except the last) and allow up to 10,000 parts — so a 5 MB minimum caps you near 50 GB unless you raise part size. Pick part size from max expected duration × bitrate with headroom: e.g. 16 MB parts for social video, larger for pro cameras. Document the max accepted file size in the init API and reject early.
+
+Resumability: persist `{videoId, uploadId, nextPart, etags}` on the client (and optionally server-side). After an app kill, request new signed URLs for remaining parts; do not restart completed ones.
+
+Optional integrity: some clients compute a content hash as parts finish and send it on complete; the API compares to a hash the store or a worker derives. This catches truncated or swapped parts that still produced etags in pathological client bugs. It is not a substitute for authz on the signed URLs.
+
+Parallelism has diminishing returns: three to four concurrent part PUTs usually saturate a phone uplink; twenty concurrent parts mostly amplify 503s from the bucket. Cap concurrency in the uploader, not in a hope that the network will sort it out.
+
+## Security checks
+
+- Scope signed URLs to exact bucket key + part number + method.
+- Bind content-type where supported; verify final object type/size on complete.
+- Do not mark the video playable until transcoding succeeds — uploaded ≠ safe/playable.
+- Rate-limit init requests to stop multipart junk creation attacks.
+- Keep the raw object private; playback uses a different path (13.06, 13.07).
+
+<Callout type="warn">
+Forgetting `AbortMultipartUpload` / lifecycle policies on incomplete uploads leaves parts stored silently. Teams discover this when the bill for "objects that are not objects yet" arrives. Make abort-on-timeout a feature of the design, not an ops afterthought.
+</Callout>
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Use multipart + signed part URLs when"
+  againstTitle="Use a single signed PUT (or proxy) when"
+  forItems={[
+    "Files are large enough that mid-transfer failure is expected — roughly tens of MB and up on mobile",
+    "You need pause/resume across app restarts",
+    "Parallel part upload improves throughput on high-bandwidth links",
+    "App servers must not see gigabytes on the wire",
+    "You can operate init/complete/abort session state and reapers",
+  ]}
+  againstItems={[
+    "Clips are small (a few MB) and a single PUT already succeeds reliably",
+    "Client environment cannot implement part tracking (very constrained IoT) and a managed uploader service is better",
+    "Compliance requires bytes to pass through a scanning proxy before any durable store — multipart still applies but not 'direct to public bucket'",
+    "Your object store lacks multipart and you must chunk at the application layer into many objects (different design)",
+    "Operational complexity of abort/reap is not staffed and debris risk is unacceptable right now",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Upgrade 13.01 explicitly: "For video I use multipart upload with batched pre-signed part URLs, complete with etag list, abort reaper, then async transcode." Mention part size vs max object math and that playback waits for the pipeline. Do not drown in SDK method names — the session state machine is the design.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Multipart upload splits large videos into independently retryable parts assembled by the object store on complete",
+    "The API signs parts and completes/aborts; the client uploads bytes directly and returns etags",
+    "Mint part URLs in batches with short TTLs so expiry does not outrun long uploads",
+    "Always reap incomplete multipart sessions — abandoned parts are real spend",
+    "Uploaded is not playable: enqueue transcoding and keep raw objects private",
+    "Choose part size from max file size and the store's part-count limits, and reject oversize at init",
+  ]}
+/>

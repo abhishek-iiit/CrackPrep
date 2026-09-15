@@ -1,0 +1,97 @@
+---
+title: "Same Tree"
+number: "02.11"
+summary: "Two trees match only if every node pair agrees on value and both children — a short-circuit DFS walk."
+status: published
+free: true
+difficulty: intro
+estMinutes: 10
+tags: [binary-tree, dfs, recursion]
+updated: "2026-09-15"
+---
+
+## Identical structure, identical values — or not
+
+Given the roots of two binary trees, return whether they are the same tree. Same means same node values in the same positions: if `p` has a left child, `q` must have a matching left child with the same value, and the subtrees below must also match.
+
+The brute force temptation is to serialize both trees to strings and compare. That works, but it allocates two full traversals and hides the actual decision rule. On a tree with 10⁴ nodes you pay O(n) time either way — the difference is whether you compare **in place** as you walk or build intermediate representations first.
+
+The edge cases that bite: both roots null (true), exactly one null (false), equal values at the root but mismatched subtrees deeper down. A shallow value check at the root is never enough.
+
+## Mirror the walk on both trees
+
+At each step you have a pair of nodes `(a, b)`. If both are null, they match. If exactly one is null, they do not. If values differ, stop. Otherwise recurse on `(a.left, b.left)` and `(a.right, b.right)`.
+
+The invariant: whenever you enter the helper, every ancestor pair above has already been verified equal. The first mismatch anywhere in either subtree makes the whole answer false.
+
+<Steps>
+<Step title="Base cases on the current pair">
+  Both null → true. One null → false. Values differ → false.
+</Step>
+<Step title="Recurse on left-left and right-right">
+  Return the logical AND of both recursive results — one bad subtree is enough to fail.
+</Step>
+</Steps>
+
+Iterative BFS with two queues works too: dequeue paired nodes and enqueue paired children. Recursion is usually shorter to write in an interview.
+
+## Solution
+
+```ts
+class TreeNode {
+  val: number;
+  left: TreeNode | null;
+  right: TreeNode | null;
+  constructor(val?: number, left?: TreeNode | null, right?: TreeNode | null) {
+    this.val = val ?? 0;
+    this.left = left ?? null;
+    this.right = right ?? null;
+  }
+}
+
+function isSameTree(p: TreeNode | null, q: TreeNode | null): boolean {
+  if (p === null && q === null) return true;
+  if (p === null || q === null) return false;
+  if (p.val !== q.val) return false;
+
+  return isSameTree(p.left, q.left) && isSameTree(p.right, q.right);
+}
+```
+
+Time **O(n)** where n is the number of nodes in the smaller tree (you stop early on mismatch). Space **O(h)** for the recursion stack, h = height — O(n) worst case on a skewed tree.
+
+<Tradeoff
+  forTitle="Recursive DFS when"
+  againstTitle="Serialize-then-compare when"
+  forItems={[
+    "You want early exit on the first mismatched node without scanning the rest",
+    "Stack depth is acceptable — balanced trees keep h ≈ log n",
+    "The problem is strictly structural equality, not a custom node field comparison",
+    "You are building toward 02.16 Subtree of Another Tree, which reuses this check",
+    "Interview time is tight and the four-line base case is easy to explain",
+  ]}
+  againstItems={[
+    "Trees are extremely deep and stack overflow is a real concern — use iterative BFS",
+    "You already have a serialization pipeline and diffing strings is the product requirement",
+    "Follow-up asks for a canonical serialization format anyway (02.15)",
+    "You need to compare trees with cycles — these problems assume proper binary trees",
+    "Interviewer wants you to discuss preorder string equality as a stepping stone first",
+  ]}
+/>
+
+## In an interview
+
+Restate with a tiny example: `[1,2,3]` vs `[1,2,3]` → true; same root value but swapped children → false. Confirm both inputs are proper binary trees (no cycles), values are integers.
+
+Say the rule out loud before coding: "Compare current pair, then both left subtrees, then both right subtrees — short-circuit on first false." Mention you handle null-before-value so you never dereference a missing node.
+
+The bug to flag: checking only root values, or comparing `p.left` to `q.right`. Follow-ups: same tree but ignore one subtree; check if one tree is a subtree of the other (02.16); invert then compare (02.12).
+
+<KeyTakeaways items={[
+  "Two trees are the same iff every aligned node pair has equal values and both children align recursively.",
+  "Handle both-null and one-null before comparing values — null is not equal to a real node.",
+  "Short-circuit with logical AND: one false subtree makes the entire answer false.",
+  "O(n) time, O(h) stack space; skewed trees push space toward O(n).",
+  "This exact pairwise check is the leaf test inside 02.16 Subtree of Another Tree.",
+  "Iterative dual-queue BFS is equivalent if recursion depth worries you.",
+]} />

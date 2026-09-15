@@ -1,32 +1,83 @@
 ---
 title: "Object Storage Vs Database"
 number: "07.13"
-summary: "Object Storage Vs Database — notes in progress."
-status: draft
+summary: "Opaque blobs want cheap durable storage; rows want queries — putting either in the wrong system costs you latency, money, or both."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: intro
+estMinutes: 10
+tags: [object-storage, databases, architecture, decision]
+updated: "2026-09-15"
 ---
 
-## The problem
+## A photo does not want a primary key, and a balance does not want a bucket
 
-What breaks without this, and the situation that forces the decision.
+Systems that store both structured records and large binary payloads eventually face the same fork: keep everything in the database, shove everything into object storage, or split them. The wrong answer is not "use both" — most production systems do use both — it is putting a payload in the store whose API and cost model fight the access pattern. A 5 MB photo sitting as a `BYTEA` column in Postgres is durable and transactional, and it will also bloat backups, poison the buffer cache, and turn a table scan into a bandwidth problem. A ledger row sitting as a JSON object in S3 is cheap to store, and it will also make "show me this user's last ten transactions" into a listing-and-fetching exercise you should never have designed.
 
-## How it works
+Object storage and databases are not two sizes of the same box. A database stores rows you intend to query, update, join, and constrain. Object storage stores opaque bytes you intend to put, get, and delete by key. Confusing those contracts is how a design ends up either paying database prices for cold blobs or inventing a query engine on top of a key-value blob store.
 
-The mechanism, step by step.
+## What each store actually sells you
 
-## Tradeoffs
+**A relational or document database** gives you a typed (or semi-typed) record, secondary indexes, transactions across multiple rows, and a query language that can answer predicates without fetching every document. The unit of work is a row or document; the unit of cost is usually IOPS, CPU for query planning, and memory for the working set. Latency targets are milliseconds for a point lookup and tens of milliseconds for a modest query — numbers that collapse once the working set includes multi-megabyte blobs that have to travel through the same path as the metadata.
+
+**Object storage** gives you an opaque object addressed by a string key (often hierarchical-looking, but still a key), a `PUT`/`GET`/`DELETE` API, and durability and scale characteristics that come from treating every object as immutable once written — overwrite is a new version or a full replace, not an in-place edit of bytes 400–800. The unit of work is the whole object, or a byte range of it. Listing is eventually consistent or expensive; there is no `WHERE status = 'pending'`. Cost is dominated by storage-per-GB and egress, not by row-level IOPS.
+
+| | Database | Object storage |
+| --- | --- | --- |
+| Primary access | Query by predicate, join, index | Fetch by key (or byte range) |
+| Mutation model | In-place updates, transactions | Replace or version; no partial rewrite of a "row" |
+| Typical payload | Bytes to a few KB per row; MB only when forced | KB to GB per object, routinely |
+| Consistency you get | Strong within the DB's isolation model | Per-object durability on ack; listing/metadata may lag |
+| What blows up first | Working set, backup size, vacuum/compaction of fat rows | Metadata cardinality, small-object PUT rate, listing cost |
+
+01.06 Back-Of-The-Envelope Capacity Planning is where payload size enters the design: once an item is hundreds of KB and the write rate is non-trivial, database storage and backup cost stop being a rounding error. 13.01 Direct To Object Storage Upload is the client-side pattern that follows once you have chosen the split — the application server stops proxying multi-megabyte bodies through its own memory.
+
+## The hybrid that almost every media system converges on
+
+Keep the queryable facts in the database and the bytes in object storage. The row holds the object's key (or URL), content type, size, checksum, owner, and whatever the product needs to filter on — visibility, moderation state, album id. The object store holds the bytes and nothing the product needs to `WHERE` against. A read that needs "the photo and its caption" becomes two fetches: a cheap indexed row lookup, then a `GET` (often via CDN or signed URL) for the blob. A delete becomes two coordinated operations, which is where most of the operational pain lives — orphaned objects if the DB delete succeeds and the object delete fails, or dangling keys if the reverse happens.
+
+That coordination is real work. Soft-delete the row first and let a sweeper remove the object; or delete the object only after the row is gone and accept a brief window where a signed URL still works; or use a two-phase outbox so neither side drifts forever. None of those are free, and none of them mean you should put the blob back in the database to avoid them — they mean the split has a lifecycle story, not just a storage story.
+
+<Callout type="gotcha">
+"Store the path in the DB and the file on the local disk of the app server" is the same architectural split with none of the durability. Object storage is what you reach for when the bytes must outlive any single machine; a local filesystem path is what you reach for when you are prototyping and have not yet paid for a lost disk.
+</Callout>
+
+## When the database still wins for binary data
+
+Small, hot, and tightly coupled to a transaction. A 2 KB avatar thumbnail that is always loaded with the profile row and updated in the same transaction as the profile may be cheaper as a column than as a round trip to object storage — especially if the profile is already in a cache and the thumbnail fits there too. Session tokens, small cryptographic material, and configuration blobs that must be transactional with surrounding rows belong in the database. The hinge is not "is it binary" — it is "do I need to query or transactionally mutate this with other rows, and is it small enough that doing so does not wreck the store's working set."
+
+Conversely, a 200 MB video never belongs in the database no matter how much you want a single transaction around "insert video row and bytes." The transaction you want is over the metadata; the bytes get their own durability contract from the object store (07.19 Object Storage Durability And Replication).
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Put it in object storage when"
+  againstTitle="Keep it in the database when"
+  forItems={[
+    "Payloads are large relative to the row — hundreds of KB and up — or grow without a fixed upper bound",
+    "Access is by key or CDN URL, not by SQL predicate over the bytes themselves",
+    "You need cheap durable retention for cold or infrequently read blobs without inflating DB backups",
+    "Writes are whole-object replaces; you do not need byte-level transactional updates inside the payload",
+    "Egress and CDN delivery matter more than joining the payload to other tables in one query",
+  ]}
+  againstItems={[
+    "The bytes are small, hot, and always read with a parent row that already lives in the DB",
+    "You need transactions that atomically update the payload and related rows in one commit",
+    "Secondary indexes or predicates over fields inside the payload are first-class queries",
+    "Operational simplicity of one store beats the split — and the data volume is still small enough that backups stay cheap",
+    "Listing, scanning, or aggregating across many items is the main access pattern, not point fetch by key",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Open with the payload size and the access pattern, not the product name: "profile metadata is a few KB and queried by user id — that stays in the database; the photo is a few MB fetched by URL — that goes to object storage, with the key and checksum on the row." Expect the follow-up about consistency between the two: name the orphan/dangling-key failure mode and the sweeper or outbox before you are asked. If the interviewer pushes "why not just store everything in Postgres," answer with backup size and buffer-cache pollution, not with fashion.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Object storage sells durable opaque bytes addressed by key; a database sells queryable, updatable records — they are different contracts, not different sizes of the same store",
+    "Large or unbounded binary payloads in a database inflate backups, poison the working set, and turn ordinary queries into bandwidth problems",
+    "The common hybrid keeps filterable metadata in the database and bytes in object storage, linked by key, size, and checksum",
+    "The hybrid's real cost is lifecycle coordination — orphaned objects and dangling keys — not the PUT itself",
+    "Small, hot, transactionally coupled blobs can still belong in the database; the decision hinge is access pattern and size, not whether the data is binary",
+    "In an interview, lead with payload size and whether you need predicates over the bytes — those two answers usually pick the store",
+  ]}
+/>

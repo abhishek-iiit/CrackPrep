@@ -1,0 +1,114 @@
+---
+title: "Palindrome Partitioning"
+number: "03.06"
+summary: "Every cut position forms a partition tree — precompute palindromes so each branch checks O(1) instead of rescanning."
+status: published
+free: true
+difficulty: deep
+estMinutes: 17
+tags: [backtracking, string, dynamic-programming]
+updated: "2026-09-15"
+---
+
+## Split the string at every boundary — naive palindrome checks repeat work
+
+Given a string `s`, partition it so every part is a palindrome. Return all partitions. `"aab"` → `[["a","a","b"], ["aa","b"]]`.
+
+Backtracking tries every cut: from index `start`, pick `end` such that `s[start..end]` is a palindrome, push that substring, recurse on `end + 1`, pop. Without preprocessing, each palindrome test is O(n) and you run it at every node — on a string of length 16 that adds up across the 2^(n−1) cut tree.
+
+Precompute `isPalin[i][j]` in O(n²) once. Then each branch check is O(1).
+
+## Backtrack cuts with a palindrome table
+
+Build `isPalin[i][j]` bottom-up: single chars true, expand outward for longer substrings (or fill diagonally). DFS from `start`: loop `end` from `start` to n−1; if `isPalin[start][end]`, add `s.slice(start, end + 1)` to path, recurse from `end + 1`.
+
+The invariant: `path` holds a list of palindrome substrings covering `s[0..start-1]`. When `start === n`, copy `path` to result.
+
+<Steps>
+<Step title="Precompute isPalindrome">
+  For each center or each `(i, j)` pair with `i <= j`, mark whether `s[i..j]` reads the same forward and backward.
+</Step>
+<Step title="DFS from start index">
+  Try extending the current part to every `end` where `isPalin[start][end]`.
+</Step>
+<Step title="Collect at start === n">
+  Full string consumed — one valid partition.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function partition(s: string): string[][] {
+  const n = s.length;
+  const isPalin: boolean[][] = Array.from({ length: n }, () =>
+    Array(n).fill(false)
+  );
+
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = i; j < n; j++) {
+      isPalin[i][j] =
+        s[i] === s[j] && (j - i <= 2 || isPalin[i + 1][j - 1]);
+    }
+  }
+
+  const result: string[][] = [];
+  const path: string[] = [];
+
+  function backtrack(start: number): void {
+    if (start === n) {
+      result.push([...path]);
+      return;
+    }
+    for (let end = start; end < n; end++) {
+      if (!isPalin[start][end]) continue;
+      path.push(s.slice(start, end + 1));
+      backtrack(end + 1);
+      path.pop();
+    }
+  }
+
+  backtrack(0);
+  return result;
+}
+```
+
+Time **O(n × 2^n)** worst case for enumeration (every substring is a palindrome on strings like `"aaa..."`), plus **O(n²)** preprocessing. Space **O(n²)** for the table plus **O(n)** recursion depth.
+
+<Tradeoff
+  forTitle="Precompute plus backtrack when"
+  againstTitle="On-the-fly two-pointer check when"
+  forItems={[
+    "n ≤ 16 and you will query many palindrome intervals during DFS",
+    "Same table supports follow-up: minimum cuts (DP on top of isPalin)",
+    "Interviewers expect you to name repeated palindrome work and eliminate it",
+    "String has moderate length with many overlapping substrings",
+    "You are in the backtracking partition family with Word Break II",
+  ]}
+  againstItems={[
+    "n is very small (≤ 8) and inline two-pointer check is simpler to code",
+    "Only minimum cut count needed — DP on isPalin without enumerating partitions",
+    "Memory for n² table is tight — expand-around-center per candidate cut instead",
+    "Input is single-character heavy — early palindrome failure prunes most branches anyway",
+    "Follow-up asks longest palindromic substring only — different technique (Manacher or expand)",
+  ]}
+/>
+
+## In an interview
+
+Restate: every part must be palindrome, return all partitions. Example `"aab"`. Note exponential output in worst case.
+
+Say: backtrack cut positions, precompute palindrome intervals in O(n²) so DFS stays clean. Draw the tree for `"aab"`: cut after first `a`, after `aa`, etc.
+
+Follow-ups: **Palindrome Partitioning II** (minimum cuts), or return one partition only. Bug: off-by-one on `end` in slice (`end + 1` exclusive), or forgetting empty string edge (single char always works).
+
+<KeyTakeaways
+  items={[
+    "Palindrome Partitioning backtracks cut positions from a start index through the string.",
+    "Precompute isPalin[i][j] in O(n²) so each branch avoids rescanning substrings.",
+    "Worst-case output is exponential when every prefix is a palindrome (e.g., all same char).",
+    "The same palindrome table feeds minimum-cut DP in Palindrome Partitioning II.",
+    "Path holds substring parts; recurse from end + 1 after choosing s[start..end].",
+    "Inline two-pointer palindrome checks trade table memory for repeated O(n) work per node.",
+  ]}
+/>

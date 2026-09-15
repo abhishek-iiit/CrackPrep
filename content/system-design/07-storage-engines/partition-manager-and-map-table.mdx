@@ -1,32 +1,111 @@
 ---
 title: "Partition Manager And Map Table"
 number: "07.16"
-summary: "Partition Manager And Map Table — notes in progress."
-status: draft
+summary: "Frontends find storage nodes through a compact, versioned map — not by asking every disk — and the partition manager is the process that keeps that map true as nodes join, leave, and rebalance."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 14
+tags: [partitioning, object-storage, map-table, rebalancing]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Knowing where the bytes live is a different problem from storing them
 
-What breaks without this, and the situation that forces the decision.
+07.14 S3-Style Object Storage Architecture put a partition map between metadata and storage nodes. Without that map, every frontend either hard-codes placement, asks a central directory on every request, or sprays the cluster hoping someone owns the key. The first does not survive cluster growth. The second turns the directory into a latency tax on every GET. The third is not a design.
 
-## How it works
+The partition manager and its map table exist so placement is a small, cacheable, strongly versioned piece of state: given a partition id, here are the nodes (and roles) that currently own it. Object metadata can then store a stable partition id instead of a brittle hostname, and frontends can route bytes without reinventing membership on each call.
 
-The mechanism, step by step.
+## What the map table holds
 
-## Tradeoffs
+A map table is deliberately skinny. A typical row looks like:
+
+```text
+partition_id | epoch / map_version | primary | replicas... | state
+     4821    |        90441        |  n17    | n4, n22     | ACTIVE
+```
+
+- **partition_id** — the unit of ownership. Derived from a hash of the object key, a range assignment, or an explicit allocator; 07.15 Range Partitioning vs Consistent Hashing for Storage is the choice of how keys become partition ids.
+- **epoch / map_version** — a monotonic version for the whole map or per partition. Stale caches detect themselves when a node rejects a request with "I am not responsible for 4821 at epoch 90441."
+- **membership** — which nodes hold replicas or erasure-coded fragments, and which is primary for writes if the data plane is primary-based.
+- **state** — `ACTIVE`, `SPLITTING`, `MOVING`, `READ_ONLY`, `DRAINING`. Routing behavior depends on this more than operators sometimes admit: a `MOVING` partition may accept writes on the destination while reads still prefer the source until cutover.
+
+The map is not the object catalog. It does not list keys. A cluster with a billion objects might have tens of thousands of partitions — small enough that every frontend can keep the whole map in memory and refresh on a short interval or on epoch mismatch.
+
+## What the partition manager does
+
+The manager is the control plane for ownership. It does not sit on the byte path once the map is cached.
+
+<Steps>
+  <Step title="Assign new partitions to nodes">
+    When capacity is added or a bucket's keyspace is carved into more partitions, the manager writes new map rows and publishes a bumped epoch. Frontends pick up the new rows through watch, poll, or push.
+  </Step>
+  <Step title="React to node failure">
+    A storage node that misses heartbeats is marked unhealthy. The manager promotes a replica, re-replicates under-replicated partitions, and publishes map updates so writes stop targeting the dead node. Speed matters: every minute of "primary down, map still pointing at it" is a burst of client errors or retries onto a black hole.
+  </Step>
+  <Step title="Drive rebalance and drain">
+    Adding a node should pull a fraction of partitions toward it; removing one should empty it first. The manager schedules moves — copy data, update map to dual-write or read-new, drop the old copy — and bounds how many moves run at once so the cluster does not spend all disk bandwidth on reshuffling.
+  </Step>
+  <Step title="Coordinate splits and merges">
+    If partitions are range-based and one grows hot or huge, the manager splits it and updates the map so each half has its own row. Merges reverse that when many tiny partitions waste memory and RPC fan-out. Hash-based systems split less often at the map layer and instead add virtual nodes; the manager still owns the membership change.
+  </Step>
+  <Step title="Publish map epochs clients can trust">
+    Every change bumps a version. Frontends and storage nodes agree that an epoch is authoritative only after a quorum of the metadata/control store has accepted it — otherwise two managers in a split brain could hand the same partition to different primaries.
+  </Step>
+</Steps>
+
+<Callout type="warn">
+A map update that races a PUT is how you get split brains in the data plane: two primaries accepting writes for the same partition under different epochs. Storage nodes must reject requests whose map epoch is older than their local view, and frontends must refresh rather than retry blindly against the same node.
+</Callout>
+
+## Caching without lying
+
+Frontends cache the map because the alternative is a metadata RPC per request. The failure mode of a cache is serving a stale epoch. Mitigations stack:
+
+- **Short TTLs** plus **watch/pubsub** on map changes for low-latency invalidation.
+- **Epoch in every data-plane RPC** so the storage node is the source of truth for "do I still own this?"
+- **Sticky refresh** after a rejection — one 421-style "wrong node" should refresh the partition's row, not the entire multi-megabyte map if you can avoid it.
+
+The object metadata DB (07.17) still stores which partition an object belongs to. That binding is usually immutable for the life of the object version; rebalance moves the partition's bytes and membership, not each object's partition id. That is the point of indirection: moving a million objects means updating one map row and copying bytes, not rewriting a million metadata records.
+
+## Failure modes you will actually see
+
+**Map thrash under flapping nodes.** A flaky network makes the manager bounce primaries; every bounce invalidates caches and aborts in-flight writes. Hysteresis and grace periods matter more here than clever algorithms.
+
+**Rebalance vs foreground I/O.** Move too aggressively and p99 GET latency climbs because disks are busy copying. Move too timidly and a new empty node sits idle while the old ones burn. Cap concurrent partition moves and measure client latency, not only "rebalance progress %."
+
+**Hot partitions the map cannot fix alone.** If one key is 90% of traffic, finer partitions do not help — that key still hashes to one partition. The map spreads ownership of many keys; it does not split a single object's request rate. 04.06 Hot Partitions is the product-level problem; here you only ensure the map does not make it worse by also concentrating many hot keys onto the same node through bad assignment.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Invest in an explicit partition manager when"
+  againstTitle="Skip or minimize it when"
+  forItems={[
+    "The cluster adds and removes storage nodes routinely and ownership must move without rewriting object metadata",
+    "Frontends must route without a per-request directory lookup against the object catalog",
+    "You need controlled rebalance, drain, and failure promotion with a single epoch sequence",
+    "Partition count is large enough that hand-edited placement files are an outage waiting to happen",
+    "Storage nodes should reject stale routing rather than silently accept writes for partitions they no longer own",
+  ]}
+  againstItems={[
+    "A fixed, small set of nodes will not change for the life of the deployment",
+    "A single metadata service can afford to be asked 'where?' on every request and placement is stored per object",
+    "You are on a managed object store and the map is entirely the vendor's problem",
+    "Object count and node count are both tiny — a static config file outlives the system's complexity budget",
+    "POSIX filesystem semantics matter more than partition mobility, and you are not building an object data plane",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Describe the indirection in one sentence: "object metadata names a partition id; the map table names the nodes for that partition; the manager mutates only the map when the cluster changes." Then name the stale-cache failure mode and the epoch check on the storage node. If asked how rebalance works, say "copy bytes, bump map epoch, drop old copy" — not "update every object record."
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "The map table is a compact, versioned directory from partition id to storage-node membership — not a catalog of object keys",
+    "Object metadata stores a stable partition id so rebalance updates map rows instead of rewriting millions of object records",
+    "The partition manager assigns, fails over, drains, and splits partitions, publishing monotonic epochs clients can cache safely",
+    "Frontends cache the map; storage nodes enforce epochs so stale routing fails closed instead of splitting writes",
+    "Rebalance is a background bandwidth budget: too fast hurts p99, too slow wastes new capacity",
+    "A map cannot fix a single hot key — it spreads many keys' ownership, not one object's request rate",
+  ]}
+/>

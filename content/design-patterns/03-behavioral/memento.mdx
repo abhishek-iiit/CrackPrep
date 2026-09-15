@@ -1,0 +1,93 @@
+---
+title: "Memento"
+number: "03.05"
+summary: "Snapshots let an object rewind to a prior state without exposing its internals — the backup object is opaque to everyone except the originator."
+status: published
+free: true
+difficulty: core
+estMinutes: 13
+tags: [behavioral, undo, state]
+updated: "2026-09-15"
+---
+
+## Undo without leaking your private fields
+
+A canvas editor stores layers, selection masks, and transform matrices inside a `Document` class. Product wants fifty levels of undo. The brute-force approach — expose getters for every field so a history manager can copy them — breaks encapsulation: external code now depends on internal layout, and any refactor of the document model breaks the undo stack.
+
+Memento captures **state as an opaque token**. The originator creates a memento from its current fields; only the originator can read a memento back. The caretaker (history stack, save file, clipboard) stores mementos but cannot inspect or mutate them — it treats them like sealed envelopes.
+
+That boundary is the point: undo infrastructure does not need to understand documents, only to hold and replay tokens.
+
+## Originator, memento, caretaker
+
+- **Originator** — the object whose state matters (`Document`, `GameLevel`, `FormWizard`). Creates mementos from itself and restores from them.
+- **Memento** — immutable snapshot; narrow interface for caretaker (maybe timestamp/id), wide interface for originator only (friend class, package-private, or same-module type).
+- **Caretaker** — stack, list, or file of mementos; never peeks inside.
+
+<Steps>
+<Step title="Originator saves">
+Before a mutating operation, `const snap = originator.createMemento()`. The memento copies or references internal state depending on copy cost.
+</Step>
+<Step title="Caretaker stores">
+Push onto undo stack, append to revision list, or serialise to disk. Caretaker tracks order, not content.
+</Step>
+<Step title="Originator restores">
+On undo, caretaker pops a memento and calls `originator.restore(memento)`. Fields revert; caretaker still never reads them.
+</Step>
+</Steps>
+
+```typescript
+class DocumentMemento {
+  // Only Document reads/writes these — caretaker sees opaque token
+  constructor(readonly state: string) {}
+}
+
+class Document {
+  private content = "";
+  createMemento() { return new DocumentMemento(this.content); }
+  restore(m: DocumentMemento) { this.content = m.state; }
+  edit(text: string) { this.content += text; }
+}
+```
+
+Full snapshots are simple but memory-heavy on large objects. **Incremental mementos** store deltas; **copy-on-write** structures (persistent data structures, Immer) make snapshots cheap by sharing unchanged subtrees. Pick based on object size and undo depth — a 10 MB image layer stack needs a different strategy than a text buffer.
+
+<Callout type="warn">
+Mementos that hold live references to mutable objects are not snapshots — they are aliases. Deep-copy at save time or use immutable data structures, or undo will restore shared state that continued changing.
+</Callout>
+
+## Memento vs Command for undo
+
+03.02 Command stores the **operation** ("delete chars 5–10"); undo runs the inverse. Memento stores **state** ("content was `hello`"). Use Command when operations are invertible and compact; use Memento when inverse is hard (freehand draw, physics simulation step) or when restore must be exact regardless of how you got there. They compose: Command executes, Memento captures before-state inside the command.
+
+<Tradeoff
+  forTitle="Reach for Memento when"
+  againstTitle="Avoid Memento when"
+  forItems={[
+    "You must snapshot object state for undo without exposing internal structure to a history manager",
+    "Restoring exact prior state matters more than storing compact inverse operations",
+    "Checkpoints, save points, or rollback in a wizard need opaque tokens the UI can stack",
+    "The originator's state is moderate in size and deep-copy cost is acceptable at undo boundaries",
+    "External modules should store backups but must not depend on the originator's field layout"
+  ]}
+  againstItems={[
+    "Every action has a cheap, reliable inverse — 03.02 Command undo is smaller and clearer",
+    "State is huge (video frames, gigabyte models) and full snapshots are impossible on every edit",
+    "You need diffable, mergeable history — CRDTs or event sourcing fit better than opaque blobs",
+    "Memento count is unbounded and nobody implemented pruning — memory grows until the process dies",
+    "Language privacy cannot enforce opaque mementos — caretakers will cast and peek, breaking encapsulation anyway"
+  ]}
+/>
+
+## In an interview
+
+Introduce by encapsulation: "The history stack should not know document internals — the document hands it sealed snapshots it can only give back." Expect Memento vs Command for undo, snapshot memory cost, and incremental vs full copy. Mention caretaker pruning (cap stack depth, merge checkpoints). Name the bug: shallow copies that make undo appear to work until shared nested objects mutate.
+
+<KeyTakeaways items={[
+  "Memento captures an object's internal state in an opaque object only the originator can interpret.",
+  "The caretaker stores mementos but never inspects them — undo is replaying tokens, not reversing logic in external code.",
+  "Full snapshots are simple; large state needs incremental mementos, copy-on-write, or capped history depth.",
+  "Shallow-copy mementos alias live mutable data — deep-copy or immutability at the boundary or undo lies.",
+  "Pair with 03.02 Command when operations are invertible; use Memento alone when state restore is the only practical undo.",
+  "Prune the caretaker stack — fifty undo steps times ten megabytes per snapshot is a real production outage."
+]} />

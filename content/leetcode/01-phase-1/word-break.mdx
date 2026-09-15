@@ -1,0 +1,102 @@
+---
+title: "Word Break"
+number: "01.20"
+summary: "dp[i] is true if some dictionary word ends at i and dp at the start of that word is true — O(n² × word check) on the string."
+status: published
+free: true
+difficulty: core
+estMinutes: 14
+tags: [dp, string, hash-set]
+updated: "2026-09-15"
+---
+
+## Segmentation, not substring search
+
+Given string `s` and a dictionary of words, can `s` be segmented into a space-separated sequence of **dictionary words**? Reuse words allowed.
+
+`s = "leetcode"`, `wordDict = ["leet","code"]` → **true** (`"leet code"`). `s = "applepenapple"`, `["apple","pen"]` → **true**. `s = "catsandog"`, `["cats","dog","sand","and","cat"]` → **false** — `"cat sand og"` fails on `"og"`.
+
+Greedy from the left fails: pick `"cat"` in `"catsandog"` and you dead-end. Backtracking all splits is **O(2ⁿ)** in the worst case. The structure is **DP on prefixes**: if you know which prefix lengths are valid, you only try extensions that land on dictionary words.
+
+## dp[i] = can s[0..i-1] be segmented?
+
+**Invariant:** after computing `dp[i]`, you know whether the first `i` characters of `s` form a valid segmentation.
+
+For each end position `i`, try every start `j < i`. If `dp[j]` is true and `s[j..i-1]` is in the dictionary, set `dp[i] = true` and break.
+
+Base: `dp[0] = true` (empty prefix is valid). Answer: `dp[s.length]`.
+
+For `"leetcode"` with `{"leet","code"}`:
+
+- dp[4] true (`"leet"`)
+- dp[8] true (`"leet"` + `"code"`)
+
+Put dictionary words in a **Set** for O(1) lookup. Inner loop tries O(n) starts per end → **O(n² × L)** where L is average word length for substring compare (or O(n²) with hash set if you treat lookup as O(1)).
+
+<Steps>
+<Step title="wordSet = new Set(wordDict)">Fast membership.</Step>
+<Step title="dp[0] = true">Empty string segments trivially.</Step>
+<Step title="For i from 1 to n">End of prefix (exclusive index i).</Step>
+<Step title="For j from 0 to i-1">If dp[j] and s.slice(j,i) in set → dp[i]=true.</Step>
+<Step title="Return dp[n]">Full string.</Step>
+</Steps>
+
+## Solution
+
+```ts
+function wordBreak(s: string, wordDict: string[]): boolean {
+  const wordSet = new Set(wordDict);
+  const n = s.length;
+  const dp = new Array<boolean>(n + 1).fill(false);
+  dp[0] = true;
+
+  for (let i = 1; i <= n; i++) {
+    for (let j = 0; j < i; j++) {
+      if (dp[j] && wordSet.has(s.slice(j, i))) {
+        dp[i] = true;
+        break;
+      }
+    }
+  }
+
+  return dp[n];
+}
+```
+
+Time **O(n² × L)** worst case for substring checks; **O(n²)** with O(1) set lookup on average-length words. Space **O(n + |dict|)**.
+
+## Prefix DP versus backtracking
+
+<Tradeoff
+  forTitle="1D prefix DP when"
+  againstTitle="Backtracking / memo DFS when"
+  forItems={[
+    "You need a yes/no on segmentability — the boolean table is direct",
+    "n ≤ 300 — O(n²) is comfortable",
+    "Same pattern as 01.17 Coin Change: fill dp by trying all valid 'steps' from prior states",
+    "Follow-up 03.05 Word Break II wants all sentences — start from this dp, then backtrack paths",
+  ]}
+  againstItems={[
+    "Dictionary is huge but words are long and sparse — trie can prune better (02.21 Implement Trie)",
+    "You only need one valid split — early-exit DFS with memo on start index can be faster in practice",
+    "Character set is tiny and n is small — brute backtracking passes with pruning",
+    "Problem variant uses bounded word counts per position — different state, not plain dp[i]",
+  ]}
+/>
+
+## In an interview
+
+Restate: partition `s` into dictionary words, words reusable. Give the counterexample where greedy fails. Define `dp[i]` = can prefix of length `i` be segmented. Transition: last word ends at `i`, starts at `j`, requires `dp[j]` and word in set.
+
+Follow-ups: 03.05 Word Break II (return all sentences), minimum number of breaks, word break with wildcards.
+
+Bug to name: `dp[0]` must be true; forgetting it makes every chain fail. Also confusing `dp[i]` as length vs index — use `n+1` array and `slice(j, i)` for `s[j..i-1]`.
+
+<KeyTakeaways items={[
+  "dp[i] = true if some j < i has dp[j] true and s[j..i-1] in the dictionary.",
+  "Seed dp[0] = true; answer is dp[s.length].",
+  "Store wordDict in a Set — O(1) lookup inside the O(n²) loop over split points.",
+  "Greedy left-to-longest-match fails; DP tries all split positions.",
+  "03.05 Word Break II backtracks from dp[n] to enumerate all valid segmentations.",
+  "Same 1D 'can I reach position i' shape as coin change and jump game variants.",
+]} />

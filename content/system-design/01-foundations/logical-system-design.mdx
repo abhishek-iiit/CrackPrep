@@ -1,32 +1,87 @@
 ---
 title: "Logical System Design"
 number: "01.02"
-summary: "Logical System Design — notes in progress."
-status: draft
+summary: "Turning a requirements list into named components and data flows, before any vendor or database gets picked."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [architecture, components, design-process]
+updated: "2026-09-15"
 ---
 
-## The problem
+## A diagram full of vendor names is not a design
 
-What breaks without this, and the situation that forces the decision.
+After clarification you have a short list: actors, verbs, four numbers with units. The temptation at this point is to start drawing — and to draw in brand names. "The client calls an API Gateway, which talks to a service that writes to Postgres and publishes to Kafka." That sentence sounds like architecture. It is actually a sequence of guesses wearing product logos, made before anyone decided what each piece is responsible for or why it needs to exist at all.
 
-## How it works
+Logical design is the step in between: turning the requirements into named components and the flows between them, using role names instead of product names — "the store of record," "the fan-out service," "a queue," not "DynamoDB" and "SQS." Only once those roles and their boundaries are settled does picking a specific technology become a real decision instead of a reflex, because now a specific technology has to prove it satisfies a specific role, rather than a familiar tool getting to retroactively justify itself.
 
-The mechanism, step by step.
+Skip this step and the cost shows up later, always at the worst moment. An interviewer asks "what happens if the write to Postgres succeeds but the Kafka publish fails," and there is no answer, because nobody decided which component owns that guarantee — the boxes were named, not designed, and the seam between them was never drawn. In a real system the same gap becomes a production incident with two teams paged and neither one owning the retry logic, because the logical boundary that would have made it obviously someone's job was never drawn either.
 
-## Tradeoffs
+## From entities to boxes to a request's actual path
+
+01.01 Requirements Clarification produces actors and verbs; logical design turns those into a picture, and the picture earns its shape by answering questions in order rather than by being sketched all at once.
+
+<Steps>
+  <Step title="Name the entities, not the tables">
+    List the nouns the system is actually about — user, post, order, shipment — and how they relate, at the level you'd describe them to a product manager. This is not a schema. A schema has columns and foreign keys; an entity list has just enough structure to know what the "writes" and "reads" from 01.01 are writes and reads *of*.
+  </Step>
+  <Step title="Trace each core verb as a path, not a box">
+    For every verb from the actor list — "a user posts," "a follower reads a feed" — draw the path a single instance of that action takes: what receives it first, what it touches next, what it produces, and who reads that output. Do this before drawing components in isolation; a component that never appears on any verb's path does not belong in the diagram yet.
+  </Step>
+  <Step title="Turn repeated responsibilities into named components">
+    Where the same job shows up on more than one path — validating a write, serving a read fast, storing the record of truth, fanning a change out to subscribers — give it one named component and route every path through it. A box earns its place by being reused, or by isolating a genuinely different responsibility; a box that exists only because it sounds like part of the architecture does not.
+  </Step>
+  <Step title="Mark ownership and the synchronous/asynchronous boundary">
+    For every piece of data, name the one component that owns writes to it — two owners for the same entity is how systems end up with silently conflicting updates. For every edge between components, decide out loud whether the caller waits for the answer or hands the work off and moves on; that one distinction is most of what "architecture" means at this level, and it is a logical decision, not a technology one — a queue and a synchronous call can express the same boundary with different hardware underneath.
+  </Step>
+  <Step title="Leave the technology as a role, on purpose">
+    Label each store by what it needs to do — "needs range scans," "needs sub-millisecond point reads," "needs to survive a machine dying mid-write" — instead of naming a product. That role is what 01.04 System Design Tradeoffs and the numbers from 01.06 Back-Of-The-Envelope Capacity Planning use to pick an actual technology later; naming a vendor now just hides the requirement the vendor is supposed to satisfy.
+  </Step>
+</Steps>
+
+<Callout type="tip">
+Say the sync/async boundary out loud on every arrow while you draw it, not after. "The client waits for this" or "this is handed off and acknowledged separately" takes three words and prevents the single most common logical-design gap: a diagram where every arrow looks the same, but half of them are promises about durability and half are just function calls.
+</Callout>
+
+Two components deserve their own sentence, because they get invented too early or skipped entirely. A cache is a performance decision layered on top of a completed logical design, not a box that belongs in the first draft — it holds no data of its own, only a copy, and drawing it before the store of record is settled hides which store actually owns correctness. A queue, by contrast, belongs in the same pass as everything else: it exists to change whether the caller waits, which is exactly the ownership-and-boundary decision from the step above, not a performance add-on to bolt on afterward.
+
+<Callout type="note">
+"How many services" is a granularity question, not a logical-design question — 01.09 Monolith Vs Microservices covers where to draw the process boundary once the responsibilities themselves are settled. Logical design produces the responsibilities; it does not yet say how many deployable units they end up living in.
+</Callout>
+
+## How far to take it before naming a technology
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Stay at the logical level when"
+  againstTitle="Commit to a physical technology when"
+  forItems={[
+    "The numbers from 01.06 Back-Of-The-Envelope Capacity Planning aren't in yet — picking a vendor before you know the write rate is a guess wearing a decision's clothes",
+    "More than one real technology would satisfy the box as drawn — 'a document store' is honest at this point, naming one product isn't yet earned",
+    "A component's boundary is still moving — merging or splitting two boxes would change the design more than swapping either one's implementation would",
+    "Early in a 45-minute interview, where the shape of the whole system earns more signal than a deep dive on one box's configuration",
+  ]}
+  againstItems={[
+    "The non-functional targets from 01.03 Non-Functional Requirements are pinned down enough to eliminate options outright — a sub-millisecond read requirement rules out anything that cannot serve it",
+    "An external constraint already fixes the choice: an existing company standard, a mandated cloud provider, a compliance rule that names a specific control",
+    "You're asked directly which technology and why — naming one and defending it with a real tradeoff beats staying abstract for its own sake",
+    "Time is short and a concrete, defensible choice is worth more than another round of renaming the same box",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Draw left to right, and narrate one request end to end before you draw the next one — "the write arrives here, gets validated here, lands in the store of record here, and here's what happens if that last step fails." That sequence is what lets an interviewer catch a missing owner or an undecided sync/async boundary while it costs nothing to fix, instead of after the whole diagram is on the board and every box already has a name that's hard to walk back.
 
-<KeyTakeaways items={["", "", ""]} />
+Expect to be asked what happens when one box in the middle of a path is slow or down — that question is aimed squarely at whether you decided ownership and the sync/async boundary on purpose, or whether the diagram just happens to have arrows in it. Naming the failure before being asked ("since this call is asynchronous, a failure here means the client already got an acknowledgment that now has to be corrected — that's a real cost, not a free choice") is the difference between having drawn boxes and having designed a system.
+
+<KeyTakeaways
+  items={[
+    "Logical design turns a requirements list into named responsibilities and the flows between them, using role names instead of product names",
+    "A component earns its place by being reused across more than one request path or by isolating a genuinely different responsibility, not by sounding architectural",
+    "Every piece of data needs exactly one owning component for writes; two owners for the same entity is a design bug, not a detail",
+    "The synchronous-versus-asynchronous decision on each edge is a logical choice, not a technology choice — a queue and a direct call can express the same boundary",
+    "Naming a technology before the role it fills is settled hides the requirement the technology is supposed to satisfy",
+    "The diagram is ready to leave the logical level once a concrete choice for each role can be defended with a real tradeoff, not before",
+  ]}
+/>

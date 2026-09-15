@@ -1,32 +1,101 @@
 ---
 title: "Database Migration Safety"
 number: "14.05"
-summary: "Database Migration Safety — notes in progress."
-status: draft
+summary: "How to change schemas and data without locking production, breaking old binaries, or shipping a migration you cannot reverse."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 15
+tags: [database, migrations, schema, expand-contract]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Schema changes fail as lock waits and mixed-version exceptions
 
-What breaks without this, and the situation that forces the decision.
+Application deploys roll back by shipping the previous artifact. Database migrations often do not: a column dropped, a type changed in place, or a backfill that wrote bad data leaves you restoring from backup (14.07) if you are lucky. Migration safety is the discipline of **expand/contract** applied to DDL and data so that every step is either compatible with both old and new application versions or is reversible before the point of no return. 14.04 Deployment And Migration Safety covers the release framing; this lesson is the database mechanics.
 
-## How it works
+The failure modes are specific: a migration takes an `ACCESS EXCLUSIVE` lock and queues every write behind it for minutes; a rolling deploy runs old code against a schema the new migration already altered; a backfill races live writes and silently diverges.
 
-The mechanism, step by step.
+## Compatibility before cleverness
 
-## Tradeoffs
+Rules that prevent most outages:
+
+- **Additive first.** Add nullable columns, new tables, new indexes — never drop or rename in the same release that ships code still using the old shape.
+- **Dual-write or dual-read only with explicit versions.** Old app ignores new column; new app writes both until backfill completes.
+- **Drop last.** Remove columns/tables only after no caller references them and after a bake time that covers slow jobs and forgotten replicas.
+- **Online index builds** for large tables (03.11 Online Indexing) — do not `CREATE INDEX` without concurrency on a hot table at peak.
+- **Separate DDL from long data backfills.** A transaction that rewrites a multi-million-row table is an outage dressed as a migration.
+
+| Change | Safer approach | Unsafe approach |
+| --- | --- | --- |
+| Add column | Nullable or with DB default that does not rewrite every row | Non-null without default forcing a full rewrite under lock |
+| Rename column | Add new, dual-write, backfill, switch reads, drop old | `RENAME` while old binaries still SELECT the old name |
+| Change type | New column + backfill + switch; or careful cast with check | In-place type change on a hot column |
+| Delete column | Stop writes, stop reads, wait, drop in a later migration | Drop in the same deploy that removes code |
+| Add index | Online/concurrent build, monitor replication lag | Blocking build on production primary at noon |
+
+<Callout type="warn">
+Some managed databases rewrite a table for innocuous-looking `ALTER`s — adding a non-null column with a default used to be a full rewrite on older Postgres; verify against *your* engine version's notes. The migration tool's "up" succeeding in staging on an empty DB proves nothing about lock duration on 500 GB.
+</Callout>
+
+## A safe migration sequence
+
+<Steps>
+  <Step title="Expand schema">
+    Ship DDL that only adds. Confirm old application version still runs against the new schema in staging with production-sized data if possible.
+  </Step>
+  <Step title="Deploy dual-compatible application">
+    Code reads old fields, writes old + new where needed. Feature-flag the new read path if cutover is risky.
+  </Step>
+  <Step title="Backfill in chunks">
+    Batch by primary key ranges; sleep between batches; throttle on replica lag and lock waits. Idempotent updates so retries are safe.
+  </Step>
+  <Step title="Verify">
+    Row counts, checksums on samples, shadow reads comparing old vs new fields. Do not trust "migration job finished" alone.
+  </Step>
+  <Step title="Contract">
+    Switch reads to the new shape, remove dual writes, ship a later migration to drop obsolete columns only when telemetry shows zero references.
+  </Step>
+</Steps>
+
+Expand/contract also applies to **constraints**: add a new constraint as `NOT VALID` (where the engine supports it), backfill/validate, then enforce — rather than validating every row under a long lock on day one.
+
+## Locks, replicas, and expand windows
+
+Run migrations with explicit lock timeouts so a blocked migration fails instead of queuing traffic indefinitely. Watch replication lag during index builds and big backfills — a lagging replica used for reads becomes stale answers or connection pileups. Schedule the heaviest steps in low-traffic windows when you cannot make them fully online, and rehearse duration on a restored production snapshot (14.07), not on a toy dataset.
+
+Multi-service owners of one database need a migration ownership rule: one pipeline applies DDL; application repos do not freestyle `ALTER` in ad-hoc scripts against prod.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Take the expand/contract path when"
+  againstTitle="Allow a shorter / locking migration when"
+  forItems={[
+    "Tables are large enough that blocking DDL would exceed your latency or availability SLO",
+    "Rolling deploys mean old and new application versions will coexist",
+    "The change renames, retypes, or splits data rather than purely adding",
+    "Rollback must remain possible without restoring the whole database",
+    "Multiple services share the schema and cannot atomically update together",
+  ]}
+  againstItems={[
+    "Table is tiny, maintenance window is agreed, and a short exclusive lock is within budget",
+    "Greenfield schema with no production data and no version skew",
+    "Engine supports a truly online change that is operationally proven in your version",
+    "You are restoring into an empty environment where rewrite cost is irrelevant",
+    "Emergency data fix where the alternative is prolonged corruption — still prefer reversible steps when possible",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+State the invariant: "Every migration step must be safe while both old and new app versions run." Walk add-column → dual-write → backfill → switch read → drop-later. Mention lock timeouts, online indexes, and verifying backfills. If asked how you undo, say expand/contract leaves the old column until contract; true drop is a one-way door gated by backup and bake time.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Database migrations are often harder to reverse than application deploys — design every step for mixed-version compatibility",
+    "Expand/contract: add first, dual-write and backfill, switch reads, drop only after bake time",
+    "Never pair a destructive DDL with the deploy that still needs the old shape",
+    "Backfill in throttled, idempotent batches and verify with checksums — job completion is not correctness",
+    "Use online index builds and lock timeouts; a blocked migration that queues writes is an outage",
+    "Rehearse lock duration and backfill time on production-sized restores, not empty staging databases",
+  ]}
+/>

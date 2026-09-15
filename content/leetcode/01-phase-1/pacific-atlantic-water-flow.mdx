@@ -1,0 +1,107 @@
+---
+title: "Pacific Atlantic Water Flow"
+number: "01.29"
+summary: "Water flows downhill to oceans — reverse the search from each coast inward and intersect the reachable sets."
+status: published
+free: true
+difficulty: deep
+estMinutes: 18
+tags: [graph, dfs, matrix]
+updated: "2026-09-15"
+---
+
+## Flow goes down — so search from the oceans up
+
+An `m × n` matrix holds heights. Rain at `(r,c)` flows to a neighbor with **equal or lower** height, eventually reaching the Pacific (top/left edges) or Atlantic (bottom/right edges). Return every cell that can reach **both** oceans.
+
+Simulating water from every cell is expensive: each trace wanders downhill and branches across the grid. A height of 100,000 at the center with long descending paths makes per-cell simulation **O(mn × paths)** in the worst case.
+
+Flip the direction. A cell can reach the Pacific iff there is an uphill path from some Pacific-border cell down to it — equivalently, from that cell you can walk **up** (to equal or higher neighbors) and hit the Pacific border. Same for Atlantic. Start DFS/BFS from all Pacific-touching border cells moving to neighbors with `height[neighbor] >= height[current]`. Intersect the two visited sets.
+
+## Two multi-source reverse DFS passes
+
+Pacific sources: every cell in row `0`, column `0`. Atlantic sources: row `m-1`, column `n-1`. Mark `pacificReachable` and `atlanticReachable`. Answer: cells marked in both.
+
+The invariant: after the Pacific pass, `pacificReachable[r][c]` is true iff water at `(r,c)` can drain to the Pacific under the original downhill rules.
+
+<Callout type="gotcha">
+Use `>=` when climbing in the reverse search. Equal-height plateaus connect — strict `>` misses cells on flat regions that should count.
+</Callout>
+
+## Solution
+
+```ts
+function pacificAtlantic(heights: number[][]): number[][] {
+  const m = heights.length;
+  const n = heights[0].length;
+  const pacific = Array.from({ length: m }, () => new Array<boolean>(n).fill(false));
+  const atlantic = Array.from({ length: m }, () => new Array<boolean>(n).fill(false));
+
+  function dfs(r: number, c: number, seen: boolean[][]): void {
+    seen[r][c] = true;
+    const dirs = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+    for (const [dr, dc] of dirs) {
+      const nr = r + dr;
+      const nc = c + dc;
+      if (nr < 0 || nr >= m || nc < 0 || nc >= n) continue;
+      if (seen[nr][nc]) continue;
+      if (heights[nr][nc] >= heights[r][c]) dfs(nr, nc, seen);
+    }
+  }
+
+  for (let c = 0; c < n; c++) {
+    dfs(0, c, pacific);
+    dfs(m - 1, c, atlantic);
+  }
+  for (let r = 0; r < m; r++) {
+    dfs(r, 0, pacific);
+    dfs(r, n - 1, atlantic);
+  }
+
+  const result: number[][] = [];
+  for (let r = 0; r < m; r++) {
+    for (let c = 0; c < n; c++) {
+      if (pacific[r][c] && atlantic[r][c]) result.push([r, c]);
+    }
+  }
+  return result;
+}
+```
+
+Time **O(m × n)** — each cell visited at most once per ocean. Space **O(m × n)** for the two boolean grids and recursion stack.
+
+<Tradeoff
+  forTitle="Reverse multi-source DFS when"
+  againstTitle="Forward simulation when"
+  forItems={[
+    "You need cells reaching two boundaries on a grid with monotonic height moves",
+    "Reverse uphill search from borders visits each cell O(1) times per ocean — linear total",
+    "Heights are bounded but not tiny — forward BFS from every cell is mn times too much",
+    "The trick generalizes to any 'can reach boundary set' on a gradient grid",
+    "Interview expects graph thinking, not physics simulation"
+  ]}
+  againstItems={[
+    "You must trace actual drainage paths or volumes — different problem (flow accumulation)",
+    "Movement rules are not height-monotone (e.g. one teleport edge) — general BFS from sources still works but reverse criterion changes",
+    "Grid is streaming and does not fit memory — border seeds only help if you can random-access neighbors",
+    "You need the shortest downhill path to an ocean — run Dijkstra or BFS downhill from each border inward",
+    "3D elevation with complex flow — simple 4-direction reverse DFS is no longer correct"
+  ]}
+/>
+
+## In an interview
+
+Draw a small 5×5 example. Explain the reversal: "Instead of water falling down, I walk up from ocean cells." List Pacific and Atlantic border seeds, two DFS passes, intersect.
+
+Follow-ups: return count only, handle 8-direction flow, or **01.30 Number of Islands**-style connected components. Mention `>=` for equal heights and that interior peaks can still reach both oceans if plateaus connect to both borders.
+
+Bug to flag: searching downhill from each cell without memo — TLE on large grids — or using `>` instead of `>=` on reverse edges.
+
+<KeyTakeaways items={[
+  "Pacific Atlantic Water Flow: reverse the problem — DFS uphill from ocean borders, intersect cells reachable from both oceans.",
+  "Pacific seeds are top and left edges; Atlantic seeds are bottom and right; use 4-direction moves with neighbor height >= current.",
+  "Two O(mn) DFS passes beat forward simulation from every cell.",
+  "Equal heights connect in reverse search — do not require strictly taller neighbors.",
+  "Answer is the set intersection of two boolean reachability grids.",
+  "The reverse-border DFS pattern applies whenever you ask which cells connect to multiple boundary regions on a monotone grid."
+]} />

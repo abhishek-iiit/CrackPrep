@@ -1,32 +1,125 @@
 ---
 title: "Ray Casting Point In Polygon"
 number: "12.06"
-summary: "Ray Casting Point In Polygon — notes in progress."
-status: draft
+summary: "The classic even-odd ray test for point-in-polygon — how edge crossings decide containment, and the vertex and hole cases that make naive implementations wrong."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [algorithms, geospatial, geometry]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The geometric kernel behind geofencing
 
-What breaks without this, and the situation that forces the decision.
+12.05 Geofencing Point In Polygon is the product and the pipeline: fences, prefilters, enter/exit, flapping. Underneath every exact containment check sits a geometry predicate: given a point `P` and a polygon `G` (a closed ring of vertices, optionally with holes), is `P` inside `G`?
 
-## How it works
+**Ray casting** — also called the even-odd rule — is the algorithm most engineers implement first and the one you should be able to derive on a whiteboard. It is not the only predicate (winding number is the common alternative), but it is enough for the vast majority of service-area and zone checks if you handle its edge cases deliberately.
 
-The mechanism, step by step.
+## Even-odd in one picture you can narrate
 
-## Tradeoffs
+Cast a horizontal ray from `P` to infinity — conventionally to `+∞` along the x-axis (longitude). Count how many times that ray **crosses** a boundary edge of the polygon. If the count is odd, the point is inside; if even, outside. Intuition: each time you cross a boundary you toggle between out and in; starting from infinity (outside), an odd number of toggles means you finished inside.
+
+```text
+        outside
+           |
+    -------+------ edge cross (count=1) → inside
+           |
+    -------+------ edge cross (count=2) → outside
+           P→
+```
+
+The implementation loops edges, tests for intersection with the ray, and increments under a careful crossing rule — not under "any touching counts".
+
+## Algorithm steps
+
+<Steps>
+  <Step title="Reject with the bounding box">
+    If `P` is outside the polygon's axis-aligned bounding box, return outside. Cheap and eliminates most prefiltered candidates that only matched a coarse cell.
+  </Step>
+  <Step title="Initialise cross count to 0">
+    Iterate each edge `(A → B)` of the outer ring in order. Treat the ring as closed: the last vertex connects back to the first.
+  </Step>
+  <Step title="Skip edges that cannot cross the ray">
+    For a ray to `+∞` in x, an edge with both vertices below `P.y`, both above, or both at `x < P.x` cannot contribute. These early outs dominate runtime on large rings.
+  </Step>
+  <Step title="Compute whether the edge straddles P.y and crosses to the right of P.x">
+    A standard test: the edge endpoints lie on opposite sides of the horizontal line through `P` (with a tie-breaking convention), and the x-coordinate of the intersection is strictly greater than `P.x`. If so, increment the count.
+  </Step>
+  <Step title="Apply even-odd">
+    After all edges, inside ⟺ `count % 2 == 1`.
+  </Step>
+  <Step title="Subtract holes">
+    For each inner ring (hole), run the same test. If `P` is inside a hole, it is outside the polygon — even if it was inside the outer ring. More generally: toggle or require outer-inside and all-holes-outside, depending on how you structure the call.
+  </Step>
+</Steps>
+
+A compact crossing check often taught in interviews (one of several equivalent forms):
+
+```text
+# edge (x1,y1)-(x2,y2), point (px,py); ray to +∞ in x
+if ((y1 > py) != (y2 > py)):
+    x_int = x1 + (py - y1) * (x2 - x1) / (y2 - y1)
+    if px < x_int:
+        count += 1
+```
+
+The `(y1 > py) != (y2 > py)` test is the straddle; dividing by `(y2 - y1)` is safe when that inequality holds. This form uses a half-open convention on y so that a ray that passes exactly through a vertex is not counted twice — once for each edge sharing that vertex.
+
+## Edge cases that separate a demo from production
+
+**Vertex hits.** If the ray passes exactly through a vertex, a naive "count every touch" double-counts and flips inside/outside wrongly. Use a consistent rule: only count crossings when the edge crosses from below to above (or vice versa), never both edges at a shared vertex. The snippet above encodes one such convention.
+
+**Edges lying on the ray.** Horizontal edges along `y = py` should not toggle — skip them. They are not crossings.
+
+**Point on boundary.** Even-odd does not uniquely define "on edge" as inside or outside. Products must declare a policy: treat boundary as inside (delivery yes), outside (restricted zone yes means strictly interior), or a separate `ON_BOUNDARY` result for surveying tools. Detecting boundary is a point-on-segment test run before or beside ray casting.
+
+**Self-intersecting / bow-tie polygons.** Even-odd still returns a result; it may not match the author's intent. Validate geometry at fence authoring time (12.05) rather than trying to be clever in PIP.
+
+**Longitude wrap.** Polygons that cross the antimeridian must be split or shifted into a continuous coordinate chart before testing. Ray casting assumes a Euclidean plane locally — fine for city zones in a local projection or in lon/lat for small regions, dangerous for continent-scale rings spanning ±180°.
+
+**Numerical noise.** GPS points sitting on an edge chatter between inside and outside across samples; that is a product hysteresis problem (12.05), not something ray casting can fix by itself.
+
+## Cost
+
+For `n` vertices, ray casting is `O(n)` per point per polygon after the bbox reject. Delivery zones with 50–200 vertices are cheap at millions of tests per second on one core — order-of-magnitude, not a benchmark. Country-boundary polygons with tens of thousands of vertices are not: simplify fences for the hot path, or rely harder on cell prefilters so exact PIP runs rarely and on simplified rings.
+
+Winding-number tests have the same asymptotic cost and different boundary semantics (non-zero winding vs even-odd). For simple non-self-intersecting rings without exotic fill rules, both agree on interior points; pick one library implementation and stick to it rather than mixing fill rules across services.
+
+<Callout type="note">
+Interviewers often ask you to choose between "implement PIP" and "call a library". In production, call a vetted geometry library (or database geography function) with an explicit fill rule. On the whiteboard, deriving even-odd and naming vertex double-counting is the point — it shows you know why the library's edge cases exist.
+</Callout>
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Implement or rely on ray casting (even-odd) when"
+  againstTitle="Prefer another containment approach when"
+  forItems={[
+    "Polygons are simple rings (optionally with holes) and even-odd matches the product fill rule",
+    "You need an explainable O(n) predicate after a spatial prefilter has cut candidates down",
+    "Fence vertex counts stay modest after simplification — hundreds, not hundreds of thousands, on the hot path",
+    "You can define an explicit on-boundary policy beside the boolean inside test",
+    "Local planar or small-region lon/lat coordinates are an accepted approximation",
+  ]}
+  againstItems={[
+    "You need spherical geodesic polygons at continental scale — use a geography engine, not planar ray casting",
+    "Fill rule must be non-zero winding for compatibility with a specific GIS toolchain",
+    "The only regions are grid cells — membership is id equality, not PIP",
+    "A managed point-in-polygon in PostGIS / BigQuery already meets latency and correctness requirements",
+    "Polygons are pathological (heavy self-intersection) and authoring validation is not in place yet",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+State even-odd in one sentence, then name vertex double-counting and horizontal edges as the cases you will handle. Connect it upward: "This is the exact step after cell prefilter in the geofence pipeline." If they want code, write the straddle test and mention holes. Do not derail a system-design prompt into a full computational-geometry lecture — algorithm detail here, product in 12.05.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Ray casting counts boundary crossings of a ray from the point to infinity; odd means inside under the even-odd rule",
+    "Correct vertex and horizontal-edge handling is mandatory — naive counting double-toggles at vertices",
+    "Holes invert containment: inside a hole means outside the polygon",
+    "On-boundary behaviour is a product policy, not something even-odd defines for you",
+    "Cost is O(vertices); keep hot-path rings simplified and behind a bbox/cell prefilter",
+    "Geofencing systems (12.05) own versioning, prefilter, and flapping; ray casting is only the exact predicate",
+  ]}
+/>

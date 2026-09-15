@@ -1,32 +1,106 @@
 ---
 title: "Distributed Task Scheduler"
 number: "08.05"
-summary: "Distributed Task Scheduler — notes in progress."
-status: draft
+summary: "Why cron on one box fails the moment you need many, and how a lease-based claim table turns 'run this later' into safe, horizontally scalable work."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 14
+tags: [scheduling, async, leases, queues]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Cron does not survive a second instance
 
-What breaks without this, and the situation that forces the decision.
+A single-box cron is a fine scheduler until the moment you scale the process that runs it. Two replicas both fire the same job at 02:00. Three fire it. The job is not "a little duplicated" — it is run N times, and if that job charges a card, sends a digest, or closes a billing period, you have a correctness bug that looks like a deploy success. Pinning the schedule to one leader reintroduces a single point of failure the rest of the fleet was built to avoid. The tension is not "how do I express a cron expression"; it is "how do many workers agree that exactly one of them owns this firing."
 
-## How it works
+A distributed task scheduler is that agreement. Jobs are rows (or messages) with a due time. Workers compete to claim work that is ready. Claiming is atomic. Ownership expires if the owner dies. Retries and dead letters are first-class, not afterthoughts bolted onto a shell script.
 
-The mechanism, step by step.
+This sits next to, not instead of, a task queue. 08.02 Task Queue Vs Event Stream is about delivery shape once work is ready; a scheduler is about *when* work becomes ready — once, on a delay, or on a recurring cadence — and about surviving the claim across process death.
 
-## Tradeoffs
+## What the store has to remember
+
+Every serious design stores at least these fields per job (names vary; the meaning does not):
+
+| Field | Why it exists |
+| --- | --- |
+| `id` | Stable identity for idempotent execution and ops lookup |
+| `run_at` / `next_run_at` | The readiness predicate workers poll on |
+| `payload` / `type` | Enough for a worker to execute without a second round trip |
+| `status` | pending / claimed / succeeded / failed / dead |
+| `owner` + `lease_until` | Who holds the claim and when that claim expires |
+| `attempts` + `max_attempts` | Bound retries before dead-lettering |
+| `schedule` (optional) | Cron or interval for recurring jobs; null for one-shots |
+
+The readiness query is the hot path: find rows where `status = pending` and `run_at <= now()`, claim a batch, extend or release the lease as work progresses. 08.06 Postgres SKIP LOCKED Work Queue is the canonical relational version — `FOR UPDATE SKIP LOCKED` lets many pollers race without blocking each other on the same rows. The scheduler adds a time dimension to that pattern: most rows are *not* ready yet, so the index that matters is usually `(status, run_at)` rather than a plain FIFO queue depth.
+
+## The claim path
+
+<Steps>
+  <Step title="Poll for due work">
+    A worker asks for up to N jobs that are pending and due. The limit is a throttle: too large and one slow worker starves peers; too small and you burn poll cycles. Tens to a few hundred per claim is a common starting range — order-of-magnitude, not a benchmark — tuned against job duration and fleet size.
+  </Step>
+  <Step title="Claim under a lease">
+    In one atomic update, flip status to claimed, set `owner` to this worker, and set `lease_until` to now plus a TTL long enough to cover the expected run plus a safety margin. If the worker dies mid-job, the lease expires and another worker can reclaim. This is the same lease idea as 06.08 Distributed Locks And Leases, applied to scheduled work rather than a critical section.
+  </Step>
+  <Step title="Execute idempotently">
+    Run the payload. Delivery is at-least-once once leases and reclaim exist, so the job itself must tolerate a second attempt — same rule as 02.09 Retries Timeouts And Idempotency. Prefer a business-level idempotency key (invoice id, digest date) over hoping the scheduler never double-fires.
+  </Step>
+  <Step title="Complete, reschedule, or dead-letter">
+    On success: mark succeeded, or for recurring jobs compute the next `run_at` and return to pending. On failure: increment attempts; if under the cap, push `run_at` forward with backoff; if over the cap, move to dead and page. Do not silently drop.
+  </Step>
+</Steps>
+
+<Callout type="gotcha">
+A lease that is shorter than the job is a correctness bug dressed as a timeout. The first worker is still running when a second worker claims the same row and starts a duplicate. Either size the lease from p99 job duration with headroom, or have the worker heartbeat — periodically push `lease_until` forward while still executing. Heartbeats cost complexity; undersized leases cost double work. Pick deliberately.
+</Callout>
+
+## Recurring jobs are a different animal than delayed ones
+
+A one-shot delay ("send this email in 15 minutes") is a row with a future `run_at` and no schedule. A recurring job ("every night at 02:00 UTC, close the day") needs a schedule expression and a rule for what happens when a run is late.
+
+**Catch-up vs skip.** If the scheduler was down from 01:50 to 03:10, does the 02:00 job still run once when the system recovers, or is that firing skipped? Catch-up preserves "at least once per window" for billing and compliance; skip preserves "don't pile up overnight work into a morning thundering herd." Name the policy per job type — a digest and a payment closeout rarely want the same answer.
+
+**Fan-out of schedule fan-in.** Ten thousand tenants each with a nightly job is ten thousand rows due in the same minute if you schedule wall-clock midnights naively. Jitter the `run_at` across a window, or shard by tenant id into separate due buckets, or you will invent a flash sale against your own database (08.10 Flash Sale Inventory Locking is the intentional version of that shape; here it is accidental).
+
+## Where the scheduler should not live
+
+Do not put every future action into the primary request path's transaction if the only need is "sometime later." Enqueue a delayed job (or write the scheduler row) as part of the same commit when correctness requires it — "order placed implies reminder in 24h" — but keep the *execution* off the request thread. That is still 08.01 Delegation And Async Work; the scheduler is just the clock for that delegated work.
+
+Also do not confuse a scheduler with a workflow engine. Multi-step, branching, long-running processes with human waits belong in 08.07 DAG Workflow Orchestration. A scheduler fires a unit of work; an orchestrator owns the graph of units and their dependencies.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Use a distributed scheduler when"
+  againstTitle="Stay with in-process or single-node cron when"
+  forItems={[
+    "More than one replica of the app can be running, and a double fire would be a real bug",
+    "Jobs must survive process restarts, deploys, and node loss with an explicit reclaim path",
+    "You need delayed one-shots and/or recurring schedules with retry and dead-letter visibility",
+    "Fleet size will grow; claiming must stay horizontal without electing a permanent schedule leader",
+    "Ops needs to inspect, pause, or replay a specific job by id after a failure",
+  ]}
+  againstItems={[
+    "A single process owns the machine and double-firing is impossible by topology",
+    "The work is best-effort and duplicate side effects are cheap or filtered downstream",
+    "You only need 'run this soon' with no delay calendar — a plain task queue is enough",
+    "Job volume is tiny and operational complexity of leases and reclaim would dominate",
+    "The 'schedule' is really a multi-step workflow with branching — use an orchestrator instead",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Open with the failure mode, not the table schema: "If two instances both run cron, every job double-fires, so I need a claim with a lease — due work is selected once, owned until done or until the lease expires." That sentence invites the follow-ups you want: how reclaim works after a crash, why jobs must be idempotent, and how recurring catch-up policy is chosen.
 
-<KeyTakeaways items={["", "", ""]} />
+Name the metric you would page on before being asked — not just "job failed," but age of the oldest due-but-unclaimed job and count of dead-lettered jobs. A silent pile of overdue rows is the scheduler's version of 08.04 Queue Lag: the system looks healthy while time-sensitive work quietly misses its window.
+
+<KeyTakeaways
+  items={[
+    "Multi-instance cron without a claim protocol double-fires every scheduled job — that is a correctness failure, not an ops inconvenience",
+    "A distributed scheduler stores due time, status, owner, and lease expiry so workers can atomically claim ready work and reclaim abandoned work",
+    "Leases must outlast the job or be heartbeat-extended; a short lease plus a long job is how duplicates reappear under load",
+    "At-least-once reclaim makes idempotent job handlers mandatory — the scheduler cannot promise exactly-once execution alone",
+    "Recurring jobs need an explicit late-fire policy (catch-up vs skip) and usually need jitter so midnight does not become a self-inflicted thundering herd",
+    "Use a scheduler for time-triggered units of work; use a workflow engine when the unit is a multi-step graph with dependencies",
+  ]}
+/>

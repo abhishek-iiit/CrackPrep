@@ -1,0 +1,153 @@
+---
+title: "Flash Sale"
+number: "03.04"
+summary: "Inventory that must not go negative when traffic spikes 100× in sixty seconds — queues, reservations, and the oversell hinge."
+status: published
+free: true
+difficulty: deep
+estMinutes: 20
+tags: [flash-sale, inventory, spikes]
+updated: "2026-09-15"
+---
+
+## Sixty seconds of traffic that looks like a DDoS
+
+A flash sale is a deliberate traffic spike — 100× normal checkout QPS concentrated into a one-minute window for a SKU with 500 units. The interviewer is not testing whether you can build an e-commerce site. They are testing whether you understand **contention on a single hot row**, the difference between **at-most-once and exactly-once inventory decrement**, and why "put Redis in front of Postgres" is a start but not an answer. The failure mode everyone has seen: 500 units sold, 2,000 orders confirmed, angry customers and a manual reconciliation war room.
+
+The design hinge is **when you commit inventory**. Too early (reserve on page view) burns stock on abandoned carts. Too late (decrement at payment capture) oversells under parallel requests. Flash sales force you to pick a point on that spectrum and defend it under adversarial concurrency.
+
+## Clarify: buy one SKU, survive the spike
+
+> "I'll design checkout for a single hot SKU during a timed flash sale — users click Buy, system either confirms an order or returns sold-out within a few seconds. Out of scope: catalog browsing, recommendations, payment provider internals, and fraud ML."
+
+**Functional requirements:**
+
+- User clicks **Buy** on a sale item → system **reserves or sells** one unit → returns order confirmation or **sold out**.
+- **Inventory count** is authoritative — never negative.
+- Sale starts at a scheduled time; before start, Buy returns **not yet available**.
+- Optional: **waitlist or queue number** so users see position instead of a spinner.
+
+**Non-functional requirements:**
+
+- **Peak checkout attempts**: ask — "500k users hitting Buy in 60 seconds" is a common assumption.
+- **Latency**: confirmation or sold-out in **< 3 s** at p99 — users will retry if slower, making the spike worse.
+- **Consistency**: **no oversell** — stronger than "eventually consistent inventory."
+- **Availability**: sale page stays up; degraded mode (queue) beats hard 503.
+
+Ask: "One SKU or a few?" "Payment now or authorize-later?" Payment timing determines how long a reservation may hold stock.
+
+## Capacity: retries multiply the spike
+
+| Assumption | Value | Derived |
+|---|---|---|
+| Normal checkout QPS | 500/s | Baseline |
+| Flash sale peak attempts | **500k attempts in 60 s** | **~8,300/s** — ~17× normal |
+| Retry behavior | 30% retry once on timeout | Effective **~11k/s** |
+| Inventory | **500 units** | The contention point |
+| Successful orders | 500 | Everything else is rejection |
+| Reservation hold time | 5 min (if pay-later) | Max reserved = 500 if one-pass |
+| Idempotency | Client sends `request_id` | Dedup retries |
+
+**The arithmetic that matters:** 11k/s contending for 500 slots means **99.95% of requests must fail fast** — not queue for 30 seconds hoping. The system processes 500 successes and rejects the rest in sub-second time. Any design that serializes 11k/s through one lock dies on latency alone.
+
+**Postgres row lock sanity check:** One row update at ~5k TPS is optimistic for a single hot row even on fast hardware — you need **in-memory decrement** (Redis) or **sharded inventory counters**, with async reconciliation to the system of record.
+
+## High-level design
+
+<Steps>
+<Step title="Virtual waiting room absorbs the burst">
+
+At T-0, **CDN-served sale page** enables the Buy button. Clicks hit an **API Gateway** with **01.02 Rate Limiter** — per-IP and per-user token bucket (e.g. 5 attempts/min) to cut bot noise. Gateway forwards to **Queue Service** which assigns a **position token** (Redis INCR on `sale:{sku}:queue`) and returns `{ status: queued, position: 8421 }` or `{ status: admitted, checkout_token }` if under an **admission cap** (e.g. 2,000 concurrent checkouts — 4× inventory to absorb payment failures).
+
+</Step>
+
+<Step title="Admitted users hit the inventory service">
+
+Client polls or receives WebSocket push when admitted. `POST /v1/checkout { sku, checkout_token, request_id }` goes to **Inventory Service**. **Idempotency check** on `request_id` in Redis — duplicate retries return the same outcome.
+
+</Step>
+
+<Step title="Atomic decrement in Redis">
+
+Inventory Service holds **available count** in Redis: `DECR sale:{sku}:stock` (initialized to 500 before sale). Redis **DECR is atomic**. Result ≥ 0 → **success**, create order row async, return 200. Result &lt; 0 → **INCR back** (undo), return 409 sold-out. This is **O(1)** regardless of contention — the interviewer's preferred hot-path.
+
+</Step>
+
+<Step title="Async order persistence and payment">
+
+Success path publishes **OrderCreated** event to Kafka. **Order Writer** inserts into Postgres (source of truth for fulfillment), triggers payment charge. If payment fails within hold window, **INCR stock** returns unit to pool (or goes to waitlist). Postgres inventory row reconciles from Redis every few seconds during sale — not on every request.
+
+</Step>
+
+<Step title="Sold-out path is fast and final">
+
+Failed DECR returns immediately — no DB touch. Client shows sold-out; **no retry storm** because idempotency keys prevent double-charge on the success path and sold-out is deterministic.
+
+</Step>
+</Steps>
+
+## Deep dive: why Redis DECR and what can still break
+
+### Single counter versus sharded counters
+
+One Redis key `stock` handles ~100k ops/s on a single node — enough for 11k/s. Extreme sales (millions/s) **shard inventory**: 500 units split as 50×10 on keys `stock:shard:0..49`, random shard DECR — reduces single-key hot spot. Reconciliation sums shards. Mention only if interviewer pushes past 100k/s.
+
+### Reservation versus immediate sale
+
+**Immediate decrement (flash sale default):** DECR on Buy click. Simple, no oversell. User abandons payment → you lost a slot unless you INCR on payment timeout.
+
+**Reserve-then-pay:** DECR moves to `reserved`; payment success moves to `sold`; timeout INCR `available`. Holds stock longer — risky with 500 units and 5-minute payment window unless admission cap is tight.
+
+For 500 units and 500k users, **immediate decrement with short payment window (2 min)** and waitlist for payment failures is the usual interview answer.
+
+<Callout type="gotcha">
+Read-modify-write in application code (`GET stock; if > 0 SET stock-1`) races at 11k/s — both threads see 1, both sell, oversold by one. The fix is a **single atomic primitive** (Redis DECR, Lua script, or DB `UPDATE ... WHERE stock > 0` with row count check). Never separate read and write across round trips on the hot path.
+</Callout>
+
+### Queue fairness versus latency
+
+FIFO queue is fair but users at position 400,000 see nothing for minutes — they refresh, multiplying load. **Admission cap** with random lottery among queued users is unfair but spreads hope; some products use **early token issuance** (login before sale gets priority). Pick one and name the product tradeoff.
+
+### Postgres as system of record
+
+Redis can restart — rebuild stock from Postgres before sale, pause sale if mismatch. During sale, **Postgres is async trail**; Redis is authority for availability. After sale, single reconciliation job locks Postgres row and sets final count to zero.
+
+## Redis hot counter versus database row lock
+
+<Tradeoff
+  forTitle="Redis atomic decrement when"
+  againstTitle="Database-authoritative inventory when"
+  forItems={[
+    "Peak contention on one SKU exceeds ~1k decrements/s — a single Postgres row becomes the bottleneck",
+    "Oversell is unacceptable and you need O(1) atomic decrement without row-lock queuing",
+    "Sale duration is bounded (minutes) — you can treat cache as source of truth temporarily with reconciliation",
+    "Failed attempts outnumber successes 1000:1 — hot path must avoid DB writes on rejection",
+    "Admission queue + rate limiting already sit in front — Redis fits the same infrastructure",
+  ]}
+  againstItems={[
+    "Inventory is distributed across thousands of SKUs with low contention each — Postgres row lock per SKU is fine",
+    "Strong audit trail on every attempt is required — each try is a durable row anyway",
+    "Sale volume is modest (&lt;100/s peak) — simplicity beats another moving part",
+    "Team policy forbids cache-as-authority — use `UPDATE inventory SET stock = stock - 1 WHERE stock > 0` with checked row count",
+    "Long reservation windows (hours) with complex cart logic — transactional DB fits better than TTL keys",
+  ]}
+/>
+
+## In an interview
+
+Open: "500 units, 500k clicks — I'll reject 99.9% fast and never oversell with an atomic decrement." Three minutes clarify, four minutes capacity (retry multiplier), ten minutes queue + Redis DECR + async order, eight on reservation vs immediate and idempotency.
+
+Follow-ups: "Redis dies mid-sale?" (pause sale, rebuild from Postgres, resume — accept small downtime), "Bots?" (rate limit + CAPTCHA at admission), "Two data centers?" (single Redis primary for counter or CRDT-style sharding — honest: hard, prefer single-region sale).
+
+Volunteer oversell from read-modify-write before they ask. Volunteer retry storm if sold-out is slow — "3 s timeout × 500k users = disaster."
+
+<KeyTakeaways
+  items={[
+    "Flash sale peak is 10–100× normal with retries on top — design for fast rejection, not fair processing of every attempt",
+    "Virtual waiting room + admission cap protects downstream services from raw click volume",
+    "Atomic inventory decrement (Redis DECR or conditional SQL UPDATE) is non-negotiable — read-modify-write races oversell",
+    "Idempotency keys on checkout requests deduplicate client retries without double-selling",
+    "Redis holds authoritative stock during the sale window; Postgres reconciles async for fulfillment and audit",
+    "Immediate decrement on Buy beats long reservations when inventory is tiny (hundreds) and demand is massive (hundreds of thousands)",
+  ]}
+/>

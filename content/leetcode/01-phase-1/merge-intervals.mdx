@@ -1,0 +1,98 @@
+---
+title: "Merge Intervals"
+number: "01.36"
+summary: "Sort by start, then merge in one pass — the active interval grows until the next start is past its end."
+status: published
+free: true
+difficulty: core
+estMinutes: 12
+tags: [intervals, sorting, array]
+updated: "2026-09-15"
+---
+
+## Overlaps hide until you sort
+
+Input `[[1,3],[2,6],[8,10],[15,18]]` should become `[[1,6],[8,10],[15,18]]` because `[1,3]` and `[2,6]` overlap. Unsorted input like `[[8,10],[1,3],[2,6]]` requires sorting first — otherwise `[8,10]` merges incorrectly with nothing and you miss the `[1,3]`/`[2,6]` join.
+
+Checking every pair for overlap is O(n²). Sorting by start costs O(n log n) and reduces the problem to a single scan: if the current interval overlaps the last merged one, extend the last end; otherwise start a new merged interval.
+
+## Sort, then grow the last block
+
+After sorting by `start`, initialize `merged` with the first interval. For each subsequent `[start, end]`:
+
+- If `start <= merged[last][1]`, overlap exists — set `merged[last][1] = max(merged[last][1], end)`.
+- Else push `[start, end]` as a new block.
+
+The invariant: `merged` is always sorted and non-overlapping, and the last block is the only one that might still grow.
+
+<Steps>
+<Step title="Sort by start">
+`intervals.sort((a, b) => a[0] - b[0])`.
+</Step>
+<Step title="Seed merged list">
+Push `intervals[0]` as the first merged block.
+</Step>
+<Step title="Merge or append">
+Compare each next interval's start to the last merged end; extend or append accordingly.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function merge(intervals: number[][]): number[][] {
+  if (intervals.length === 0) return [];
+
+  intervals.sort((a, b) => a[0] - b[0]);
+  const merged: number[][] = [intervals[0]];
+
+  for (let i = 1; i < intervals.length; i++) {
+    const [start, end] = intervals[i];
+    const last = merged[merged.length - 1];
+
+    if (start <= last[1]) {
+      last[1] = Math.max(last[1], end);
+    } else {
+      merged.push([start, end]);
+    }
+  }
+
+  return merged;
+}
+```
+
+Time **O(n log n)** for sort, **O(n)** merge pass. Space **O(n)** for output (sort may be in-place depending on engine).
+
+<Tradeoff
+  forTitle="Sort + linear merge when"
+  againstTitle="Insert one at a time when"
+  forItems={[
+    "The whole batch of intervals arrives at once and may be unsorted",
+    "You need fully merged non-overlapping output, not just a count",
+    "n is up to 10⁴ — O(n log n) is the standard acceptable bound",
+    "Same pattern extends to 01.35 Insert Interval after a single-element insert",
+    "Interview follow-up is 01.37 minimum removals — greedy on sorted ends"
+  ]}
+  againstItems={[
+    "Intervals stay sorted and you insert one new interval per query — 01.35 three-phase pass is O(n) per insert",
+    "Online stream of intervals where only the max overlap count matters — 01.39 Meeting Rooms II heap",
+    "Intervals are already sorted and non-overlapping — skip sort, run merge only if batch-merging two lists",
+    "You only need to detect if any two overlap — 01.38 Meeting Rooms, no merge structure",
+    "Timestamps are integers in a small range — bucket or difference array can beat sort"
+  ]}
+/>
+
+## In an interview
+
+Paraphrase: merge all overlapping intervals, return non-overlapping sorted list. Example on the board. State sort-by-start, then one pass extending the tail. Ask about empty input (return `[]`) and whether `[1,4]` and `[4,5]` merge — LeetCode treats touching ends as overlapping.
+
+Follow-ups: insert interval (01.35), minimum rooms (01.39), erase overlaps. Mention `max` on the end — `[1,10]` followed by `[2,3]` must not shrink the merged block.
+
+<KeyTakeaways items={[
+  "Sorting by start lets overlap detection happen only against the last merged interval.",
+  "Extend with max(end, lastEnd) — a nested interval must not truncate a wider merge.",
+  "Touching intervals `[a,b]` and `[b,c]` merge under the `start <= lastEnd` rule used on LeetCode.",
+  "Overall time O(n log n), dominated by sort; merge scan is O(n).",
+  "01.35 Insert Interval is the incremental case when the list is already merged and sorted.",
+  "The interval family — merge, insert, non-overlapping greedy, meeting rooms — shares one overlap predicate."
+]} />

@@ -1,32 +1,88 @@
 ---
 title: "Leader Election"
 number: "06.07"
-summary: "Leader Election — notes in progress."
-status: draft
+summary: "Leader election picks one node to own a role — primary, scheduler, partition owner — and the hard part is ensuring two winners never act at once."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [leader-election, fencing, failover, quorum]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Someone has to be primary — and only one someone
 
-What breaks without this, and the situation that forces the decision.
+A partition of a database needs a single writer. A cron fleet needs a single scheduler so jobs do not double-fire. A sharded stream processor needs one owner per shard so records are not processed twice. The role is obvious; the election is the part that fails in production. Two nodes both believe they won, both accept writes, and you discover the split after customers see duplicated charges or divergent counters — not when the election API returned an error.
 
-## How it works
+Leader election is the protocol (or the lease pattern) that chooses one holder for a named role and re-chooses when the holder dies or disappears. It is not the same as consensus, but strong elections are usually *implemented* with consensus or a consensus-backed lease store (06.06 Consensus). Weaker elections — "first to grab a Redis key," "lowest IP among peers who gossiped" — exist, and they are fine only when a brief dual-leader window is recoverable.
 
-The mechanism, step by step.
+The property you are buying is **at most one active leader for the role's critical section**. Liveness — "we eventually have a leader" — matters too, but the outage from no leader is usually preferable to the corruption from two.
 
-## Tradeoffs
+## How elections actually run
+
+Production designs cluster into a few patterns.
+
+**Consensus-group leadership.** Raft and Zab already elect a leader for the log. That leader is often also the application primary for the data the group owns. Failover is a new term and a new election; the old leader's uncommitted tail is discarded. This is the strongest common option for metadata and for databases that already run Raft per range.
+
+**Lease in a strongly consistent store.** Candidates try to create or acquire a key in ZooKeeper/etcd with a TTL (or an ephemeral node / session). The winner renews before expiry; everyone else watches. When the session dies, the key disappears and watchers race to acquire. The store's linearizability is doing the heavy lifting — without it, two clients can both think they hold the key (06.08 Distributed Locks And Leases, 06.09 Redis Redlock And Fencing Tokens).
+
+**Membership gossip plus deterministic rule.** Cassandra-style snitching and some cluster managers broadcast who is alive; a deterministic function (lowest token, highest generation) picks a coordinator. Fast and decentralized, but "alive" is a timeout guess, so false deaths and dual coordinators need application-level fencing.
+
+**External primary appointment.** An operator or an autoscaler designates the primary. Simple until the appointer is wrong or unreachable — then you have turned election into a ticket.
+
+| Pattern | Dual-leader risk | Failover speed | Typical home |
+| --- | --- | --- | --- |
+| Raft/Zab group leader | Very low if clients fence on term | Election timeout + majority round | etcd, DB range leaders |
+| etcd/ZK lease or ephemeral | Low with fencing tokens | Session expiry + watch | Schedulers, controllers |
+| Gossip + deterministic pick | Medium — depends on Φ/timeouts | Gossip period | Large data-plane clusters |
+| Manual / external appoint | Operational | Human or script | Small stateful sets |
+
+## Fencing is the half people skip
+
+Election without fencing answers "who won the race." Fencing answers "can a slow old winner still mutate state after losing."
+
+Classic failure: leader A is GC-paused; followers elect B; A wakes, still holds a database connection, and writes. A still "won" an earlier election; the clock did not make it safe. The fix is a **fencing token** — a monotonically increasing epoch, term, or generation — that every write to the resource must carry. Storage rejects writes with a stale token. B's token is higher; A's post-pause writes die. Without that check, election theatre does not protect the data.
+
+Timeouts couple tightly to this story. Too short and healthy leaders get murdered by slow GC (06.05 Clocks And Ordering); too long and failover waits while the role is dark. Randomized election timeouts (Raft) reduce split votes; Φ accrual failure detectors soften binary "dead/alive" in gossip systems. None of them replace fencing.
+
+<Callout type="gotcha">
+Sticky DNS, a load balancer that still routes to the old primary, or a client cache of "current leader" can recreate dual writers even after a perfect election. Leader identity has to be checked on the write path — term, generation, or lease id — not only in the discovery document.
+</Callout>
+
+## When you do not want a leader
+
+Leaderless designs (Dynamo quorums, CRDTs, multi-master with merge) avoid election by making every replica able to take writes and reconciling later. That shifts cost to conflict resolution and client-visible staleness. Some roles are also better as **sharded leadership**: many leaders, one per partition, so a single election failure does not stop the world — Kafka partition leaders and per-range Raft groups are this pattern. The election problem does not disappear; it multiplies into many small, independent elections.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Elect a single leader when"
+  againstTitle="Prefer leaderless or multi-primary when"
+  forItems={[
+    "The role is inherently singular — one scheduler, one primary writer per shard, one controller reconciling desired state",
+    "Conflict merge is harder than failover engineering for this data (balances, inventory, exactly-once side effects)",
+    "You already run a consensus store and can put the lease there with a fencing token on every mutation",
+    "Clients can tolerate a brief unavailable window during election better than divergent successful writes",
+    "Operational mental model matters: one place to look for 'who owns shard 17' beats reconstructing quorum histories",
+  ]}
+  againstItems={[
+    "Writes must continue on both sides of a partition and divergence is mergeable (06.04 CAP And PACELC)",
+    "A global leader would become a throughput or latency bottleneck and you cannot shard the role",
+    "The team cannot yet implement fencing — an unfenced election is worse than no election",
+    "Failover churn under load would thrash primaries more than occasional conflicts would hurt",
+    "The workload is read-heavy with rare writes that a quorum or gossip design already handles",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Say what must never happen: "two primaries accepting writes for the same shard." Then pick the mechanism by severity — Raft/etcd lease for money-shaped invariants, gossip coordinator for softer cluster roles — and immediately add fencing: "writes carry a term; storage rejects stale terms." Expect "what if the leader is paused not dead?": that question *is* the fencing question. Tie discovery (06.12 Metadata Service And Node Discovery) in one line — clients learn the leader from the same strongly consistent place that ran the election, or they verify on write.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Leader election assigns a singular role; the safety goal is at most one active leader, not merely 'someone got elected.'",
+    "Strong elections use consensus or a linearizable lease store; gossip and deterministic picks are faster but need application fencing.",
+    "A paused old leader that wakes up is the classic dual-writer failure — fencing tokens (terms, epochs) make storage reject its writes.",
+    "Timeout tuning trades false death (flapping) against slow failover; neither tuning replaces fencing.",
+    "Sharding leadership (one leader per partition) contains blast radius; a single global leader concentrates both load and outage.",
+    "Skip election when mergeable multi-writer designs fit better — but do not confuse 'we avoided election' with 'we avoided conflict.'",
+  ]}
+/>

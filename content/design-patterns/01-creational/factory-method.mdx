@@ -1,0 +1,119 @@
+---
+title: "Factory Method"
+number: "01.02"
+summary: "Defer which concrete class gets constructed to subclasses so new product types ship without rewriting every caller."
+status: published
+free: true
+difficulty: core
+estMinutes: 14
+tags: [factory-method, polymorphism, creational]
+updated: "2026-09-15"
+---
+
+## The `new` keyword scattered through your UI layer
+
+A document editor renders shapes — rectangles, circles, connectors. Version one hard-codes `new Rectangle()` in the canvas click handler. Version two adds sticky notes. You grep for `new Rectangle`, `new Circle`, touch twelve files, and miss one path in the export pipeline that still assumes every shape is rectangular. Version three adds a plugin API for third-party shapes. Now every `new` is a merge conflict waiting to happen.
+
+Factory Method fixes a specific failure: **callers that know too much about concrete classes**. The client code should depend on an abstraction — `Shape`, `Notification`, `Parser` — and something else decides which subclass to instantiate. That "something else" is usually a **Creator** subclass: `WindowsDialog` creates `WindowsButton`, `WebDialog` creates `HtmlButton`. The Creator defines the workflow; subclasses override the factory hook.
+
+This is not "a function that returns objects." It is **polymorphic construction** — the type choice moves from the call site into a class hierarchy where variation already lives.
+
+## Creator owns the workflow; subclass picks the product
+
+The roles are stable across every textbook example:
+
+- **Product** — the interface or base class (`Button`, `Document`)
+- **Concrete Product** — each implementation (`HtmlButton`, `PdfDocument`)
+- **Creator** — declares the factory method, often calling it from a template workflow (`renderDialog()`)
+- **Concrete Creator** — overrides the factory method to return a specific Concrete Product
+
+The client interacts with the Creator through its base type and never names the concrete product class.
+
+<Steps>
+  <Step title="Define the Product interface">
+    Capture what callers need — `render()`, `serialize()`, `send()` — without binding to a concrete class.
+  </Step>
+  <Step title="Implement Concrete Products">
+    Each variant lives in its own class. Construction complexity stays inside the product or a dedicated builder if needed.
+  </Step>
+  <Step title="Declare the factory hook on Creator">
+    A method like `createButton(): Button` — often protected — returns the Product type. The Creator's other methods call this hook as part of a larger algorithm.
+  </Step>
+  <Step title="Subclass Creator per variation">
+    `WebDialog.createButton()` returns `HtmlButton`; `MobileDialog.createButton()` returns `NativeButton`. The dialog layout code in the base class stays unchanged.
+  </Step>
+  <Step title="Wire the right Creator at the edge">
+    Composition root, config flag, or platform detection chooses which Concrete Creator to instantiate. Everything inward depends on abstractions.
+  </Step>
+</Steps>
+
+```typescript
+interface Button {
+  render(): string;
+}
+
+abstract class Dialog {
+  abstract createButton(): Button;
+
+  renderDialog(): string {
+    const button = this.createButton();
+    return `<dialog>${button.render()}</dialog>`;
+  }
+}
+
+class HtmlDialog extends Dialog {
+  createButton(): Button {
+    return { render: () => "<button>OK</button>" };
+  }
+}
+```
+
+Notice what did not happen: `renderDialog()` contains no `if (platform === "web")`. The branch moved to the class you instantiate once at startup — which is exactly where platform knowledge belongs.
+
+## Factory Method is one product at a time
+
+If your variation is "which single class do I construct right now," Factory Method fits. If you must produce **matched families** — a Windows button *and* a Windows scrollbar that must not be mixed with Mac widgets — that is 01.03 Abstract Factory. If construction has dozens of optional fields and you want a fluent step-by-step assembly, that is 01.04 Builder. If cloning an existing configured object is cheaper than rebuilding from scratch, that is 01.05 Prototype.
+
+Factory Method also differs from a standalone `createShape(type: string)` function. A stringly-typed factory centralizes `new` but keeps **one switch** that grows forever and knows every concrete class — fine for three types, painful at thirty, untestable when plugins arrive. Subclassing the Creator lets new products ship as new classes without editing the switch.
+
+<Callout type="tip">
+When the only variation is construction and there is no shared Creator workflow, a plain registry map (`type → constructor`) or a DI container registration is often enough. Factory Method earns its class hierarchy when the Creator itself runs a multi-step algorithm that calls the hook repeatedly.
+</Callout>
+
+<Tradeoff
+  forTitle="Reach for it when"
+  againstTitle="Avoid it when"
+  forItems={[
+    "Callers should not name concrete product classes — the choice varies by platform, tenant tier, or deployment mode",
+    "A Creator base class already owns a workflow that needs different product implementations at one hook point",
+    "New product types arrive regularly and must plug in without editing existing client code — Open/Closed at the construction boundary",
+    "Construction logic differs per variant but the post-construction usage is identical through the Product interface",
+    "You can select the Concrete Creator once at the composition root and pass it inward as the Creator abstraction",
+  ]}
+  againstItems={[
+    "You need families of related products guaranteed compatible with each other — use Abstract Factory instead of one hook per product line",
+    "Object assembly has many optional fields and validation steps — Builder separates construction from representation more cleanly",
+    "Only two or three types exist and a simple map or switch at one factory function is readable and unlikely to grow",
+    "Variation is runtime configuration on a single class, not a new subclass — a parameterized constructor may suffice",
+    "Subclass explosion: every product × every platform becomes a Concrete Creator class nobody can navigate",
+  ]}
+/>
+
+## In an interview
+
+Lead with the **`new` problem**: "Our export pipeline should not know whether it is serializing PDF or DOCX — the document creator subclass picks the format, the pipeline calls `document.export()`." That shows you understand decoupling, not just pattern vocabulary.
+
+Follow-ups usually probe **Factory Method vs Abstract Factory** (one product hook vs a family interface), **vs Simple Factory** (function with a switch — when is subclassing worth it?), and **Open/Closed** (how do you add a product without changing callers?). Mention that over-application — a Creator hierarchy for two products — is a common over-engineering smell.
+
+State the failure mode: a god-switch factory that imports every concrete class and becomes the change bottleneck you were trying to escape.
+
+<KeyTakeaways
+  items={[
+    "Factory Method moves the decision of which concrete class to instantiate from callers into a Creator subclass's overridable hook",
+    "The Creator defines a workflow that calls the factory method; Concrete Creators supply different Products without changing that workflow",
+    "It solves one-product variation — platform-specific buttons, format-specific parsers — not matched multi-product families",
+    "A standalone switch-based factory centralizes construction but violates Open/Closed; subclassing pays off when new types arrive often and a Creator workflow already exists",
+    "Choose the Concrete Creator at the composition root; everything inward depends on the Product interface and Creator abstraction",
+    "Contrast with 01.03 Abstract Factory for product families, 01.04 Builder for stepwise assembly, and 01.05 Prototype for clone-heavy creation",
+  ]}
+/>

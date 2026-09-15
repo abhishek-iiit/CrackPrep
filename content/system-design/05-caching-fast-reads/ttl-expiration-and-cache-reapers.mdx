@@ -1,32 +1,94 @@
 ---
 title: "TTL Expiration And Cache Reapers"
 number: "05.04"
-summary: "TTL Expiration And Cache Reapers — notes in progress."
-status: draft
+summary: "TTL is a freshness deadline on a cached copy; how and when expired entries are actually removed decides whether you get gentle decay or synchronized stampedes."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [caching, ttl, expiration, freshness]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Freshness without a perfect invalidation story
 
-What breaks without this, and the situation that forces the decision.
+Explicit invalidation — delete key `user:42` the moment the row changes — is the cleanest way to keep a cache honest. It is also the easiest to get wrong: a missed code path, a second writer, a bulk import that bypasses the app, and the cache serves a lie until something else removes it. For many read-heavy paths the practical alternative is a **time-to-live**: store the answer with a deadline, and after that deadline refuse to serve it as fresh. The copy may still be correct; you no longer promise that it is.
 
-## How it works
+TTL is a bound on how wrong you are willing to be, measured in time. A product description with `TTL = 5 minutes` means a rename can be invisible for up to five minutes. An inventory count with `TTL = 50 ms` is almost not caching. An account balance with "TTL = forever" is not a cache entry you should have created. The number is a product decision dressed as a cache parameter.
 
-The mechanism, step by step.
+Eviction (05.03 Cache Eviction Policies) can remove an entry early because the box is full. TTL removes it because the clock says so, even if RAM is plentiful. Running without TTLs and relying only on eviction means a key that is read occasionally can stay stale for days if nothing hotter pushes it out.
 
-## Tradeoffs
+## Lazy expiration versus active reaping
+
+Storing a deadline is not the same as deleting the bytes.
+
+**Lazy (passive) expiration** checks the deadline on access. A `GET` for an expired key returns a miss (and typically deletes the key as a side effect). Keys that nobody reads again sit around until eviction or a sweep notices them. This is cheap on the write path and how Redis handles most TTL expiry: expired keys are dropped when touched, plus a periodic random sample of keys with TTLs to keep memory from filling with dead entries.
+
+**Active reaping** is a background process that scans for expired keys and deletes them on a schedule. Useful when expired-but-unaccessed keys would dominate memory, or when you need a side effect on expiry (release a lock, enqueue a refresh). The reaper's scan rate is itself a capacity choice — too aggressive and you burn CPU rewriting the keyspace; too timid and dead keys linger.
+
+| Approach | When the key disappears | CPU pattern | Risk |
+| --- | --- | --- | --- |
+| Lazy on read | First access after deadline | Spikes with read traffic to expired keys | Dead keys linger if never read |
+| Periodic random sample | Probabilistically after deadline | Steady small background cost | Some expired keys linger longer than others |
+| Full reaper scan | On schedule after deadline | Scan cost proportional to keyspace | Reaper lag under huge key counts |
+| TTL + explicit invalidate | Earlier of the two | Whatever the write path pays | Still need the invalidate to fire |
+
+Most production caches combine lazy expiry with light background sampling. A dedicated reaper shows up when expiry must be prompt for reasons other than memory — lease-like keys, temporary permissions, "this promo ends at noon" where serving it at 12:05 is a business bug.
+
+## The synchronized expiry problem
+
+Set every copy of a hot key to `TTL = 60s` at the same moment (a deploy warming the cache, a flash crowd filling from empty), and sixty seconds later every copy expires together. The next second is a miss storm: thousands of requests fall through to the database for the same key. The TTL did its job. The alignment of deadlines created a thundering herd.
+
+Two mitigations belong in the same design conversation as the TTL itself:
+
+- **Jitter.** Store `TTL = base + random(0, jitter)` — e.g. 60s ± 10s — so expiry spreads across a window instead of a single instant. Cheap, usually enough for popular keys refreshed by ordinary traffic.
+- **Soft TTL / early refresh.** Serve the slightly stale value while one caller refreshes in the background, or probabilistically refresh before the hard deadline as the remaining lifetime shrinks. 05.05 Cache Concurrency Control covers singleflight and stampede control in depth; jitter is the TTL-side half of the same problem.
+
+<Callout type="warn">
+A TTL of zero, or "no TTL," on a key that can become wrong is how caches become durable sources of lies. If you cannot invalidate reliably, you need a TTL. If you cannot tolerate the TTL's staleness window, you need a different caching strategy — or you should not cache that field.
+</Callout>
+
+## Choosing the number
+
+There is no universal correct TTL. Work backward from the question: what is the cost of serving a value that is `T` seconds old?
+
+- **Marketing copy, avatars, public config** — minutes to hours. Staleness is annoyance; hit rate dominates.
+- **Feed pages, recommendation lists** — tens of seconds to a few minutes, sometimes with explicit invalidate on publish.
+- **Inventory near checkout, authz decisions, prices in a sale** — milliseconds to seconds, or no cache on the critical read.
+- **Negative caching** (caching "this id does not exist") — short TTLs, often seconds, because a wrong negative blocks a newly created entity from appearing. 04.13 Bloom Filters can absorb some of that traffic without caching the negative in the main store.
+
+Write the TTL next to the key pattern in the design, not as a single global constant. One Redis instance routinely holds keys with TTLs that differ by three orders of magnitude; that is normal, not a smell.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Lean on TTLs when"
+  againstTitle="Prefer explicit invalidation (or no cache) when"
+  forItems={[
+    "Some bounded staleness is acceptable and cheaper than building a perfect invalidate path for every writer",
+    "Writers are numerous or partially outside your control — imports, admin SQL, sibling services — so you cannot trust every path to delete the key",
+    "You need a backstop even when invalidation exists, so a missed delete cannot linger forever",
+    "Negative lookups or rare keys would otherwise stick around until eviction under pure LRU",
+    "You can add jitter or soft-TTL refresh so popular keys do not expire in lockstep",
+  ]}
+  againstItems={[
+    "Serving a stale value for even a few seconds is a correctness or compliance failure",
+    "You already have a single write path that can invalidate reliably, and freshness matters more than simplicity",
+    "The object changes more often than any TTL you would set, so the cache mostly stores misses and expiry churn",
+    "Memory pressure is the real problem and TTLs are being used as a substitute for a sized working set and eviction policy",
+    "Expiry alignment would stampede the database and you are unwilling to add jitter or request coalescing",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Define TTL as a freshness bound, not as "how long until Redis deletes it for memory." Separate it from eviction in one sentence, then pick a concrete number for the key you are caching and say what can go wrong during that window. Mention jitter for hot keys so the follow-up about stampedes has an answer ready. If the interviewer pushes on strong freshness, be willing to drop the cache for that field or move to explicit invalidation — defending a five-minute TTL on a balance is worse than saying you would not cache it.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "TTL bounds how long a cached answer may be served; it is a product-level freshness decision, not just a memory-management trick",
+    "Lazy expiry removes keys on access; background sampling or reapers clean keys nobody reads — most stores do both",
+    "Eviction and TTL are independent: a fresh key can be evicted under pressure, and a stale key can linger until touched or reaped",
+    "Aligned TTLs on hot keys create miss stampedes; jitter and early refresh spread or soften the deadline",
+    "Negative cache entries need short TTLs so newly created entities are not hidden behind a cached 'missing'",
+    "Write the TTL next to the data it protects, and say what a stale read costs during that window",
+  ]}
+/>

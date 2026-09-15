@@ -1,0 +1,114 @@
+---
+title: "Construct Binary Tree from Preorder and Inorder Traversal"
+number: "02.17"
+summary: "Preorder picks the root; inorder splits left and right — a hash map on inorder values finds the split in O(1)."
+status: published
+free: true
+difficulty: deep
+estMinutes: 18
+tags: [binary-tree, dfs, hash-map]
+updated: "2026-09-15"
+---
+
+## Two traversals, one unique tree
+
+Given integer arrays `preorder` and `inorder` of the same set of distinct values, reconstruct the binary tree and return its root. Preorder visits root before subtrees; inorder visits left, root, right — so the root value in preorder tells you which inorder index splits left and right children.
+
+Example: `preorder = [3,9,20,15,7], inorder = [9,3,15,20,7]` → tree rooted at 3 with left child 9 and right subtree 20/15/7.
+
+Without distinct values the tree may not be unique — this problem assumes distinct keys. Naive approach: find root in inorder O(n), recurse — **O(n²)** overall because each level scans inorder. With up to 3000 nodes (or 10⁴ on some variants), you need **O(n)** total: map each value to its inorder index once.
+
+The bug that fails silently: wrong subtree sizes — left subtree has exactly `rootIndex` nodes in inorder; right has `n - rootIndex - 1`. Slice arrays in TypeScript copies; pass **index ranges** instead.
+
+## Ranges on both arrays
+
+Keep `[preStart, preEnd]` and `[inStart, inEnd]`. Root = `preorder[preStart]`. Find `rootIndex` in inorder via map. Left child size = `rootIndex - inStart`. Recurse left on the next `leftSize` preorder entries; recurse right on the remainder.
+
+<Steps>
+<Step title="Build inorder index map">
+  `value → index` for O(1) root lookup.
+</Step>
+<Step title="Pick root from preorder start">
+  Create node; locate in inorder.
+</Step>
+<Step title="Recurse with computed sizes">
+  Left: preorder `[preStart+1, preStart+leftSize]`, inorder `[inStart, rootIndex-1]`. Right: remaining ranges.
+</Step>
+</Steps>
+
+Postorder + inorder is symmetric (root at postorder end). Preorder + inorder without distinct values needs tie-breaking rules — not this problem.
+
+## Solution
+
+```ts
+class TreeNode {
+  val: number;
+  left: TreeNode | null;
+  right: TreeNode | null;
+  constructor(val?: number, left?: TreeNode | null, right?: TreeNode | null) {
+    this.val = val ?? 0;
+    this.left = left ?? null;
+    this.right = right ?? null;
+  }
+}
+
+function buildTree(preorder: number[], inorder: number[]): TreeNode | null {
+  const indexOf = new Map<number, number>();
+  for (let i = 0; i < inorder.length; i++) {
+    indexOf.set(inorder[i], i);
+  }
+
+  function build(preStart: number, preEnd: number, inStart: number, inEnd: number): TreeNode | null {
+    if (preStart > preEnd) return null;
+
+    const rootVal = preorder[preStart];
+    const rootIndex = indexOf.get(rootVal)!;
+    const leftSize = rootIndex - inStart;
+
+    const root = new TreeNode(rootVal);
+    root.left = build(preStart + 1, preStart + leftSize, inStart, rootIndex - 1);
+    root.right = build(preStart + leftSize + 1, preEnd, rootIndex + 1, inEnd);
+    return root;
+  }
+
+  return build(0, preorder.length - 1, 0, inorder.length - 1);
+}
+```
+
+Time **O(n)** — each node built once, map lookup O(1). Space **O(n)** for map and recursion stack O(h).
+
+<Tradeoff
+  forTitle="Index ranges + hash map when"
+  againstTitle="Rescan inorder each level when"
+  forItems={[
+    "n is thousands — O(n²) rescanning inorder TLEs",
+    "Values are distinct — inorder root index uniquely splits children",
+    "You want to avoid array slicing copies in JavaScript",
+    "Same pattern extends to postorder+inorder with root at postorder tail",
+    "Interview follow-up is serialize back — pairs with 02.15",
+  ]}
+  againstItems={[
+    "n is under ~100 and clarity beats micro-optimization",
+    "Duplicate values break uniqueness — need different splitting rule",
+    "Input is actually a BST — 02.18 order property gives O(n) without map if sorted inorder",
+    "Iterative stack simulation is required — recursive range version is harder to convert",
+    "Malformed inputs (permutations that are not valid traversals) — problem guarantees validity",
+  ]}
+/>
+
+## In an interview
+
+State preorder = root first, inorder = left-root-right. Walk a 5-node example on a whiteboard marking ranges shrink.
+
+Before coding, say you will map inorder values to indices and pass `(preStart, preEnd, inStart, inEnd)` — never slice arrays.
+
+Bug: off-by-one on `leftSize` (right subtree eats a left node); using `preorder[preEnd]` as root instead of `preorder[preStart]`. Follow-ups: postorder+inorder; construct BST from preorder only; serialize then deserialize (02.15).
+
+<KeyTakeaways items={[
+  "Preorder's first element in each range is the subtree root; inorder locates that root's split point.",
+  "Left subtree size = root's inorder index minus inStart — drives preorder partition.",
+  "O(n) index map avoids rescanning inorder at every recursion level.",
+  "Pass index ranges, not subarrays — slicing is O(n) per level in JS.",
+  "Distinct values guarantee a unique binary tree for valid traversal pairs.",
+  "Postorder+inorder mirrors this with root taken from the postorder end.",
+]} />

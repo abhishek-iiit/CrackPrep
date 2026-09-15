@@ -1,32 +1,113 @@
 ---
 title: "Adaptive Bitrate And CDN Decider"
 number: "13.06"
-summary: "Adaptive Bitrate And CDN Decider — notes in progress."
-status: draft
+summary: "How players switch among ladder rungs from buffer and bandwidth signals, and how your CDN and origin layout keep segment fetches fast enough for those decisions to work."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 15
+tags: [video, abr, cdn]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The ladder only helps if the player can climb it
 
-What breaks without this, and the situation that forces the decision.
+13.05 Video Transcoding Pipeline produces multiple renditions and a manifest. **Adaptive bitrate (ABR)** is the client-side (and sometimes server-assisted) policy that chooses which rendition to fetch next based on measured throughput and buffer health. The **CDN decider** — edge selection, cache key design, origin shield — is what makes each segment GET land quickly enough for the ABR loop to be stable. Separating those concerns matters: bad encodes cannot be fixed by a CDN; a perfect ladder still rebuffers if every segment misses across an ocean.
 
-## How it works
+## What the player sees
 
-The mechanism, step by step.
+For HLS, a master playlist lists variant streams (different bandwidths/resolutions); each variant has a media playlist of segment URLs (`.ts` or fragmented MP4). DASH uses an MPD with similar adaptation sets. The player:
 
-## Tradeoffs
+1. Fetches the master manifest (once, then refresh for live).
+2. Picks an initial variant (often mid or low — conservative start).
+3. Downloads segments, filling a buffer of several seconds to tens of seconds.
+4. Continuously estimates bandwidth from segment download times.
+5. Upshifts or downshifts variant according to an ABR algorithm when buffer and estimate allow.
+
+Your job on the server is to publish consistent segment timing (target duration), accurate `BANDWIDTH` attributes, and URLs the CDN can cache. Lying in the manifest (understated bandwidth) causes players to overfill and rebuffer; overstated bandwidth makes them under-utilise the link.
+
+## ABR algorithms in practice
+
+You rarely invent one in an interview, but you should know what they optimise:
+
+| Family | Idea | Failure mode |
+| --- | --- | --- |
+| Throughput-based | Pick highest rung under estimated bandwidth × safety factor | Noisy estimates → oscillation |
+| Buffer-based (e.g. BOLA-style) | Choose rung from buffer level | Slow to use newly good networks |
+| Hybrid | Combine estimate + buffer + hysteresis | Complexity; still needs good inputs |
+
+**Hysteresis** — require sustained headroom before upshift, downshift quickly on buffer danger — is the practical knob against flicker (quality bouncing every segment). Segment duration (often 2–6 s for VOD) trades ABR agility against request overhead and encoding efficiency.
+
+## CDN's role in the loop
+
+ABR assumes segment latency and throughput are somewhat stable. The CDN decider stack:
+
+- **Edge selection** — DNS or anycast to a nearby POP; sticky enough that consecutive segments do not jump continents mid-playout.
+- **Cache key** — scheme/host/path for immutable segment URLs; do not put volatile query tokens in the key if the token changes per request (sign with path that still caches — 13.07 territory).
+- **Origin shield** — collapse misses so a popular new title does not stampede the bucket from every POP.
+- **Long TTL for immutable segments** — content-hashed or versioned paths cache for days; manifests for VOD can also be long-lived if the URL version changes on republish. Live manifests need short TTL / revalidation.
+- **Correct `Content-Type` and range support** — some players use byte ranges; misconfigured origins break mid-segment.
+
+```text
+Player ABR loop
+  measure download of segment N
+  update throughput + buffer
+  choose variant for segment N+1
+  GET segment from CDN edge
+      hit  → fast
+      miss → shield → origin object store
+```
+
+## Startup and decision points you control
+
+**Time to first frame** is dominated by: manifest RTT, codec init, first segment size, and conservative initial rung. Offer a small init segment / fMP4 init, keep early segments short, and consider a dedicated low-bitrate rung for startup even if you later jump higher.
+
+**Prefetch** of the next segment on the current rung (and sometimes the next lower rung) hides RTT. Over-prefetch across many rungs wastes CDN and battery.
+
+**Server-side "decider"** APIs (return a ranked CDN hostname or a signed cookie for a region) help when you run multi-CDN: pick the CDN with better health for this user/ASN, then let client ABR run inside that CDN. Multi-CDN without a decider leaves the player on a single hostname forever — fine at small scale, brittle globally.
+
+## Failure modes
+
+- **Oscillation** — aggressive ABR + high variance networks; fix with hysteresis and accurate BANDWIDTH.
+- **Cache fragmentation** — unique signed query strings per user defeat edge cache; everyone origin-fetches. Design auth so popular segments stay shared (path-based token, cookie auth at edge).
+- **Manifest lists unavailable rungs** — see 13.05 progressive publish.
+- **Hot origin on premiere** — without shield and pre-warm, ABR estimates collapse as every GET queues at the bucket; players downshift en masse and may still rebuffer.
+- **Mixed-segment timelines** after a re-encode without versioned URLs — players splice incompatible playlists.
+
+<Callout type="tip">
+In design interviews, draw two loops: the player's ABR loop and the CDN miss path. Say you will version segment URLs for immutability, put a shield in front of object storage, and advertise honest bandwidths in the master playlist. That is enough ABR literacy to unlock follow-ups without simulating BOLA on a whiteboard.
+</Callout>
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Invest in ABR + CDN-tuned delivery when"
+  againstTitle="Ship a single progressive file when"
+  forItems={[
+    "Audiences span mobile and broadband and rebuffering is a product metric",
+    "You already produce a multi-rung ladder (13.05) and need it to be usable under varying networks",
+    "Global viewership needs edge caching of segments with origin shield on premiers",
+    "Multi-CDN or regional origins require an explicit edge/decider choice",
+    "Session lengths are long enough that mid-stream adaptation pays off",
+  ]}
+  againstItems={[
+    "Clips are a few seconds and a single mid-bitrate MP4 progressive download is acceptable",
+    "All viewers share a controlled LAN with known capacity",
+    "You cannot operate packaging + CDN cache hygiene and a broken ABR setup would be worse than progressive",
+    "Offline download of one file is the primary mode",
+    "Live ultra-low-latency constraints push you to a different protocol stack (WebRTC / LL-HLS variants) with its own tradeoffs",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Connect the pipeline: multipart upload → transcode ladder → HLS manifests → player ABR → CDN cached segments. Name hysteresis, immutable segment URLs, and origin shield. If asked how the player chooses quality, describe throughput/buffer hybrid at a high level and stress honest BANDWIDTH and buffer safety — not a specific paper. Mention multi-CDN decider only if scale warrants it.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "ABR is the player's policy for choosing among ladder rungs using throughput and buffer; the CDN makes segment fetches fast and stable enough for that policy to work",
+    "Manifests must advertise accurate bandwidths and only list rungs that actually exist",
+    "Hysteresis prevents quality oscillation on noisy mobile networks",
+    "Immutable, cacheable segment URLs plus origin shield protect premiers from origin stampedes",
+    "Auth designs that uniquify every URL query destroy edge hit ratio — keep cache keys shareable",
+    "Startup time needs a deliberate low rung and small first segments; mid-stream ABR alone does not fix slow starts",
+  ]}
+/>

@@ -1,0 +1,96 @@
+---
+title: "Binary Search"
+number: "02.42"
+summary: "A sorted array turns 'find target' from O(n) linear scan into O(log n) by halving the search space each step."
+status: published
+free: true
+difficulty: intro
+estMinutes: 10
+tags: [binary-search, array]
+updated: "2026-09-15"
+---
+
+## Linear scan dies on sorted input
+
+Given a sorted array of distinct integers and a target, return the index of `target` or `-1` if absent. For `nums = [-1, 0, 3, 5, 9, 12], target = 9` → index 4.
+
+Linear scan works — O(n) — but the array is sorted. That ordering is information you are throwing away if you walk every element. With n up to 10⁴, O(n) passes; the pattern appears everywhere at n up to 10⁵ and beyond where linear scan TLEs.
+
+The invariant: if `target` exists, it lies in the current `[left, right]` window. Compare the midpoint to `target`, discard half the window, repeat.
+
+## Halve the window until found or empty
+
+Use **closed bounds**: `left = 0`, `right = nums.length - 1`. While `left <= right`, compute `mid = left + Math.floor((right - left) / 2)` — the overflow-safe form. If `nums[mid] === target`, return `mid`. If `nums[mid] < target`, search the right half (`left = mid + 1`). Otherwise search the left half (`right = mid - 1`).
+
+<Steps>
+<Step title="Initialize left = 0, right = n - 1">
+  The answer, if it exists, is somewhere in this inclusive range.
+</Step>
+<Step title="Compute mid and compare nums[mid] to target">
+  Equal → return mid. Smaller → discard left through mid. Larger → discard mid through right.
+</Step>
+<Step title="Loop while left <= right">
+  When the loop exits, the window is empty and target is absent.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function search(nums: number[], target: number): number {
+  let left = 0;
+  let right = nums.length - 1;
+
+  while (left <= right) {
+    const mid = left + Math.floor((right - left) / 2);
+    if (nums[mid] === target) return mid;
+    if (nums[mid] < target) {
+      left = mid + 1;
+    } else {
+      right = mid - 1;
+    }
+  }
+
+  return -1;
+}
+```
+
+Time **O(log n)** — halve the window each iteration. Space **O(1)**.
+
+<Tradeoff
+  forTitle="Binary search when"
+  againstTitle="Linear scan when"
+  forItems={[
+    "The array (or answer space) is sorted or monotonic — order lets you discard half",
+    "n is large enough that O(n) risks TLE on follow-up problems",
+    "You need the exact index, not just existence",
+    "This is the template for harder variants: rotated array (01.08), peak element (02.45), search on answer (02.44)",
+    "Distinct elements simplify the three-way branch; duplicates need separate handling",
+  ]}
+  againstItems={[
+    "The array is unsorted and sorting costs O(n log n) with no reuse",
+    "n is tiny (under ~100) and a for-loop is faster to write correctly",
+    "You need all occurrences of target — equal elements require left/right boundary variants",
+    "The structure is a linked list or tree where random access is unavailable",
+    "Interviewer wants the brute force baseline stated before optimizing",
+  ]}
+/>
+
+## In an interview
+
+Restate: sorted ascending, distinct integers, return index or -1. Walk through `[-1, 0, 3, 5, 9, 12], target = 9` → 4, and `target = 2` → -1.
+
+Say out loud that sorted order means comparing mid tells you which half to keep. Mention the infinite loop bug before coding: when discarding left, use `left = mid + 1`, not `left = mid`.
+
+Follow-ups: 01.07 Find Minimum in Rotated Sorted Array, 01.08 Search in Rotated Sorted Array, 02.43 Search a 2D Matrix. The bugs interviewers watch for: `mid = (left + right) / 2` overflow (use the safe form), and `while (left < right)` when you meant `<=` for exact search.
+
+<KeyTakeaways
+  items={[
+    "Binary search requires sorted (or monotonic) structure so comparing mid eliminates half the candidates",
+    "Closed bounds use left = 0, right = n - 1, loop while left <= right, and mid = left + floor((right - left) / 2)",
+    "On match return mid; on nums[mid] < target search right (left = mid + 1); else search left (right = mid - 1)",
+    "Time O(log n), space O(1) — the baseline template for every search variant in Phase 2",
+    "Off-by-one and infinite-loop bugs come from wrong loop condition or forgetting mid + 1 / mid - 1",
+    "This exact-search template differs from lower-bound ('first >= target') variants used in harder problems",
+  ]}
+/>

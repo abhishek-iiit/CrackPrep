@@ -1,0 +1,141 @@
+---
+title: "Builder"
+number: "01.04"
+summary: "Assemble complex objects step by step so telescoping constructors and a dozen optional parameters stop leaking into every call site."
+status: published
+free: true
+difficulty: core
+estMinutes: 14
+tags: [builder, construction, creational]
+updated: "2026-09-15"
+---
+
+## The fourteen-argument constructor nobody dares to touch
+
+Your `HttpRequest` class grew. Method and URL were enough at first. Then headers, body, timeout, retry policy, redirect following, proxy, TLS settings, cookie jar, compression. Call sites look like this: `new HttpRequest("POST", url, null, headers, body, 5000, true, false, proxy, null, true, 3, ...)`. Half the arguments are `null` meaning "default." A new engineer swaps timeout and retry count. Code review misses it because positional args past the fifth are unreadable.
+
+Builder separates **how you construct** from **what you end up with**. You configure one field at a time — or one logical group at a time — validate before the object exists, and call `build()` once the invariants hold. The product's constructor can stay package-private; callers never touch it directly.
+
+This is not about avoiding `new`. It is about **controlling combinatorial optional-parameter explosion** without a forest of overloaded constructors.
+
+## Stepwise assembly, one validation gate
+
+The roles:
+
+- **Builder** — fluent or sequential setters for each construction step (`setTimeout`, `withHeaders`, `enableRetries`)
+- **Concrete Builder** — implements those steps, accumulating state until `build()`
+- **Director** (optional) — encodes a preset recipe: "build a standard upload request" or "build a read-heavy analytics query"
+- **Product** — the immutable or mostly-immutable object produced once
+
+The collaboration usually runs: create builder → configure steps → `build()` validates and constructs → return Product.
+
+<Steps>
+  <Step title="Hide the Product constructor">
+    Make the Product constructor private or restricted so every instance passes through a Builder — invariants enforced in one place.
+  </Step>
+  <Step title="Add one setter per concern">
+    Group related options (`withAuth(token)` sets headers and refresh logic together) instead of one setter per field when fields are coupled.
+  </Step>
+  <Step title="Accumulate state on the Builder">
+    The Builder holds partial configuration. Methods return `this` for chaining when readability benefits; sequential calls are fine when they do not.
+  </Step>
+  <Step title="Validate in build()">
+    Fail fast with a clear error — "HTTPS required when client cert is set" — rather than constructing an invalid Product that fails later at runtime.
+  </Step>
+  <Step title="Optional Director for recipes">
+    When several call sites need the same assembly sequence, a Director method takes a Builder and runs the shared steps. Call sites override only what differs.
+  </Step>
+</Steps>
+
+```typescript
+class HttpRequest {
+  private constructor(
+    readonly method: string,
+    readonly url: string,
+    readonly headers: Record<string, string>,
+    readonly timeoutMs: number,
+  ) {}
+
+  static builder() {
+    return new HttpRequestBuilder();
+  }
+}
+
+class HttpRequestBuilder {
+  private method = "GET";
+  private url = "";
+  private headers: Record<string, string> = {};
+  private timeoutMs = 30_000;
+
+  post(url: string) {
+    this.method = "POST";
+    this.url = url;
+    return this;
+  }
+
+  header(name: string, value: string) {
+    this.headers[name] = value;
+    return this;
+  }
+
+  timeout(ms: number) {
+    this.timeoutMs = ms;
+    return this;
+  }
+
+  build(): HttpRequest {
+    if (!this.url) throw new Error("url is required");
+    return new HttpRequest(this.method, this.url, this.headers, this.timeoutMs);
+  }
+}
+```
+
+Modern languages often ship this shape natively — Rust's builder derive macros, Kotlin's DSL builders, TypeScript object literals with spread for small cases. The pattern's value is the **explicit validation boundary** and readable call sites, not the class names.
+
+## Builder is not a factory for families
+
+01.02 Factory Method picks **which subclass** to instantiate. 01.03 Abstract Factory picks **which matched family**. Builder assembles **one complex product** whose problem is parameter count and invariant checking, not polymorphic type choice.
+
+01.05 Prototype clones an existing object when reconstruction from scratch is expensive or when you want a prefilled template. Builder builds from empty defaults forward. They combine when a Builder produces a prototype template you clone and tweak — but the problems are distinct.
+
+<Callout type="note">
+For objects with two or three optional fields, a plain options object `{ url, timeout?: number }` with defaults in the constructor is simpler than a Builder class. Builder earns its ceremony around roughly five or more optional, coupled parameters — or when validation rules are non-trivial.
+</Callout>
+
+<Tradeoff
+  forTitle="Reach for it when"
+  againstTitle="Avoid it when"
+  forItems={[
+    "The Product has many optional parameters, and telescoping constructors or long positional arg lists are already causing bugs",
+    "Validation rules couple fields — cert requires HTTPS, date range end after start — and must run before the object exists",
+    "Call sites need readable, self-documenting configuration: `request.post(url).timeout(5000).build()` beats positional nulls",
+    "You want immutable Products built in one shot after configuration, with no half-initialized instances escaping",
+    "A Director can encode preset recipes shared across call sites while still allowing overrides",
+  ]}
+  againstItems={[
+    "Only a handful of fields, most required — a constructor or options object with defaults is enough",
+    "The variation is which subclass to create, not how to populate fields — Factory Method or Abstract Factory fits better",
+    "Every new field requires updating Builder, Product, and sometimes Director — acceptable only if fields are relatively stable",
+    "Object graphs are built by copying and modifying existing instances — 01.05 Prototype may be simpler",
+    "Fluent chaining obscures required vs optional steps — if callers forget `build()`, you have a silent no-op builder sitting unused",
+  ]}
+/>
+
+## In an interview
+
+Describe the **parameter problem**, not the Gang of Four diagram: "Our query object has twelve optional filters — Builder lets callers set only what they need and validates before we hit the database." That shows you recognize when the pattern applies.
+
+Follow-ups: **Builder vs constructor with defaults**, **immutable products** (why `build()` returns a new instance), **Director necessity** (often optional — when is it worth it?). If creational patterns cluster in the question, place Builder as the answer to **complex single-object assembly**, contrasted with 01.02 Factory Method for type choice and 01.03 Abstract Factory for families.
+
+Mention misuse: Builder on a three-field DTO where an object literal would do — ceremony without payoff.
+
+<KeyTakeaways
+  items={[
+    "Builder separates stepwise assembly from the final Product so optional parameters do not collapse into unreadable constructor lists",
+    "Validation belongs in build() — fail before the Product exists rather than discovering invalid state at first use",
+    "Hide the Product constructor so every instance passes through the Builder and invariants stay centralized",
+    "Director encodes reusable assembly recipes; it is optional and only worth it when several call sites share the same sequence",
+    "Use Builder for one complex object with many options — not for choosing among product families (01.03 Abstract Factory) or subclasses (01.02 Factory Method)",
+    "Skip Builder when an options object with sensible defaults stays readable — the pattern pays off as parameter count and validation complexity grow",
+  ]}
+/>

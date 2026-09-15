@@ -1,0 +1,159 @@
+---
+title: "Distributed Message Queue"
+number: "01.08"
+summary: "An append-only partitioned log where ordering, consumer groups, and at-least-once delivery are the tradeoffs that matter."
+status: published
+free: true
+difficulty: deep
+estMinutes: 22
+tags: [message-queue, kafka, streaming]
+updated: "2026-09-15"
+---
+
+## Why interviewers ask for a distributed message queue
+
+Microservices decouple by passing events instead of synchronous calls — but "a queue" hides partitioning, ordering guarantees, consumer lag, and what happens when a consumer crashes mid-process. The prompt tests log-based messaging (Kafka mental model): append-only topics, consumer groups, offset commits, and replication for durability. It pairs with 01.04 Key-Value Store (metadata and offsets) and 01.02 Rate Limiter (producer throttling).
+
+## Clarify: semantics, ordering, and retention
+
+**Functional:**
+
+- Message model — bytes blob or schema (JSON, Avro)?
+- Topics and partitions — who chooses partition key?
+- Consumer groups — multiple consumers share load; each message to one consumer in group?
+- Delivery semantics — at-most-once, at-least-once, exactly-once (usually approximate)?
+- Ordering — global, per-partition, or none?
+- Retention — time-based (7 days), size-based, or compacted by key?
+
+**Non-functional:**
+
+- Throughput — messages/s and MB/s ingress?
+- Durability — survive broker loss?
+- Latency — ms for publish ack, end-to-end?
+- Fan-out — many independent consumer groups reading same topic?
+
+**Out of scope:** stream processing SQL (Flink detail), cross-datacenter mirroring unless asked.
+
+Spoken script:
+
+> "Append-only partitioned topics, replicated brokers, consumer groups with at-least-once delivery, per-partition ordering, seven-day retention — producers ack after ISR commit, consumers commit offset after process."
+
+## Capacity: partitions, throughput, and disk
+
+Assumptions.
+
+| Assumption | Value |
+| --- | --- |
+| Peak publish rate | 500,000 messages/s |
+| Average message size | 1 KB |
+| Replication factor | 3 |
+| Retention | 7 days |
+| Consumer groups per hot topic | 5 |
+| Partitions per hot topic | 100 |
+
+**Ingress bandwidth:** 500k × 1 KB = **500 MB/s** — plan broker count so each handles ~100–150 MB/s with headroom (roughly 4–6 brokers minimum for this tier, more for replication overhead).
+
+**Storage per topic (7 days):** 500k/s × 86,400 × 7 × 1 KB ≈ **302 TB** raw before replication — **~906 TB** with 3× replication. Real clusters use compression (~2–3×) and not all topics peak simultaneously; still, retention drives disk more than RAM.
+
+**Partition throughput ceiling:** ~10–50 MB/s per partition in many systems — 500 MB/s needs **10–50 partitions** minimum; 100 partitions gives consumer parallelism headroom.
+
+**Consumer lag SLA:** If process time is 10 ms/msg, one consumer handles ~100 msg/s — 500k/s needs **~5,000 consumer instances** across groups or heavy batching — say parallelism = partition count × consumers per partition (usually 1 active consumer per partition per group).
+
+## High-level design: brokers, topics, consumer groups
+
+| Component | Role |
+| --- | --- |
+| Producer | Sends to topic + partition (key hash or round-robin) |
+| Broker cluster | Appends to partition log segments on disk |
+| ZooKeeper / KRaft controller | Leader election, ISR management |
+| Consumer group | Coordinates partition assignment among consumers |
+| Offset store | Committed offset per (group, topic, partition) |
+| Schema registry (optional) | Enforces Avro/Protobuf schemas |
+
+<Steps>
+<Step title="Publish">
+
+Producer picks partition via hash(message_key) mod N for ordering by key. Send to partition leader broker. Leader appends to log segment, replicates to in-sync replicas (ISR). Ack producer after `acks=all` (all ISR) or `acks=1` (leader only) based on durability SLA.
+
+</Step>
+<Step title="Consume">
+
+Consumer joins group; coordinator assigns partition subset (rebalance on join/leave). Poll records from assigned partitions starting at last committed offset + 1. Process message (idempotent side effects). Commit offset — auto or manual after successful process.
+
+</Step>
+<Step title="Retention and compaction">
+
+Time retention deletes old segments. Compacted topics keep latest value per key for changelog use cases — different disk profile.
+
+</Step>
+</Steps>
+
+## Deep dive: ordering, delivery, and rebalance
+
+### Ordering guarantee
+
+Order is **per partition only**. Same key → same partition → ordered delivery for that key. Global order requires one partition — caps throughput to one broker pipe. Interview answer: "Order by user_id hash to partition; accept cross-user reorder."
+
+### At-least-once vs at-most-once
+
+| Semantics | Commit offset | On crash | Duplicate risk |
+| --- | --- | --- | --- |
+| At-most-once | Before process | Message lost | None |
+| At-least-once | After process | Redelivered | Yes — need idempotent consumer |
+| Exactly-once | Transactional | Complex | Broker + consumer cooperation |
+
+Default strong choice: **at-least-once + idempotent consumer** (dedupe by message ID in DB). Exactly-once end-to-end is expensive — name Kafka transactions or outbox pattern if pushed.
+
+### In-sync replicas and leader election
+
+Leader holds active partition; followers replicate. ISR = replicas caught up within lag threshold. `acks=all` means ISR count acks before producer success — survives leader loss without data loss if min.insync.replicas ≥ 2. Unclean leader election trades availability for possible loss — say you'd disable for payment events.
+
+### Consumer rebalance storm
+
+Consumer join/leave triggers partition reassignment — stop-the-world pause during rebalance. Mitigations: cooperative sticky assignor (incremental), static membership, scale consumers gradually. Lag spikes during rebalance are a common production incident — mention monitoring consumer lag per partition.
+
+### Hot partition
+
+Skewed key (empty string default) sends all traffic to one partition. Fix: better key selection, salt keys with random suffix for load-only messages while keeping order where needed via two topics.
+
+<Callout type="gotcha">
+Committing offset before processing gives at-most-once — fast crash loses messages. Committing after processing gives at-least-once — crash after process but before commit redelivers. There is no free exactly-once without idempotency or transactions.
+</Callout>
+
+## Tradeoffs
+
+<Tradeoff
+  forTitle="Log-based queue (Kafka-style) when"
+  againstTitle="Simple broker queue (RabbitMQ-style) when"
+  forItems={[
+    "Many consumer groups must read the same stream independently with their own offsets",
+    "Replay and retention are product features — reprocess last seven days",
+    "Throughput is hundreds of thousands of msg/s — partition parallelism scales out",
+    "Per-key ordering matters but global order does not",
+    "Disk is cheap relative to rebuilding lost events",
+  ]}
+  againstItems={[
+    "Work-queue semantics — each message consumed once total, then deleted",
+    "Complex routing (topic exchanges, per-message TTL) matters more than replay",
+    "Low volume, low latency RPC-style tasks with per-message ack to one worker",
+    "Messages are large binaries better suited to S3 + pointer in a small queue",
+    "Operational team prefers simpler single-master queue cluster",
+  ]}
+/>
+
+## In an interview
+
+Introduce as an append-only partitioned log, not a mailbox: "Producers append; consumer groups track their own offsets — replay is free within retention." Draw producers → topic/partitions on brokers → multiple consumer groups.
+
+Follow-ups: how to scale consumers past partition count (add partitions — rekey cost), poison messages (dead-letter topic after N failures), and message size limits (blob in S3, queue carries reference). Volunteer: "The failure mode is duplicate processing after crash — consumers must be idempotent; offset commit after side effects, dedupe by event ID."
+
+<KeyTakeaways
+  items={[
+    "Clarify delivery semantics and ordering scope — per-partition order is the realistic guarantee, not global",
+    "Partition count sets parallel publish/consume ceiling — 500k msg/s at 1 KB needs many partitions and enough brokers for ~500 MB/s ingress",
+    "Replication with acks=all and min ISR ≥ 2 survives leader loss without acknowledged data loss",
+    "Consumer groups assign partitions; lag per partition is the metric that predicts incidents",
+    "At-least-once is the practical default — commit offset after process and make handlers idempotent",
+    "Retention drives disk: seven days at 500k/s × 1 KB is hundreds of TB — compression and tiered storage are part of the design",
+  ]}
+/>

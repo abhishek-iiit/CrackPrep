@@ -1,0 +1,133 @@
+---
+title: "Word Search II"
+number: "02.23"
+summary: "Searching the board per word repeats work; one trie walk from each cell finds every dictionary word with shared-prefix pruning."
+status: published
+free: true
+difficulty: deep
+estMinutes: 20
+tags: [trie, backtracking, matrix]
+updated: "2026-09-15"
+---
+
+## One word at a time revisits the same paths
+
+Given an m×n board of characters and a list of words, return every word that can be formed by sequentially adjacent cells (no reuse per path). The board can be up to 12×12; the word list up to 10³ entries with total length up to 10⁵.
+
+Running 01.49 Word Search independently for each dictionary word is O(words × m × n × 4^L) — the same board cells and prefixes get rediscovered thousands of times. `"apple"` and `"app"` share a three-cell path on the board; naive per-word DFS explores that prefix twice. With 10³ words on a 144-cell board, you need shared pruning, not repeated blind search.
+
+## One trie, DFS from every cell
+
+Insert all words into a trie (02.21). From each board cell, DFS along trie edges:
+
+- Move to neighbor if the character matches a trie child.
+- Track visited cells with backtracking (mark/unmark).
+- When a node has `isEnd`, record the word. **Remove the word from the trie** (clear `isEnd` and prune empty branches) or collect in a set to avoid duplicates.
+
+The invariant: the trie node reached after k steps equals the prefix formed by the path so far. If no child exists for the next character, backtrack immediately — you prune entire subtrees of the dictionary at once.
+
+<Steps>
+<Step title="Build trie from words">
+  Standard insert; optionally store the full word at terminal nodes for easy collection.
+</Step>
+<Step title="For each cell (r, c), start dfs">
+  If board[r][c] matches a root child, descend and explore four directions.
+</Step>
+<Step title="On isEnd, push word and prune">
+  Remove word from trie so you do not report it again from another start cell.
+</Step>
+<Step title="Backtrack visited marks">
+  Same as 01.49 — unmark cell when returning from recursion.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+class TrieNode {
+  children: Map<string, TrieNode> = new Map();
+  word: string | null = null;
+}
+
+function findWords(board: string[][], words: string[]): string[] {
+  const root = new TrieNode();
+  for (const w of words) {
+    let node = root;
+    for (const ch of w) {
+      if (!node.children.has(ch)) node.children.set(ch, new TrieNode());
+      node = node.children.get(ch)!;
+    }
+    node.word = w;
+  }
+
+  const res: string[] = [];
+  const rows = board.length, cols = board[0].length;
+
+  function dfs(r: number, c: number, node: TrieNode): void {
+    const ch = board[r][c];
+    const next = node.children.get(ch);
+    if (!next) return;
+
+    if (next.word) {
+      res.push(next.word);
+      next.word = null; // avoid duplicates
+    }
+
+    board[r][c] = '#'; // mark visited
+    for (const [dr, dc] of [[0,1],[0,-1],[1,0],[-1,0]]) {
+      const nr = r + dr, nc = c + dc;
+      if (nr >= 0 && nr < rows && nc >= 0 && nc < cols && board[nr][nc] !== '#') {
+        dfs(nr, nc, next);
+      }
+    }
+    board[r][c] = ch; // unmark
+  }
+
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      dfs(r, c, root);
+    }
+  }
+  return res;
+}
+```
+
+Time **O(m × n × 4^L)** in the worst case per start cell, but trie pruning cuts branches early; total work is bounded by board exploration with dictionary-guided cutoff. Space **O(total word length)** for the trie plus O(L) recursion stack.
+
+<Tradeoff
+  forTitle="Trie-guided board DFS when"
+  againstTitle="Per-word Word Search when"
+  forItems={[
+    "Many dictionary words share prefixes — one walk discovers app, apple, apply together",
+    "Word list is large relative to board — amortizing trie construction pays off",
+    "You must return all matches, not just one — pruning dead prefixes avoids futile deep DFS",
+    "Board is moderate (≤ 12×12) but words number in hundreds or thousands",
+    "Removing found words from the trie prevents duplicate output without a separate dedup set",
+  ]}
+  againstItems={[
+    "Only one target word — 01.49 single-word DFS is simpler and sufficient",
+    "Word list is tiny (≤ 5) — building a trie adds overhead for no pruning gain",
+    "Words are long and unrelated — trie devolves to a thin tree with little sharing",
+    "Interviewer asks for one word existence only — do not over-engineer",
+    "Memory for trie exceeds budget — hash set of words plus per-word search may be acceptable at small N",
+  ]}
+/>
+
+## In an interview
+
+Restate: 4-directional adjacency, no cell reuse within one path, return all matches (order usually ignored). Walk through a 2×2 example with overlapping words.
+
+Explain the two-layer idea: board DFS (same backtracking as 01.49) guided by trie edges (from 02.21). The insight sentence: **the trie tells you when to stop early** — if `'x'` has no child from the current node, every word still in that subtree is impossible from this path.
+
+Mention duplicate handling before asked: clearing `word` at terminal nodes or deleting the branch. Proactive bug: forgetting to unmark visited cells — the board becomes unusable for other paths.
+
+Follow-ups: return coordinates of paths, handle duplicate words in input, or 3D grid variant.
+
+<KeyTakeaways items={[
+  "Build a trie of all target words; DFS from each board cell follows trie edges instead of matching one fixed word.",
+  "Shared dictionary prefixes are explored once — the main win over running 01.49 per word.",
+  "Backtrack visited cells with mark/unmark; trie pruning backtracks when no child matches the next character.",
+  "On finding a word, record it and remove from trie (or null out terminal word) to avoid duplicate results.",
+  "Store the full word at terminal nodes for O(1) collection — recomputing from path is error-prone.",
+  "Worst-case complexity still grows with path length, but early cutoff makes the trie version practical at interview scale.",
+]} />

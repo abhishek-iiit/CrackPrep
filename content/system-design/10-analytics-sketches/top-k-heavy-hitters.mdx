@@ -1,32 +1,98 @@
 ---
 title: "Top-K Heavy Hitters"
 number: "10.09"
-summary: "Top-K Heavy Hitters — notes in progress."
-status: draft
+summary: "Find the keys that dominate a stream without storing every distinct key, by pairing a frequency sketch with a small candidate heap."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: deep
+estMinutes: 18
+tags: [heavy-hitters, top-k, count-min, streaming]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Most keys are noise; a few keys are the outage
 
-What breaks without this, and the situation that forces the decision.
+Search queries, API paths, error codes, product ids in a cart stream — the useful operational question is rarely "give me every distinct key's exact count." It is "what are the top 20 right now" or "which keys exceed 1% of traffic." Exact answers want a hash map from key to count, sorted by count. Under an unbounded key vocabulary that map is the same memory problem 10.08 Count-Min Sketch was built to avoid: the long tail of one-off keys dominates storage while contributing nothing to the top of the list.
 
-## How it works
+Heavy-hitter algorithms keep a small set of candidates and a compact way to estimate frequency. The production pattern that shows up everywhere is simple: maintain a Count-Min Sketch for estimates, and a heap (or dictionary) of at most `K` (or a few times `K`) keys that currently look hot. You remember actual key strings only for candidates — dozens or hundreds of them — not for the millions of keys that appeared once.
 
-The mechanism, step by step.
+## Mechanism: sketch for estimates, heap for names
 
-## Tradeoffs
+<Steps>
+  <Step title="On each event, update the frequency sketch">
+    Insert the key into a Count-Min Sketch (or a related frequency sketch). This step never stores the key. It only bumps counters so any later query can ask "about how often has this key occurred?" — 10.08 Count-Min Sketch.
+  </Step>
+  <Step title="Query the sketch for this key's estimated count">
+    Read the sketch estimate immediately after the update. Because CMS never underestimates, a key that is truly hot will look at least as hot as it is; rare keys may look slightly hotter than they are because of collisions.
+  </Step>
+  <Step title="Maintain a candidate set of size O(K)">
+    If the candidate set has room, insert the key with its estimate. If full, compare against the current weakest candidate: replace when the new estimate exceeds that floor (with optional hysteresis so borderline keys do not thrash). Store the real key material only here.
+  </Step>
+  <Step title="Optionally gate on a threshold, not only on K">
+    Many systems track "keys above φ·N" (for example, more than 0.5% of stream volume) rather than a hard top-K. The heap then holds everyone currently above the threshold, which is usually a small set if φ is not tiny. SpaceBound and Lossy Counting are classical algorithms aimed at this threshold formulation; CMS+heap is the sketch-friendly variant.
+  </Step>
+  <Step title="On read, re-query the sketch for each candidate and sort">
+    Estimates drift as collisions accumulate. Before returning a leaderboard, refresh each candidate's estimate from the sketch and sort. Keys that fell off can be dropped. You still will not surface a key that never entered the candidate set — that is the algorithm's blind spot, and it is why overestimate-only sketches matter: true heavy hitters are unlikely to look artificially small.
+  </Step>
+</Steps>
+
+The blind spot deserves emphasis. If a key is truly frequent, CMS will not hide it below its true count, so once it crosses the heap's admission bar it tends to stay visible. If a key is rare, CMS may inflate it enough to briefly enter the heap — a false heavy hitter — which is usually harmless for ops dashboards and fatal for anything that bills the top-K. Tune sketch error (`ε·N`) well below the heavy-hitter threshold so inflation cannot promote pure noise into the board.
+
+<Callout type="gotcha">
+Returning the heap contents without refreshing estimates, or treating CMS estimates as exact ranks, produces flapping leaderboards — two keys swap places every second because both sit inside the error band. Either widen the reporting gap (show top 20 but only annotate clear winners) or accept ordinal instability when counts are close.
+</Callout>
+
+## Sizing the error against the threshold
+
+Suppose you care about keys with true count ≥ 0.1% of a stream with `N` = 10,000,000 events, so the threshold is 10,000. From 10.08, a CMS sized at `ε` = 0.0001 gives an additive error bound around `ε·N` = 1,000 at the usual confidence — an order of magnitude under the threshold (ballpark reasoning, not a certificate). A sketch sized at `ε` = 0.01 could add 100,000 of noise and drown the signal entirely. Heavy hitters are a joint design: threshold (or K) and sketch error travel together.
+
+| Approach | Memory | Exactness | Merge across shards |
+| --- | --- | --- | --- |
+| Exact hash map + sort | Grows with distinct keys | Exact | Merge maps (large) |
+| CMS + heap of candidates | Fixed sketch + O(K) keys | Approximate ranks | Merge CMS, then rebuild heap from candidates or re-feed |
+| Threshold algorithms (SpaceSaving, etc.) | O(1/φ) counters with keys | Guarantees tied to φ | Structure-dependent |
+
+For sharded streams, merge Count-Min Sketches by cell sum (10.05 Mergeable Sketches For Analytics), union candidate key sets, re-query the merged sketch, and take the new top-K. Shipping only local top-K lists without the sketch under-merges: a key that was 5th on every shard can be global #1 and still miss every local top-3.
+
+## Where it shows up
+
+- Hottest search queries and hashtags in a time window (pair with 10.06 Bucketed Time Window Aggregation).
+- Noisiest error codes or slowest endpoints by count.
+- Suspected abuse keys — IPs or accounts generating disproportionate traffic — as a triage list before exact tooling.
+- Not a substitute for billing the top publishers by exact revenue; use warehouse exact aggregates there.
+
+Bloom filters (04.13) do not solve heavy hitters: they answer membership, not magnitude. HLL (10.04) answers how many distinct keys exist, not which ones dominate.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Use sketch-backed heavy hitters when"
+  againstTitle="Compute exact top-K when"
+  forItems={[
+    "Distinct key cardinality is too large to store exact counters for the whole vocabulary",
+    "You need a live or near-line leaderboard and can tolerate approximate ranks inside an error band",
+    "A frequency threshold φ·N matters more than a perfect ordering of near-tied keys",
+    "Shards must contribute without shipping full key maps — merge sketches, then refresh candidates",
+    "The consumer is ops, product analytics, or abuse triage rather than a financial ledger",
+  ]}
+  againstItems={[
+    "Top-K determines money, ranking SLAs, or compliance reports that require exact ordering",
+    "The key space is small enough that an exact map fits comfortably in memory",
+    "You need every key above a tiny threshold where sketch error ε·N is comparable to the threshold itself",
+    "Deletes and decrements are common and your frequency sketch cannot represent them cleanly",
+    "You only needed distinct cardinality or membership — HLL or Bloom filters are the right tools",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Tie it to memory: "I will not keep an exact counter per distinct query — I will keep a Count-Min Sketch for frequency estimates and a heap of candidate heavy hitters sized to K or to a φ threshold, storing key strings only for candidates." Then state the one-sided error: CMS never underestimates, so true heavy hitters are hard to miss once admitted, while collision inflation can create false candidates if `ε·N` is too close to the threshold. Follow-ups: how to merge across shards (merge sketches, not only local top-K lists), and what happens to rare keys (they are the weak spot of CMS alone — which is why the heap gate exists).
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Heavy hitters ask which keys dominate a stream; exact answers need per-key state that grows with vocabulary, so production systems approximate",
+    "A common design pairs a Count-Min Sketch for estimates with a heap of O(K) candidate keys that stores real key material only for likely winners",
+    "Size sketch error ε·N well below the heavy-hitter threshold so collision inflation cannot promote pure noise into the leaderboard",
+    "CMS never underestimates counts, which makes true frequent keys hard to hide; rare keys may look hotter than they are",
+    "Merging shard-local top-K lists without merging the underlying sketch misses keys that are globally hot but locally mid-pack",
+    "Use this for ops and product leaderboards; keep exact aggregates for anything that pays or ranks with contractual precision",
+  ]}
+/>

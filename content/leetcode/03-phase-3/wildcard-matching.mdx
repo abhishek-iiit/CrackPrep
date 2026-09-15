@@ -1,0 +1,110 @@
+---
+title: "Wildcard Matching"
+number: "03.32"
+summary: "`?` is one char and `*` is any sequence — 2D DP or greedy two-pointer with a saved star checkpoint handles empty matches and long skips."
+status: published
+free: true
+difficulty: deep
+estMinutes: 18
+tags: [dynamic-programming, string, two-pointers]
+updated: "2026-09-15"
+---
+
+## `*` here means anything, including nothing
+
+Given string `s` and pattern `p`, return whether they match. `?` matches exactly one character. `*` matches **any sequence of characters, including empty** — a different contract from 03.31 Regular Expression Matching, where `*` quantifies only the previous token.
+
+`"adceb"` vs `"*a*b"` matches. `"aa"` vs `"a"` does not — no partial credit. `"abc"` vs `"a*bc"` matches because `*` can swallow `"bc"`... wait, `*` matches any sequence; `"a*bc"` on `"abc"`: `a` matches `a`, `*` matches empty, `bc` matches `bc`. Good.
+
+Naive recursion tries every split of `*` across the remaining string — O(2^n) in the worst case when the pattern is mostly stars. The fix is the same subproblem shape as regex DP, but the `*` transition is simpler: `dp[i][j] = dp[i][j-1] || dp[i-1][j]` (skip star or extend match).
+
+## Table DP
+
+`dp[i][j]` = whether `s[0..i-1]` matches `p[0..j-1]`.
+
+- `p[j-1] === '?'` or equal char: `dp[i][j] = dp[i-1][j-1]`.
+- `p[j-1] === '*'`: `dp[i][j] = dp[i][j-1] || dp[i-1][j]` — star matches empty, or star absorbs one more char.
+- Row 0: `dp[0][j] = dp[0][j-1]` when `p[j-1]==='*'`.
+
+<Steps>
+<Step title="Base dp[0][0] = true and fill row 0 for leading stars">
+  Only `*` can match an empty string in the pattern prefix.
+</Step>
+<Step title="For each (i,j), apply ? / char match or star OR rule">
+  Star always has two choices; literals require agreement.
+</Step>
+<Step title="Answer at dp[m][n]">
+  Full string and full pattern must both be consumed.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function isMatch(s: string, p: string): boolean {
+  const m = s.length;
+  const n = p.length;
+  const dp: boolean[][] = Array.from({ length: m + 1 }, () =>
+    Array(n + 1).fill(false)
+  );
+  dp[0][0] = true;
+
+  for (let j = 1; j <= n; j++) {
+    if (p[j - 1] === "*") dp[0][j] = dp[0][j - 1];
+  }
+
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      if (p[j - 1] === "*") {
+        dp[i][j] = dp[i][j - 1] || dp[i - 1][j];
+      } else if (p[j - 1] === "?" || p[j - 1] === s[i - 1]) {
+        dp[i][j] = dp[i - 1][j - 1];
+      }
+    }
+  }
+
+  return dp[m][n];
+}
+```
+
+Time **O(m · n)**. Space **O(m · n)**, or **O(n)** with one row.
+
+An optimized **O(m + n)** greedy exists: keep `starIdx` and `matchIdx` — on mismatch, rewind to last `*` and advance one char in `s`. Worth mentioning in interview follow-ups; the table version is easier to get correct under pressure.
+
+<Tradeoff
+  forTitle="2D DP table when"
+  againstTitle="Greedy star checkpoint when"
+  forItems={[
+    "You want the recurrence on the board in under five minutes without off-by-one bugs",
+    "Constraints allow O(mn) with m,n up to 2000 — about 4M cells, fine in JS",
+    "Interviewer asks for proof of correctness via subproblem decomposition",
+    "Pattern mixes many `?` and literal chars where star logic is not the dominant cost",
+    "You are still shaky on the greedy rewind — DP is the safe default",
+  ]}
+  againstItems={[
+    "String length hits 10⁵ and pattern is star-heavy — O(mn) may TLE, greedy is linear",
+    "You already wrote the DP and interviewer asks to optimize space/time",
+    "Pattern has at most one or two stars — checkpoint greedy is quick to code",
+    "03.31 Regular Expression Matching is the harder cousin — know both star semantics",
+    "Memory is tight — greedy uses O(1) extra besides input",
+  ]}
+/>
+
+## In an interview
+
+Example: `s = "adceb"`, `p = "*a*b"` → true. Contrast with 03.31: here `*` stands alone and eats arbitrary text.
+
+State `dp[i][j]` or describe greedy: on `*`, remember position; on mismatch, backtrack star to consume one more char.
+
+Follow-ups: O(1) space greedy, match from right to left, 03.31 regex variant. Bug: using regex `*` rules (`a*` quantifier) instead of wildcard `*` (any sequence).
+
+<KeyTakeaways
+  items={[
+    "Wildcard `*` matches any character sequence including empty — unlike 03.31 where `*` quantifies the previous token",
+    "DP transition for `*`: dp[i][j] = dp[i][j-1] || dp[i-1][j] — skip star or extend into s",
+    "`?` behaves like `.` in regex matching — exactly one character, no zero-length match",
+    "O(m·n) time with the table; greedy two-pointer with star checkpoint achieves O(m+n) amortized",
+    "Initialize first row: only leading `*` in p can match empty s",
+    "Do not port the 03.31 recurrence — the star branches are structurally different",
+  ]}
+/>

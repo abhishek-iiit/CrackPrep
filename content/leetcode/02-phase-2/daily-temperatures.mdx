@@ -1,0 +1,98 @@
+---
+title: "Daily Temperatures"
+number: "02.39"
+summary: "A decreasing stack of indices resolves how many days until each day sees a warmer temperature."
+status: published
+free: true
+difficulty: core
+estMinutes: 14
+tags: [stack, monotonic-stack, array]
+updated: "2026-09-15"
+---
+
+## Wait days until a warmer one
+
+Given daily temperatures, return an array where `answer[i]` is the number of days after day `i` until a **strictly warmer** day, or `0` if none. `temperatures = [73, 74, 75, 71, 69, 72, 76, 73]` → `[1, 1, 4, 2, 1, 1, 0, 0]`.
+
+Nested loops compare every future day — O(n²). The next warmer day for several consecutive cool days is the same forward event; when warmth finally arrives, resolve **all** pending days at once. That is 02.38 Next Greater Element I with **indices and distances** instead of values in a map.
+
+## Stack of unresolved indices
+
+Maintain a decreasing stack of indices (temperatures on stack are strictly decreasing from bottom to top). For each new index `i`:
+
+- While stack not empty and `temperatures[i] > temperatures[stack.top]`, pop `j` and set `answer[j] = i - j`.
+- Push `i`.
+
+Each index is pushed once and popped once — **O(n)** total.
+
+<Steps>
+<Step title="Push index i">
+  Today may wait for a future warmer day.
+</Step>
+<Step title="Pop while today is warmer than stack top">
+  The popped index's wait ends today; distance is `i - j`.
+</Step>
+<Step title="Continue to end">
+  Indices left on stack keep answer 0.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function dailyTemperatures(temperatures: number[]): number[] {
+  const n = temperatures.length;
+  const answer = new Array<number>(n).fill(0);
+  const stack: number[] = []; // indices
+
+  for (let i = 0; i < n; i++) {
+    while (stack.length > 0 && temperatures[i] > temperatures[stack[stack.length - 1]]) {
+      const j = stack.pop()!;
+      answer[j] = i - j;
+    }
+    stack.push(i);
+  }
+
+  return answer;
+}
+```
+
+Time **O(n)**, space **O(n)** for the stack in the worst case (monotonically decreasing temperatures).
+
+<Tradeoff
+  forTitle="Monotonic stack when"
+  againstTitle="Brute force when"
+  forItems={[
+    "n up to 10⁵ — O(n²) nested loops TLE",
+    "Each day needs the nearest warmer day to the right — classic NGE with distance",
+    "Same stack template as 02.38 and extends to 02.41 Largest Rectangle in Histogram",
+    "Amortized one push/pop per index keeps linear total work",
+    "Temperatures are static in one array — one forward pass suffices",
+  ]}
+  againstItems={[
+    "n is tiny (under 200) — forward scan per day is quick to write",
+    "You need arbitrary historical queries after stream ends — preprocess differently",
+    "Problem asks for next cooler day — flip comparison to `<`",
+    "Memory must be O(1) — no stack, accept O(n²) time",
+    "2D grid \"wait until warmer neighbor\" — multi-source BFS, not 1D stack",
+  ]}
+/>
+
+## In an interview
+
+Walk the small example through day 2 (75): next warmer is not day 3 (71) — must skip to day 6 (76), wait 4 days. Confirm strictly warmer and 0 means none.
+
+Say "decreasing stack of indices" and tie to 02.38 before coding. Mention answer defaults to 0.
+
+Follow-ups: 02.41 Largest Rectangle in Histogram (width from span boundaries), circular array, or daily temperatures with wrap. Bug: storing temperatures on the stack without indices — distance math needs positions.
+
+<KeyTakeaways
+  items={[
+    "Daily Temperatures is next-greater-to-the-right with index distance on the result array",
+    "Decreasing stack of indices; pop when current temp is strictly greater than stack top",
+    "answer[j] = i - j when day i is the first warmer day after day j",
+    "O(n) time — each index pushed and popped at most once",
+    "Unpopped indices never found a warmer day and stay 0",
+    "Same monotonic-stack spine as 02.38 Next Greater Element I and 02.37 Online Stock Span",
+  ]}
+/>

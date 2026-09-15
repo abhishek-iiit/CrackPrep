@@ -1,0 +1,101 @@
+---
+title: "Strategy"
+number: "03.08"
+summary: "Pluggable algorithms behind one interface let the caller swap behaviour at runtime without subclassing the object that uses them."
+status: published
+free: true
+difficulty: core
+estMinutes: 13
+tags: [behavioral, algorithms, composition]
+updated: "2026-09-15"
+---
+
+## One checkout flow, many shipping calculators
+
+Checkout must quote shipping: flat rate, weight-based, distance from warehouse, free for members. The first version puts all four formulas in `Checkout.calculateShipping()` behind a `switch (policy)`. Marketing adds regional carriers; ops adds a holiday override. The method grows; unit tests need every policy for every change to shared code; enabling A/B tests means another branch instead of a config flag.
+
+Strategy extracts each algorithm into its own class sharing a common interface — `ShippingStrategy.quote(cart, address)`. Checkout holds a reference to the active strategy and calls it. Swap strategies at construction, from configuration, or per request. Checkout does not subclass `FlatRateCheckout` vs `WeightBasedCheckout`; it composes behaviour.
+
+Same shape appears for compression codecs, tax calculators, payment providers, and sort orders — anywhere the **how** varies but the **what** (one entry point) stays fixed.
+
+## Context, strategy interface, concrete strategies
+
+- **Strategy** — interface declaring the varying algorithm (`calculate`, `sort`, `route`).
+- **Concrete strategies** — one class per algorithm, independently testable.
+- **Context** — client-facing object that delegates to the current strategy; may expose `setStrategy` for runtime swap.
+
+<Steps>
+<Step title="Context receives work">
+`checkout.totalWithShipping(cart)` — the public API stays stable.
+</Step>
+<Step title="Context delegates to strategy">
+`return cart.subtotal + this.shippingStrategy.quote(cart, address)` — no policy branches in the context.
+</Step>
+<Step title="Strategy executes algorithm">
+Pure function when possible — inputs in, result out — so strategies are easy to test and reuse in batch jobs without a context object.
+</Step>
+</Steps>
+
+```typescript
+interface ShippingStrategy {
+  quote(cart: Cart, address: Address): number;
+}
+
+class WeightBasedShipping implements ShippingStrategy {
+  quote(cart: Cart) {
+    return cart.totalWeightKg * 0.5;
+  }
+}
+
+class Checkout {
+  constructor(private shipping: ShippingStrategy) {}
+  setShipping(s: ShippingStrategy) { this.shipping = s; }
+  total(cart: Cart, address: Address) {
+    return cart.subtotal + this.shipping.quote(cart, address);
+  }
+}
+```
+
+Functional languages often pass a function instead of a strategy object — `(cart, addr) => number` is Strategy without the ceremony. Use classes when strategies carry configuration or multiple related methods.
+
+<Callout type="note">
+Strategy selection belongs at the composition root or factory — not buried inside the context as hidden defaults — or tests cannot inject a deterministic strategy without mocking globals.
+</Callout>
+
+## Strategy vs State vs Template Method
+
+03.07 State changes behaviour because the object's **phase** changed — transitions are internal. Strategy changes behaviour because the **caller or config** chose a different algorithm — usually no automatic transition. 03.09 Template Method fixes the **sequence** of steps in a base class and varies hooks in subclasses; Strategy swaps the whole algorithm without inheritance.
+
+If you are subclassing only to override one method, Strategy plus composition is often cleaner than a deep hierarchy.
+
+<Tradeoff
+  forTitle="Reach for Strategy when"
+  againstTitle="Avoid Strategy when"
+  forItems={[
+    "Several interchangeable algorithms implement the same operation with different trade-offs",
+    "You need runtime or config-time selection — feature flags, tenant-specific rules, A/B tests",
+    "The context class should stay closed to modification when new algorithms appear",
+    "Algorithms are independently testable units with clear inputs and outputs",
+    "You want to inject behaviour in tests without subclassing the context"
+  ]}
+  againstItems={[
+    "Only one algorithm will ever exist — inline it until a second one actually ships",
+    "Algorithms differ only in tiny fragments of a fixed pipeline — 03.09 Template Method or hooks may fit better",
+    "Behaviour varies with object lifecycle phase — that is 03.07 State, not external algorithm choice",
+    "Strategy explosion — forty classes differing by one constant — replace with parameters or a rule table",
+    "Hot path cannot afford virtual dispatch and strategies change never — compile-time monomorphisation or inlining wins"
+  ]}
+/>
+
+## In an interview
+
+Introduce by variation point: "Shipping quotes vary by tenant — I would inject a strategy so checkout stays one class." Expect Strategy vs State vs Template Method — external algorithm pick vs lifecycle phase vs fixed skeleton with hooks. Ask where strategies are wired (DI container, factory from tenant config). Name the misuse: a strategy interface with one implementation and no second on the roadmap — YAGNI until the switch actually arrives.
+
+<KeyTakeaways items={[
+  "Strategy defines a family of algorithms, encapsulates each one, and makes them interchangeable behind one interface.",
+  "The context delegates to a strategy object instead of branching — new algorithms add classes, not context edits.",
+  "Selection happens at setup or runtime from config — unlike 03.07 State, the context usually does not auto-transition strategies.",
+  "Pure strategy functions are fine when the algorithm has no configuration — a class per strategy is not mandatory.",
+  "Wire the active strategy at the composition root so tests and tenants can inject behaviour without subclassing.",
+  "If only the step order is fixed but steps vary, compare with 03.09 Template Method before splitting whole algorithms."
+]} />

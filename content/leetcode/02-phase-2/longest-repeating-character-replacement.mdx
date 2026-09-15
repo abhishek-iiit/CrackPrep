@@ -1,0 +1,110 @@
+---
+title: "Longest Repeating Character Replacement"
+number: "02.01"
+summary: "k replacements buy one dominant letter in a window; the window stays valid when non-dominant count ≤ k."
+status: published
+free: true
+difficulty: core
+estMinutes: 14
+tags: [sliding-window, hash-map, string]
+updated: "2026-09-15"
+---
+
+## One letter, k edits, longest window
+
+Given a string of uppercase English letters and an integer `k`, find the length of the longest substring you can make into a single repeated character by changing at most `k` characters inside that substring.
+
+Brute force enumerates every substring — for `s = "ABAB"`, that is on the order of n² windows, and each window needs a frequency scan to know how many replacements it would cost. At n = 10⁵ that is tens of billions of character visits. The constraint is the hint: one pass with a sliding window.
+
+The reframe is the same family as 01.50 Longest Substring Without Repeating Characters, but the validity rule changes. You are not forbidding duplicates — you are allowing them, as long as the *minority* characters can be overwritten within budget `k`.
+
+## The window invariant
+
+Fix a window `[left, right]`. Let `maxFreq` be the count of the most frequent character in that window, and `windowLen = right - left + 1`. Replacements needed to make the whole window one letter:
+
+```
+replacements = windowLen - maxFreq
+```
+
+The window is **valid** when `replacements ≤ k`. When it is not, shrink from the left until it is again.
+
+The subtle part: when you shrink, you decrement counts but you do **not** recompute `maxFreq` downward. That sounds wrong — a stale `maxFreq` can only make the left pointer move *more*, never less, and the answer you care about is the maximum window length ever seen while valid. Overshooting `maxFreq` does not produce a false maximum; it only triggers extra shrinks.
+
+<Steps>
+<Step title="Expand right, update frequency of s[right]">
+  Track `maxFreq` as the peak count in the current window.
+</Step>
+<Step title="While (windowLen - maxFreq) > k, shrink from left">
+  Decrement the count of `s[left]` and advance `left`.
+</Step>
+<Step title="Record the best valid window length">
+  After each expansion, `right - left + 1` is a candidate answer.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function characterReplacement(s: string, k: number): number {
+  const count = new Map<string, number>();
+  let left = 0;
+  let maxFreq = 0;
+  let best = 0;
+
+  for (let right = 0; right < s.length; right++) {
+    const c = s[right];
+    count.set(c, (count.get(c) ?? 0) + 1);
+    maxFreq = Math.max(maxFreq, count.get(c)!);
+
+    while (right - left + 1 - maxFreq > k) {
+      const leftChar = s[left];
+      count.set(leftChar, count.get(leftChar)! - 1);
+      left++;
+    }
+
+    best = Math.max(best, right - left + 1);
+  }
+
+  return best;
+}
+```
+
+Time **O(n)** — each index enters and leaves the window at most once. Space **O(1)** for the frequency map: at most 26 uppercase letters.
+
+<Tradeoff
+  forTitle="Sliding window + counts when"
+  againstTitle="Brute force substring scan when"
+  forItems={[
+    "n is up to 10⁵ and O(n²) frequency scans will TLE",
+    "The validity rule is a function of window size minus one dominant frequency — a classic shrink-when-invalid pattern",
+    "Only uppercase letters — a fixed 26-key map keeps space constant",
+    "You already know 01.50 Longest Substring Without Repeating Characters and need the variant with a replacement budget",
+    "Follow-ups ask for at-most-k-distinct or minimum replacements to unify — same window machinery",
+  ]}
+  againstItems={[
+    "n is tiny and you want to demonstrate the O(n²) baseline before optimizing",
+    "The alphabet is huge or Unicode and a full frequency table is not O(1)",
+    "The problem asks for the actual substring, not just its length — you must track indices anyway",
+    "k = 0 reduces to longest run of identical characters — a one-liner scan is enough",
+    "Interviewer wants you to derive the formula from first principles on a whiteboard first",
+  ]}
+/>
+
+## In an interview
+
+Restate with a small example: `s = "AABABBA", k = 1` → answer `4` (window `"AABA"` or `"ABBA"` after one change). Confirm uppercase only, `k` can be zero, and empty string edge cases if allowed.
+
+Say the validity check out loud before coding: `windowLen - maxFreq ≤ k`. Mention the stale-`maxFreq` trick — interviewers often ask why you do not decrement it on shrink.
+
+Follow-ups: return the substring not the length; at most two distinct characters; or the minimum `k` to achieve length L. The bug to name first: shrinking without updating counts, or recomputing max frequency from scratch every step and turning an O(n) solution into O(26·n) unnecessarily (still linear, but signals confusion).
+
+<KeyTakeaways
+  items={[
+    "Longest Repeating Character Replacement is a sliding window where validity is (window length − max frequency) ≤ k",
+    "maxFreq can stay stale on shrink — it only affects when you shrink, not the maximum length recorded",
+    "Each pointer moves at most n times, so the scan is O(n) despite the inner while loop",
+    "The pattern generalizes from 01.50 Longest Substring Without Repeating Characters: same two pointers, different validity predicate",
+    "Space is O(1) for the fixed uppercase alphabet; time is O(n)",
+    "k = 0 is the degenerate case — longest contiguous block of one character without any replacements",
+  ]}
+/>

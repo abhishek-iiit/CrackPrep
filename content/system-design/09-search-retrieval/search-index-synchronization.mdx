@@ -1,32 +1,98 @@
 ---
 title: "Search Index Synchronization"
 number: "09.10"
-summary: "Search Index Synchronization — notes in progress."
-status: draft
+summary: "How the primary store and the search index stay close enough, why dual writes fail under load, and what freshness actually costs."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 14
+tags: [search, indexing, synchronization, eventual-consistency]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The catalog wrote; search still shows last week's title
 
-What breaks without this, and the situation that forces the decision.
+A product title changes in Postgres. The write succeeds. Five minutes later a shopper searches for the new name and gets nothing — or worse, still finds the old title and clicks into a page that contradicts it. The primary store and the search index are two copies of the same truth with different jobs: one is the system of record, the other is a derived, relevance-shaped projection optimized for free-text ranking (09.01 Information Retrieval System Design). Synchronization is the pipeline that keeps that projection close enough to the record that users stop noticing the gap.
 
-## How it works
+"Close enough" is a product number, not a slogan. Marketplace inventory that must disappear from search within a few seconds after a sale is a different design from a documentation site that can tolerate minutes. Until someone names the freshness SLA — with units — every sync choice is a guess dressed as architecture.
 
-The mechanism, step by step.
+## Why dual writes are the first idea and a bad one
 
-## Tradeoffs
+The obvious move is: on every write to the primary, also write to the index in the same request path. It looks simple. It fails the moment either side is slow, down, or partially successful.
+
+- The primary commits; the index write times out. Now the catalog is right and search is stale, and nothing will retry unless you built retry yourself.
+- The index write succeeds; the primary rolls back. Search shows a document that does not exist.
+- Under peak load both writes amplify latency on the user-facing path, and a search cluster blip becomes a checkout outage.
+
+Two systems with different availability stories cannot share one commit boundary without distributed transactions — which search engines almost never offer against your OLTP database. Treat the index as a **derived consumer**, not a co-writer.
+
+## Three shapes that actually work
+
+Production systems converge on a small set of patterns. The names differ by product; the contracts do not.
+
+| Pattern | How the index learns | Freshness | Failure mode |
+| --- | --- | --- | --- |
+| Change-data-capture (CDC) | Tail the primary's WAL / binlog; emit document upserts/deletes | Seconds when the consumer keeps up | Lag when the consumer falls behind (08.04 Queue Lag) |
+| Application event bus | Domain events after a successful primary write (08.03 Event Bus For Product Events) | Seconds to minutes depending on consumer concurrency | Missed events if the producer forgets a write path |
+| Periodic full / incremental reindex | Batch job rebuilds or refreshes slices of the corpus | Minutes to hours | Acceptable for cold corpora; wrong for inventory |
+
+CDC and domain events both need **idempotent** index updates keyed by document id and a version or timestamp — retries and reordering are normal on a stream (02.09 Retries Timeouts And Idempotency). A full reindex is still required as a recovery path: when the stream and the index diverge past repair, rebuild from the primary rather than inventing a third truth.
+
+<Steps>
+  <Step title="Commit in the system of record">
+    The user-facing write lands only in the primary store. Search is not on this path. If the primary fails, nothing to sync exists yet — that is the correct outcome.
+  </Step>
+  <Step title="Emit a change signal">
+    Either the database log is captured (CDC) or the application publishes a document-changed event after commit. Include document id, operation (upsert/delete), and a monotonic version when you can.
+  </Step>
+  <Step title="Transform and index">
+    A consumer fetches the current document (or uses the payload), runs the same analyzer the query path expects (09.07 Query Understanding Pipeline), and upserts into the inverted index. Deletes must remove the document from every shard that held it.
+  </Step>
+  <Step title="Measure lag, not just throughput">
+    Track time from primary commit to searchable — p50 and p99 — and alert on growth, not only on consumer errors. A silent lag spike is how "search is broken" tickets start.
+  </Step>
+</Steps>
+
+<Callout type="gotcha">
+Delete propagation is the easy-to-miss half of sync. An upsert that never arrives leaves an old document; a delete that never arrives leaves a ghost that keeps ranking. Soft deletes in the primary (03.13 Soft Delete) must map to hard removals — or tombstones — in the index, or search will resurrect content the product already hid.
+</Callout>
+
+## Consistency is eventual; the question is the bound
+
+Search is almost always **eventually consistent** with the primary (06.02 Consistency Models). That is acceptable when the product can name a bound: "95% of updates searchable within 5 seconds; 99% within 30." It is not acceptable when the bound is unspoken and ops discovers it during a sale.
+
+Read-your-writes for the author is a common special case: after editing their own listing, the seller expects to find it immediately. Route that path around the stale index — read the primary for the author's own id, or force a synchronous refresh for that document — rather than tightening the global freshness SLA to the strictest single user.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Push near-real-time sync when"
+  againstTitle="Batch or accept minutes of lag when"
+  forItems={[
+    "Inventory, moderation, or pricing changes must leave the result set within seconds or they create real user harm",
+    "Write volume is high enough that nightly rebuilds cannot catch up without a multi-hour outage window",
+    "You already have a reliable change stream (CDC or domain events) and idempotent consumers",
+    "Author or seller workflows need read-your-writes, and you can isolate that path without global sync tightening",
+    "Index lag is already a measured SLO with an owner, not a hope attached to a cron job",
+  ]}
+  againstItems={[
+    "The corpus changes slowly — docs, help articles, archival catalogs — and minutes of staleness never surface in support tickets",
+    "The team cannot operate a streaming consumer yet, and a scheduled reindex from the primary already meets the freshness number",
+    "Dual-writing on the request path is the only alternative on the table, which couples checkout latency to search availability",
+    "A full rebuild is cheaper and safer than debugging a half-built event schema that misses half the write paths",
+    "Vector or hybrid indexes (09.13 Vector Search And Hybrid Retrieval) already dominate cost, and tightening lexical sync would not move the product needle",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Lead with the split: "Postgres is source of truth; the search index is a derived copy with a freshness SLA — I will not dual-write on the request path." Then name the mechanism (CDC or domain events), the idempotency key, and how deletes flow. Expect "what if the consumer is down for an hour" — answer with lag metrics, catch-up from the log, and a full reindex as the escape hatch. Name ghost documents from missed deletes before you are asked; that failure mode is what separates having used Elasticsearch from having operated it next to a real catalog.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "The search index is a derived projection of the primary store, not a second system of record — synchronize it as a consumer, not a co-writer",
+    "Dual writes on the request path create split-brain under partial failure and couple product latency to search availability",
+    "CDC or post-commit domain events with idempotent upserts and explicit deletes are the durable patterns; full reindex remains the recovery path",
+    "Freshness is a product SLA with units — seconds versus minutes changes the pipeline, not just the alert threshold",
+    "Missed deletes produce ghost documents that keep ranking; soft deletes in the primary must become removals or tombstones in the index",
+    "Measure commit-to-searchable lag at high percentiles; silent lag, not hard errors, is how sync failures usually present",
+  ]}
+/>

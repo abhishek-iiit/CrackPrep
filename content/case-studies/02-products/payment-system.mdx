@@ -1,0 +1,204 @@
+---
+title: "Payment System"
+number: "02.10"
+summary: "Double-entry ledger, idempotent charges, and reconciliation — money paths where retry without a key is a duplicate charge."
+status: published
+free: true
+difficulty: deep
+estMinutes: 22
+tags: [payments, ledger, idempotency, reconciliation]
+updated: "2026-09-15"
+---
+
+## Payments are a ledger problem, not a CRUD problem
+
+"Design a payment system" tests whether you treat money like any other row update. It is not. A network timeout on `POST /charge` does not tell the client whether the card was charged — so the client retries, and a non-idempotent backend charges twice. The failure does not present as an error code; it presents as a support ticket, a chargeback, and an engineer grep-ing logs at midnight wondering which of two identical rows is the duplicate.
+
+Strong answers center three mechanisms: **append-only double-entry ledger** (internal source of truth), **idempotency keys** on every mutating API, and **reconciliation** against external processor statements (catch drift before finance does).
+
+## Clarify: who moves money, and what exactly once means
+
+**Functional:**
+
+- Merchant or platform initiates payment: charge customer, transfer to merchant, refund.
+- Query payment status by idempotency key or payment id.
+- Support partial and full refunds linked to original charge.
+
+**Non-functional:**
+
+- **Exactly-once effect** for money movement (at-most-once charge per logical attempt).
+- Durability — committed ledger entries survive crashes; no silent loss.
+- Auditability — every balance change traceable to an immutable entry.
+- Latency — user-facing authorize often 500 ms–2 s p99; internal ledger write must be fast and synchronous on the commit path.
+
+**Actors:**
+
+- **Payer** — customer card/wallet.
+- **Platform** — your ledger and APIs.
+- **Payment service provider (PSP)** — Stripe/Adyen-class external charge API.
+- **Merchant** — receives settled funds.
+- **Finance/ops** — runs reconciliation reports.
+
+**Scope boundary:**
+
+*"I'll design charge, refund, internal ledger, idempotency, and daily reconciliation with the PSP. Out of scope: KYC onboarding, fraud ML, FX trading, and crypto rails — I'll mention fraud as a synchronous rules check stub."*
+
+**Question that changes design:** "Do we hold funds in platform balance accounts (marketplace) or pass-through single merchant?" Marketplace needs multi-party ledger accounts; simple merchant SaaS might only track merchant + platform fee.
+
+## Capacity: low QPS, zero tolerance for wrong rows
+
+| Assumption | Value | Notes |
+| --- | --- | --- |
+| Active merchants | 100k | |
+| Payments per merchant per day (avg) | 50 | Long tail distribution |
+| Total payments per day | 5M | ~58/s average |
+| Peak factor | 5× | Lunch + holiday spikes ~290/s |
+| Average payment amount | $40 | Ledger stores minor units (cents) |
+| Refund rate | 3% | Linked reversal entries |
+| Idempotency key retention | 24–72 h | Match PSP retry window |
+
+**Storage:** ledger entries append-only — 5M payments × 2–4 entries each (debit/credit legs + fee) ≈ 15M rows/day. Indexed by account, payment_id, created_at. Years of retention for audit — older partitions move to cold storage for reporting queries, not the authorization hot path.
+
+**QPS is modest; correctness is not.** Size connection pools for peak 290/s with headroom, but spend design time on transactional invariants, not sharding — until they ask about 10k/s.
+
+## High-level design: API, ledger, PSP, reconciliation
+
+| Component | Role |
+| --- | --- |
+| Payment API | `POST /payments` with idempotency-key header; status queries |
+| Idempotency store | Durable map key → (status, response, payment_id) |
+| Ledger service | Append-only double-entry; account balances derived or cached |
+| PSP adapter | External charge/capture/refund; maps external ids |
+| Account service | Merchant/payer/platform/fee accounts |
+| Reconciliation job | Compare ledger ↔ PSP settlement file; flag exceptions |
+| Outbox / event bus (optional) | Notify merchant webhooks after commit — async |
+
+<Steps>
+  <Step title="Client submits charge with idempotency key">
+    Client generates UUID once per checkout attempt; sends on every retry. Same key + same body → same outcome.
+  </Step>
+  <Step title="API: dedupe check before any side effect">
+    If key exists and completed → return stored response. If in-flight → 409 or wait. If new → insert `processing` row and proceed.
+  </Step>
+  <Step title="Ledger + PSP in a defined order">
+    Strong pattern: write ledger intent (pending), call PSP, on success append settled entries in one DB transaction with idempotency completion record. Never call PSP before you can record the attempt — lost responses need an internal payment_id to reconcile against.
+  </Step>
+  <Step title="Append-only double-entry">
+    Every movement: debit account A, credit account B, same amount, one transaction_id. Balances = sum(entries) or maintained cache updated in same transaction.
+  </Step>
+  <Step title="Refund: new idempotency key, link to original">
+    Refund references original payment_id; ledger reversal entries; PSP refund API idempotent by platform refund id.
+  </Step>
+  <Step title="Nightly reconciliation">
+    Ingest PSP settlement CSV/API; match by external_transaction_id; flag amount mismatches, missing rows, duplicate settlements.
+  </Step>
+</Steps>
+
+## Deep dive: ledger, idempotency, reconciliation
+
+### Double-entry ledger — internal source of truth
+
+Balances are not updated in place without a trail. Each payment creates immutable entries:
+
+```text
+payment_id: pay_abc123  amount: $40.00
+
+DEBIT   payer_clearing     $40.00
+CREDIT  merchant_payable   $38.80
+CREDIT  platform_fee       $ 1.20
+```
+
+Rules to state out loud:
+
+- **Entries never mutate or delete** — corrections are new reversing entries.
+- **Debits = credits** per transaction — invariant checked on commit.
+- **Accounts typed** — asset, liability, revenue — so reports tie out.
+- **Minor units only** — integer cents; no floats anywhere.
+
+PSP state and ledger state will temporarily diverge (authorized but not captured, batch settlement lag). Ledger records **your** obligations; reconciliation closes the gap with **their** statement of record.
+
+### Idempotency — making retries safe
+
+The idempotency pattern on a payment API has the highest stakes:
+
+<Steps>
+  <Step title="Client: one key per logical checkout">
+    Retry after timeout reuses the same key — never mint a fresh key per HTTP attempt.
+  </Step>
+  <Step title="Server: check dedupe store in same transaction as ledger start">
+    Ideal: idempotency row + pending ledger entry commit together. Crash after PSP success but before record → reconciliation finds orphan PSP charge matched by amount + merchant + time, or by stored PSP id if you persisted attempt first.
+  </Step>
+  <Step title="PSP call uses deterministic idempotency">
+    Pass platform payment_id to PSP as their idempotency key where supported — duplicate API calls return same charge id.
+  </Step>
+  <Step title="Complete: store response body under key">
+    Retries get byte-identical 200 with original payment_id — no second charge.
+  </Step>
+</Steps>
+
+Failure modes:
+
+| Symptom | Cause | Mitigation |
+| --- | --- | --- |
+| Double charge | Retry without idempotency key | Client + server dedupe; PSP-level key |
+| Stuck processing | Crash mid-flight | Reaper job: query PSP by payment_id, complete or fail ledger |
+| False duplicate rejected | Same key, different body | Hash request body; reject mismatch with 422 |
+
+<Callout type="gotcha">
+"A timeout means failure" is wrong on payments. Timeout means **unknown** — the client must retry with the same idempotency key, and the server must either finish the in-flight operation or prove it never started. Returning 500 and letting the client mint a new key is how double charges happen.
+</Callout>
+
+### Reconciliation — where hidden duplicates live
+
+Idempotency catches retries you know about. Reconciliation catches everything else: PSP partial outages, manual adjustments, currency rounding, webhook duplicates, bugs that skipped the dedupe path.
+
+Daily (or hourly at scale) job:
+
+1. **Download PSP settlement** — batch of settled transactions with external ids and fees.
+2. **Match** to ledger rows on `external_transaction_id` — unique index prevents double-apply.
+3. **Exception queue** — in ledger not in PSP (stuck pending), in PSP not in ledger (missing internal row), amount mismatch (fee drift).
+4. **Human or automated resolve** — adjusting entries, refund, or PSP ticket; never silent delete.
+
+Reconciliation is read-heavy and batch — run off the primary hot path. Finance SLA (T+1 accuracy) drives schedule, not user latency.
+
+### Status API and webhooks
+
+Merchants poll `GET /payments/{id}` or receive webhooks. Webhooks are **at-least-once** — merchant must dedupe by event id. Your outbox pattern: commit ledger, then enqueue webhook delivery with retry; signing payloads so merchants trust origin.
+
+<Tradeoff
+  forTitle="Synchronous ledger commit + PSP call when"
+  againstTitle="Async capture via queue when"
+  forItems={[
+    "Merchant or payer needs definitive success/failure in the API response",
+    "Payment volume fits synchronous PSP latency at peak (~290/s with pooling)",
+    "You can still record pending state before PSP to bound unknown outcomes",
+    "Regulatory or product rules require immediate authorization decision",
+    "Ops can run reaper jobs for stuck pending without a full workflow engine",
+  ]}
+  againstItems={[
+    "PSP p99 latency is multi-second and would exhaust API thread pools",
+    "Peak bursts exceed synchronous capacity — queue smooths with backpressure",
+    "Product accepts pending + webhook for final state (BNPL, bank transfers)",
+    "You need multi-step workflows (auth → review → capture) with human gates",
+    "Geographic routing requires async retry across PSP endpoints",
+  ]}
+/>
+
+## In an interview
+
+Open: *"Money movement is append-only double-entry internally, idempotent at the API boundary, and reconciled daily against the PSP — because timeouts mean unknown, not failed."* Do not start with microservices diagram soup.
+
+Clarify marketplace vs single merchant and refund scope. Capacity is quick — low QPS, high correctness — then deep dive ledger + idempotency + reconciliation as three labeled boxes.
+
+Follow-ups: "Exactly-once?" (exactly-once *effect* via idempotency; at-least-once delivery with dedupe), "Split brain between ledger and PSP" (pending states + reconciliation), "Refund partial" (new entries linked to payment_id, new idempotency key). Volunteer double-charge on retry before they ask — shows you know the real failure mode.
+
+<KeyTakeaways
+  items={[
+    "Payment interviews test ledger discipline, idempotency, and reconciliation — not CRUD on a balance column",
+    "Double-entry append-only entries (debit/credit, integer minor units) are the internal source of truth; PSP state reconciles asynchronously",
+    "Every charge API accepts an idempotency key; retries reuse the same key; server returns stored result without re-executing",
+    "Timeout means unknown — client retries with same key; server completes in-flight work or proves no PSP call started",
+    "Daily reconciliation matches PSP settlement files to ledger rows by external id; exceptions go to a queue, not silent fixes",
+    "Webhooks and async side effects are at-least-once — commit ledger first, then outbox delivery with merchant-side dedupe",
+  ]}
+/>

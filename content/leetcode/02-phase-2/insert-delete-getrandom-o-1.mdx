@@ -1,0 +1,119 @@
+---
+title: "Insert Delete GetRandom O(1)"
+number: "02.31"
+summary: "A hash map plus a dynamic array gives O(1) insert, delete, and uniform random sampling — neither structure alone can do all three."
+status: published
+free: true
+difficulty: core
+estMinutes: 14
+tags: [design, hash-map, array]
+updated: "2026-09-15"
+---
+
+## Three operations, one impossible pair
+
+Design a set that supports `insert`, `remove`, and `getRandom`, each in **average O(1)** time. `getRandom` must pick uniformly among current elements.
+
+A dynamic array gives O(1) append and O(1) random index sampling — but deleting a value in the middle is O(n) because everything after it shifts. A hash set gives O(1) insert and delete — but there is no index to sample uniformly. You need both structures wired together.
+
+The trick: store values in an array for random access, and keep a map from **value → array index** for O(1) lookup. Deletion does not shift the middle out — it **swaps the target with the last element**, pops the tail, and updates the map for the moved value.
+
+## Map plus array, swap on delete
+
+Maintain `values: number[]` and `indexOf: Map<number, number>`.
+
+- **insert(val):** if already present, return false. Push `val`, record its index.
+- **remove(val):** if absent, return false. Swap `val` with the last element, pop, update the map for whichever value moved into the deleted slot.
+- **getRandom():** pick a uniform index in `[0, values.length)`.
+
+The invariant: `values` holds exactly the current set, and `indexOf.get(v)` is the position of `v` in `values`.
+
+<Steps>
+<Step title="Insert appends at the end">
+  Array push is O(1); map stores the new index.
+</Step>
+<Step title="Remove swaps with the tail">
+  Let `i = indexOf.get(val)`, `last = values[values.length - 1]`. Set `values[i] = last`, update `indexOf.set(last, i)`, then pop and delete `val` from the map.
+</Step>
+<Step title="getRandom indexes uniformly">
+  `values[Math.floor(Math.random() * values.length)]` — every element has equal probability because the array has no holes.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+class RandomizedSet {
+  private values: number[] = [];
+  private indexOf = new Map<number, number>();
+
+  insert(val: number): boolean {
+    if (this.indexOf.has(val)) return false;
+    this.indexOf.set(val, this.values.length);
+    this.values.push(val);
+    return true;
+  }
+
+  remove(val: number): boolean {
+    if (!this.indexOf.has(val)) return false;
+
+    const i = this.indexOf.get(val)!;
+    const last = this.values[this.values.length - 1];
+
+    this.values[i] = last;
+    this.indexOf.set(last, i);
+    this.values.pop();
+    this.indexOf.delete(val);
+    return true;
+  }
+
+  getRandom(): number {
+    const i = Math.floor(Math.random() * this.values.length);
+    return this.values[i];
+  }
+}
+```
+
+Each operation is **O(1)** average time. Space **O(n)** for the array and map together.
+
+<Callout type="gotcha">
+  After swapping, update the map entry for the value that moved — not just delete the removed key. Forgetting `indexOf.set(last, i)` corrupts future deletes.
+</Callout>
+
+<Tradeoff
+  forTitle="Array + hash map when"
+  againstTitle="Single structure when"
+  forItems={[
+    "All three operations must be O(1) average — the problem statement is explicit",
+    "Values are hashable integers or strings with stable identity",
+    "Uniform random sampling requires contiguous indexable storage",
+    "Order of elements does not matter; swap-with-last is acceptable",
+    "n can grow to 10⁵ and O(n) deletes would TLE",
+  ]}
+  againstItems={[
+    "You only need insert + lookup — a plain set suffices",
+    "You need sorted iteration or min/max — use a heap or tree",
+    "Duplicates must be counted with multiplicity — extend the map to counts and a multiset array",
+    "Memory is so tight that two O(n) structures are unacceptable",
+    "The follow-up is getRandom with exclusion list — different bookkeeping entirely",
+  ]}
+/>
+
+## In an interview
+
+Restate the API: insert/remove return booleans for duplicates, getRandom is uniform over current elements. Walk a tiny example: insert 1, insert 2, remove 1 — after remove, only 2 remains and getRandom must always return 2.
+
+Say out loud why array-only and set-only both fail, then describe swap-with-last before coding. Mention the map update for the swapped element — that is the bug interviewers watch for.
+
+Follow-ups: **Insert Delete GetRandom O(1) - Duplicates allowed** (store `(value, instanceId)` pairs), or tie to 02.29 LRU Cache (another map + linked structure hybrid). Duplicates follow-up uses the same swap trick but keys are not raw values.
+
+<KeyTakeaways
+  items={[
+    "O(1) delete from a dynamic array is swap-with-last + pop, not shifting",
+    "A value → index map makes lookup and update O(1) while the array enables uniform random sampling",
+    "After a swap, update the index of the element that moved into the deleted slot",
+    "All three operations are O(1) average; space is O(n) for both structures",
+    "Neither hash set nor array alone satisfies insert + delete + getRandom simultaneously",
+    "The duplicates variant uses composite keys in the map while keeping the same swap invariant",
+  ]}
+/>

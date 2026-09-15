@@ -1,0 +1,104 @@
+---
+title: "Car Fleet"
+number: "02.40"
+summary: "Process cars from the destination backward; faster cars catch slower leaders and merge into one fleet."
+status: published
+free: true
+difficulty: core
+estMinutes: 14
+tags: [stack, sorting, greedy]
+updated: "2026-09-15"
+---
+
+## Who arrives together at the finish
+
+n cars at distinct positions on a one-lane road share a destination `target`. Each has constant speed. Cars cannot pass — a faster car behind slows to match the car ahead once it catches up, and they travel as one **fleet**. Count fleets that reach `target`.
+
+Simulating second-by-second is impossible — positions up to 10⁶ and speeds up to 10⁴. What matters is **time to reach target**: `time(i) = (target - position[i]) / speed[i]`. Process cars from nearest to target backward: a car merges into the fleet ahead if its arrival time is ≤ the current fleet's lead time (it catches up before the finish). Otherwise it starts a new fleet.
+
+Example: `target = 12`, `(pos, speed) = (10,2), (8,4), (0,1)`. Times: 1, 1, 12. From the back: 12 starts a fleet; 1 and 1 merge; one fleet from the slow car at 0 → **2 fleets** total.
+
+## Sort by position, scan times from the end
+
+Pair positions with speeds, sort by **descending position** (closest to target first). Track `fleetLeadTime` — minimum time the current front fleet needs to finish. Iterate:
+
+- If `time > fleetLeadTime`, this car cannot catch the fleet ahead before target — increment fleet count, set `fleetLeadTime = time`.
+- Else it joins the existing fleet (no increment).
+
+<Steps>
+<Step title="Compute arrival times">
+  `(target - pos) / speed` for each car.
+</Step>
+<Step title="Sort by position descending">
+  Process from target side toward start.
+</Step>
+<Step title="Merge or split fleets by comparing times">
+  Larger time behind a smaller lead time means the rear car catches up.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function carFleet(target: number, position: number[], speed: number[]): number {
+  const cars = position.map((pos, i) => [pos, speed[i]] as [number, number]);
+  cars.sort((a, b) => b[0] - a[0]); // nearest target first
+
+  let fleets = 0;
+  let leadTime = 0;
+
+  for (const [pos, spd] of cars) {
+    const time = (target - pos) / spd;
+    if (time > leadTime) {
+      fleets++;
+      leadTime = time;
+    }
+  }
+
+  return fleets;
+}
+```
+
+Sorting is **O(n log n)**; scan is **O(n)**. Space **O(n)** for the paired array (or O(1) extra if sorted in place with indices).
+
+<Callout type="note">
+  Floating times are safe here — cars merge when rear time ≤ lead time; strict inequality for new fleet avoids double-counting equal-time arrivals in the same fleet.
+</Callout>
+
+<Tradeoff
+  forTitle="Sort + backward greedy when"
+  againstTitle="Simulation when"
+  forItems={[
+    "Closed-form arrival times replace continuous collision simulation",
+    "n up to 10⁴ — event simulation with priority queue is heavier than O(n log n) sort",
+    "No passing rule makes merge decision purely compare rear vs fleet lead time",
+    "Positions are distinct — sort order from target is unambiguous",
+    "One backward pass counts fleets without modeling pairwise merges explicitly",
+  ]}
+  againstItems={[
+    "Cars can pass or lanes merge — different model needs simulation or graph",
+    "You need exact merge timestamps for logging — simulate catch-up events",
+    "n is under 20 — pairwise merge simulation is instructive",
+    "Speeds or positions change online — static sort preprocessing does not apply",
+    "Floating edge cases matter at scale — use cross-multiplication `(target-pos)*leadSpeed` vs `(target-leadPos)*speed` to compare without division",
+  ]}
+/>
+
+## In an interview
+
+Restate with `target = 12`, cars at 10 and 8 both needing 1 time unit — one fleet; a slow car at 0 arrives at 12 alone — two fleets. Confirm no passing and fleets merge on catch-up before target.
+
+Explain time-to-target formula and backward scan before coding. Say why forward scan from start is awkward — merge depends on who is ahead toward the finish.
+
+Follow-ups: count merge events with explicit stack of times, or variant with acceleration. Bug: sorting ascending from start — merge logic needs cars ordered from destination backward.
+
+<KeyTakeaways
+  items={[
+    "Car Fleet reduces to arrival times (target - position) / speed and backward greedy merging",
+    "Sort cars by descending position — process from nearest the target first",
+    "A car starts a new fleet when its time exceeds the current fleet lead time; otherwise it merges",
+    "O(n log n) from sort dominates; no second-by-second simulation required",
+    "Cannot-pass rule means only the fleet leader's finish time matters for cars behind",
+    "Equal arrival times belong to the same fleet — use > not >= when detecting a new fleet",
+  ]}
+/>

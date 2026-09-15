@@ -1,32 +1,79 @@
 ---
 title: "Back-Of-The-Envelope Capacity Planning"
 number: "01.06"
-summary: "Back-Of-The-Envelope Capacity Planning — notes in progress."
-status: draft
+summary: "Turning four collected numbers into peak QPS, storage growth, and server counts you can defend on a whiteboard."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 15
+tags: [capacity-planning, estimation, scalability]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Being wrong by 10x changes the architecture; being wrong by 20% never did
 
-What breaks without this, and the situation that forces the decision.
+01.01 Requirements Clarification hands you four numbers: daily actives, peak requests per second, payload size, retention. This lesson is what you do with them — turn a handful of daily totals into the numbers that actually decide a design: peak throughput, storage growth, bandwidth, and roughly how many machines. None of this arithmetic aims for a forecast anyone would bet money on. It aims to find, in under two minutes, which of your assumptions the architecture actually hinges on — so you find out now, on a whiteboard, rather than twenty minutes into a design that quietly assumed the wrong regime.
 
-## How it works
+The technique is to round hard and keep the units attached. 86,400 seconds in a day rounds cleanly to 100,000 for a quick division in your head — about 15% off, which is smaller than the error already sitting inside your traffic and payload guesses, so it costs you nothing that matters. Powers of ten and powers of two get you the rest of the way: 2^10 is close enough to 10^3 that treating a kilobyte as a thousand bytes is a fine approximation for estimation, even though it isn't the number a disk vendor would print.
 
-The mechanism, step by step.
+## From a daily total to a rate you can provision for
 
-## Tradeoffs
+<Formula label="Peak requests per second">peak QPS ≈ (daily requests / 86,400) × peak factor</Formula>
+
+The peak factor absorbs the shape of the traffic, not just its volume, and it's worth naming why rather than reaching for a reflexive "let's say 3x." A single-region consumer product has a real day/night cycle, so 2–5x average is defensible, and you should say which end of that range you picked and why. A globally distributed user base smears that cycle across time zones, so the ratio of peak to average shrinks. And a genuine burst — a push notification to everyone at once, a flash sale, a live event everyone opens the app for at the same minute — is not a peak factor at all; it needs its own number, because it can be 10-50x average for a few minutes in a way no diurnal multiplier captures.
+
+## From a write rate to storage and bandwidth
+
+<Formula label="Storage growth">bytes/day = writes/day × bytes per item</Formula>
+
+Multiply by 365 for a yearly figure, and then by the replication or redundancy factor the design actually needs before calling it "storage" — the raw byte count of the data and the bytes you provision to hold it durably are two different numbers, and the gap between them is exactly the durability cost from 01.05 Availability Durability Consistency And Cost. Reporting the smaller of the two as if it were the provisioning number is the single most common arithmetic tell that someone hasn't actually run a system at this scale.
+
+### Worked example: 20 million daily active users
+
+Twenty million DAU, each posting on average once every two days, gives 10,000,000 writes/day. Assume a read:write ratio of 200:1 for a feed-scrolling product — stated as an assumption, because nobody handed it to you — which gives 2,000,000,000 reads/day.
+
+- **Average writes/s:** 10,000,000 / 86,400 ≈ 116/s. At a peak factor of 4x for a single-region product: ≈ 460/s, round to **~500 writes/s**.
+- **Average reads/s:** 2,000,000,000 / 86,400 ≈ 23,100/s. Reads flatten the peak somewhat because caching absorbs part of the diurnal swing, so a lower peak factor of 3x still gives ≈ 69,300/s, round to **~70,000 reads/s** at peak.
+- **Payload:** each post carries roughly 2 KB of text and metadata plus one photo averaging 500 KB, stored separately from the metadata — 07.13 Object Storage Vs Database covers exactly where that split belongs.
+- **Ingest bandwidth:** 10,000,000 writes/day × 500 KB ≈ 5 TB/day of photo bytes, plus 10,000,000 × 2 KB ≈ 20 GB/day of metadata.
+- **Storage growth, logical:** 5 TB/day × 365 ≈ **1.8 PB/year** of photo data before any redundancy.
+- **Storage growth, provisioned:** at 3x replication for durability, that becomes **≈ 5.4 PB/year** actually purchased.
+- **Read-tier server count:** assuming, as a stated assumption rather than a measurement, that one instance serves ~5,000 req/s, 70,000 reads/s at peak needs at least 14 instances; rounding up for redundancy and headroom lands at roughly **20 instances** for the read tier alone, before the write path or any background jobs.
+
+Every one of those bold numbers is a round number arrived at by mental arithmetic in under a minute, and that is the entire point: the exercise is cheap enough to redo the moment any input changes.
+
+<Callout type="gotcha">
+The number that decides whether object storage enters the design at all is payload size, not request rate. 2 KB of metadata per item comfortably lives in a database row forever. 500 KB per item never does, at any request rate, because no relational database is built to store blobs that size efficiently once you're inserting millions of them a day — 07.13 Object Storage Vs Database covers where that line actually sits and why it isn't a size interviewers expect you to negotiate.
+</Callout>
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Do the arithmetic explicitly when"
+  againstTitle="Skip straight to a rough architecture when"
+  forItems={[
+    "The read/write ratio or payload size could plausibly put the system in a different regime — whether it fits on one box or has to be partitioned depends on it",
+    "A decision you're about to make hinges on a threshold the number might cross — object storage versus a database, a queue versus a synchronous write",
+    "Storage or bandwidth cost look like they might dominate the infrastructure bill, which changes the conversation from an engineering choice to a budget one",
+    "You're about to defend a specific instance count or shard count, and 'a lot' is not an answer anyone can check",
+  ]}
+  againstItems={[
+    "The scale is obviously small — a few thousand users, an internal tool — and no plausible number changes the design",
+    "You already have four solid, agreed numbers from clarification, and the multiplication left to do is mechanical rather than informative",
+    "Interview time is scarce and the architecture doesn't actually depend on more than the order of magnitude you already have",
+    "Near-identical arithmetic was already done for another part of the same system minutes ago, and redoing it adds nothing",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Talk through the math out loud with round numbers rather than going silent to compute an exact one — the narration is most of the signal, not the digits. Land every calculation on one sentence that states what it changes: "so that's roughly 70k reads a second at peak, which means a single database instance won't serve this without heavy caching or read replicas." A number that doesn't change a downstream decision wasn't worth calculating in the first place, and saying the consequence out loud is how an interviewer tells the difference between arithmetic and stalling.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Back-of-the-envelope math turns the four numbers from requirements clarification into peak QPS, storage growth, and bandwidth — figures an architecture can actually be checked against",
+    "The goal is finding which assumption the design hinges on, not producing a forecast — round aggressively and keep every unit attached",
+    "A peak factor of 2-5x fits a single-region diurnal cycle; a global user base smears that peak lower, and a genuine burst needs its own number entirely",
+    "Logical data size and provisioned storage are different numbers, and the gap between them is the replication factor paying for durability",
+    "Payload size, not request rate, is usually the number that decides whether object storage enters the design at all",
+    "Every calculation should end in a sentence naming what it changes about the design — a number that doesn't move a decision wasn't worth computing",
+  ]}
+/>

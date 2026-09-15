@@ -1,0 +1,114 @@
+---
+title: "Meeting Rooms II"
+number: "01.39"
+summary: "Peak concurrency equals minimum rooms — sweep sorted starts and ends, or track the earliest-finishing active meeting in a min-heap."
+status: published
+free: true
+difficulty: core
+estMinutes: 14
+tags: [intervals, heap, greedy]
+updated: "2026-09-15"
+---
+
+## How many rooms for overlapping schedules?
+
+Meetings `[[0,30],[5,10],[15,20]]` need **2** rooms — `[5,10]` and `[15,20]` both overlap `[0,30]` but not each other. The question is peak **concurrency**: maximum meetings active at once.
+
+Brute force: for each meeting, count how many others overlap it — O(n²). Better: treat each start as +1 demand and each end as −1, sort all events, sweep — O(n log n). The heap approach keeps the same complexity with a calendar-friendly story: when a meeting starts, assign a room; when one ends before the next starts, reuse that room.
+
+## Min-heap of end times
+
+Sort meetings by start. Maintain a min-heap of **end times** of meetings currently in progress (smallest end on top).
+
+For each `[start, end]` in sorted order:
+
+- While the heap is non-empty and `heap.min <= start`, pop — a room freed before this meeting begins.
+- Push `end` — this meeting occupies a room (new or reused).
+- Track `max(heap.size)` as the answer.
+
+The heap size at any moment is the number of concurrent meetings; its peak is the minimum rooms required.
+
+<Steps>
+<Step title="Sort by start">
+Process meetings in the order they begin.
+</Step>
+<Step title="Reuse freed rooms">
+Pop all ends `<= current start` — those rooms are empty.
+</Step>
+<Step title="Assign and track peak">
+Push current end; update max heap size.
+</Step>
+</Steps>
+
+## Solution
+
+Chronological sweep — two sorted arrays, two pointers, no heap boilerplate:
+
+```ts
+function minMeetingRooms(intervals: number[][]): number {
+  if (intervals.length === 0) return 0;
+
+  const starts = intervals.map(i => i[0]).sort((a, b) => a - b);
+  const ends = intervals.map(i => i[1]).sort((a, b) => a - b);
+
+  let s = 0;
+  let e = 0;
+  let active = 0;
+  let maxRooms = 0;
+
+  while (s < starts.length) {
+    if (starts[s] < ends[e]) {
+      active++;
+      maxRooms = Math.max(maxRooms, active);
+      s++;
+    } else {
+      active--;
+      e++;
+    }
+  }
+
+  return maxRooms;
+}
+```
+
+When `starts[s] === ends[e]`, advancing `e` first frees a room before the new start is counted — back-to-back meetings share a room, consistent with 01.38 Meeting Rooms.
+
+Heap variant (same complexity): sort intervals by start, min-heap on end times, pop while `minEnd <= start`, push `end`, track max size. Time **O(n log n)**, space **O(n)**.
+
+<Callout type="note">
+Both approaches answer the same question. The sweep is shorter on a whiteboard; the heap generalizes when events arrive online and you care which room frees next.
+</Callout>
+
+<Tradeoff
+  forTitle="Min-heap on end times when"
+  againstTitle="Chronological sweep when"
+  forItems={[
+    "You process meetings one at a time in start order — heap models 'which room frees next'",
+    "Same heap pattern appears in task schedulers and CPU allocation problems",
+    "Input is arbitrary intervals, not integer-bounded timestamps",
+    "You may extend to 'which room id' tracking with heap entries as [end, roomId]",
+    "Interview audience expects a priority-queue solution for interval concurrency"
+  ]}
+  againstItems={[
+    "You only have start/end arrays already sorted — two-pointer sweep is fewer moving parts",
+    "You want to avoid heap boilerplate in a timed screen — sweep is ~15 lines",
+    "Timestamps are small integers — bucket counting by minute can be O(n + W)",
+    "Question is only 'any overlap?' — 01.38 adjacent check suffices",
+    "You need the actual room assignment schedule, not just the count — heap with ids either way"
+  ]}
+/>
+
+## In an interview
+
+Clarify: minimum rooms so every meeting has a room; one person per room; meeting runs `[start, end)`. Example → 2 rooms. Offer heap or sweep; both O(n log n). Mention 01.38 as the yes/no version.
+
+Follow-ups: return room assignment, meetings with priority, all-day vs partial overlap. Bug: comparing `end <= start` with strict vs non-strict equality at boundaries — align with 01.38 (back-to-back reuses a room).
+
+<KeyTakeaways items={[
+  "Minimum rooms equals the maximum number of meetings active at any instant.",
+  "Min-heap of end times: pop frees rooms before assigning a meeting that starts later.",
+  "Chronological sweep on sorted starts and ends is an equivalent O(n log n) approach with two pointers.",
+  "At equal start and end timestamps, free a room before counting a new start — back-to-back reuse.",
+  "01.38 Meeting Rooms checks feasibility for one person; this counts parallel resource need.",
+  "Heap concurrency pattern recurs in 02.27 Task Scheduler and streaming interval problems."
+]} />

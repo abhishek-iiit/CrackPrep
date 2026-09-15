@@ -1,32 +1,92 @@
 ---
 title: "Bitcask Storage Engine"
 number: "07.08"
-summary: "Bitcask Storage Engine — notes in progress."
-status: draft
+summary: "An append-only log indexed by an exact, in-memory hash table of byte offsets — and the one number, the index's own size, that decides whether it fits."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 14
+tags: [storage, bitcask, hash-index, log-structured]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Appending solved the write; it did not solve the read
 
-What breaks without this, and the situation that forces the decision.
+07.07 Log-Structured Storage makes the case for the append-only file: writes become sequential, the device does the one thing it is fast at, and old versions of a key are left in place rather than edited. That fixes the write path completely. It does nothing for the read path. Knowing that the current value for a key sits somewhere in a file that may be gigabytes long is not the same as knowing where — and "somewhere" is not an address a disk can seek to.
 
-## How it works
+Two ways to close that gap. Scan the log every time, newest record first, until you hit the key — correct, and unusable, because every read costs a pass over data written by every earlier write. Or build an index once, keep it, and turn every subsequent read into one lookup followed by one direct read at a known position. Bitcask is the second answer taken to its logical extreme: an index that is exact, complete, and lives entirely in memory, with no on-disk index structure of any kind. It is the engine behind Riak, and Basho's 2010 design paper describes something almost aggressively simple — simple enough that it is worth learning immediately before LSM trees, because LSM trees are what you get when you refuse Bitcask's one central assumption and have to build something to replace it.
 
-The mechanism, step by step.
+## The keydir is the entire index
 
-## Tradeoffs
+Bitcask keeps one in-memory hash table, usually called the **keydir**, mapping every live key to exactly four numbers: which data file holds its current value, the byte offset of that value's record, the number of bytes to read, and a timestamp. That is the whole index. No B-tree, no sparse index, no Bloom filter — a Bloom filter has nothing to add when the exact answer is already sitting in memory for free.
+
+Data itself lives in a small number of append-only files. At any moment exactly one is the **active file**, open for writes; every other file is immutable. A write is one thing: append a record — key size, value size, timestamp, key bytes, value bytes — to the end of the active file, then update the key's entry in the keydir to point at the offset that record just landed on. A delete appends a tombstone record instead of a value and updates the keydir to remove the key, or mark it pending removal until the next merge. Nothing is ever read before it is written, and nothing on disk is ever modified after it is written.
+
+<Steps>
+  <Step title="Look up the key in the keydir">
+    One hash-table probe, entirely in memory. If the key is absent, the answer is "not found" and no disk is touched at all — this is the case a Bloom filter exists to shortcut in an LSM engine, and here it costs nothing extra to get for free.
+  </Step>
+  <Step title="Seek directly to the recorded offset">
+    The keydir entry names the exact file and byte position. There is no search, no index traversal, no candidate list to narrow down — one seek, to the one place the value can possibly be.
+  </Step>
+  <Step title="Read exactly value-size bytes">
+    The keydir also carries the length, so the read is a single sized read rather than a scan for a terminator or a page-sized fetch that overshoots.
+  </Step>
+  <Step title="Return the value, or treat a tombstone as absence">
+    A tombstone record found at that offset means the key was deleted after being written; the keydir would normally not still point at it, but during startup replay a tombstone is what tells the rebuild to drop the key rather than keep it.
+  </Step>
+</Steps>
+
+That is the whole trick people mean when they describe Bitcask as "one seek per read, one seek per write": a write costs zero seeks, because it always lands at the current end of whichever file is active — no tree to descend, no page to locate, no read-before-write to find where the key already lives. A read costs exactly one seek, because the keydir already answers "where" before the disk is touched at all. Compare that with a B-tree (03.04), where both a read and a write cost roughly the height of the tree in page reads — a few, not one, and each of those pages could be anywhere on the device. Bitcask does not out-think that cost so much as sidestep it: it never puts a key where it "belongs," so there is never a page to locate by walking a structure.
+
+## Merge is the only background job
+
+Data files never shrink, and overwritten values and tombstones just sit in old files taking up space until something removes them. That something is **merge**: a background process that reads a set of immutable data files, keeps only the current value for each key it finds, dropping every superseded value and every tombstone whose key can no longer be shadowing anything older, and writes the survivors out as fresh, compacted data files. Alongside each new data file, merge writes a matching **hint file** — the same key-to-offset entries the keydir needs, but without the value bytes, so a restart can rebuild the keydir by scanning hint files instead of full data files, which is faster because it skips the payload entirely.
+
+There is no leveling here, no fan-out, no separate L0 and L1 — every file merge is a flat operation over whatever files merge picks, which is a real simplification relative to the compaction machinery an LSM engine needs (07.12 Compaction And Amplification covers what that machinery buys). The cost of the simplicity shows up at startup: bringing a node back online means scanning every hint file, or absent one, every data file, written since the last merge, to rebuild the keydir from scratch. On a data set with a large number of files since the last merge, that scan is real wall-clock time before the node can answer a single read.
+
+<Callout type="gotcha">
+The keydir holds one entry per unique live key, not per write, and not per byte of data — so its size scales with key cardinality, and only weakly with how big the values are. A keydir entry is small, roughly the key's own bytes plus a fixed handful of bytes for file id, offset, size, and timestamp — call it 40 to 80 bytes a key as a ballpark, not a benchmark, since it depends on key length and the hash table's own overhead. That sounds trivial until the key count gets large: a billion small keys at even 60 bytes each is 60 GB of index that has to fit in RAM before the node can serve a single request, regardless of how modest the values themselves are. This is Bitcask's real limitation, and it is not a tuning problem — there is no way to page part of the keydir to disk without giving up the one-seek-per-read guarantee that is the entire point of the design.
+</Callout>
+
+## What the index-in-memory assumption costs
+
+Everything else about Bitcask follows from the keydir being exact and fully resident. There is no range scan support, because a hash table carries no order — listing keys between two bounds means scanning every key in the keydir, which nothing about the design makes cheap. There is no way to answer "how many keys start with this prefix" without a full pass, for the same reason a hash table never sorts anything. And because the index is a hash of the key, not a structure keyed by value order, cache locality for related keys is whatever the hash function happens to produce, which is to say none.
+
+LSM trees exist, in part, as the answer to exactly the constraint this section names. An LSM tree keeps its files sorted and gives up the promise that the index has to be exact and fully in memory — a sparse index, one entry per block rather than per key, and a per-file Bloom filter (04.13) approximate the keydir's job at a fraction of the memory, at the cost of occasionally doing a wasted read and of a background compaction process considerably more involved than Bitcask's flat merge. 07.09 LSM Tree Storage Engine is that design; Bitcask is the version of the same problem where you have not yet given anything up.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Reach for a Bitcask-style engine when"
+  againstTitle="Reach for something else when"
+  forItems={[
+    "Access is pure key-value — point reads and point writes by exact key, with no range scans or sorted iteration anywhere in the workload",
+    "The number of unique keys is bounded and known well enough that the keydir comfortably fits in memory with headroom for growth",
+    "Predictable, near-constant read and write latency matters more than memory efficiency — one seek per read, regardless of how much data the engine holds",
+    "Operational simplicity is worth real money — recovery is 'replay the hint files,' and there is no manifest, no leveling, and no compaction picker to tune",
+    "Values vary widely in size but keys do not proliferate — large values cost nothing extra in the index, since the keydir only ever stores an offset and a length",
+  ]}
+  againstItems={[
+    "Key cardinality is large or unbounded — billions of small keys will eventually not fit in memory as an exact index, and there is no partial-degradation mode",
+    "The workload needs range scans, prefix queries, or any form of sorted access — a hash table has no order to exploit",
+    "Startup time matters and the data set has accumulated many files since the last merge, since the keydir must be rebuilt by scanning before the node serves a read",
+    "You want the option to trade a small, tunable read-amplification cost for a much smaller resident index — that trade is exactly what an LSM tree's sparse index and Bloom filter buy",
+    "Secondary indexes or anything beyond exact-key lookup are needed; Bitcask has no query capability beyond 'do you have this key'",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Introduce it by the promise it makes, not the acronym: "If I keep an exact in-memory map from every key to its exact byte offset in an append-only log, every read costs one seek and every write costs none — no tree to walk on either side." Then name the bill before being asked: that promise only holds while the map itself fits in memory, and the map's size tracks the number of distinct keys, not the size of the values behind them. If asked what breaks it, the answer is key cardinality outgrowing RAM — and the fix is not a bigger machine forever, it is a different index shape, which is the conversation that leads straight into an LSM tree's sparse, on-disk index and its Bloom filter.
 
-<KeyTakeaways items={["", "", ""]} />
+Be ready to place it historically and practically, too: it is Riak's engine, not a hypothetical, and its target has always been workloads that are genuinely key-value shaped — no scans, no joins, no secondary indexes — where the constraint is knowing the key set will stay within a memory budget you can actually provision.
+
+<KeyTakeaways
+  items={[
+    "Bitcask indexes an append-only log with a single in-memory hash table, the keydir, mapping every key to an exact file id, offset, and length",
+    "Because the index is exact, a read costs exactly one seek and a write costs none — there is no tree to descend on either path",
+    "Merge is Bitcask's only background job: it rewrites live keys into fresh files and writes a hint file alongside each one so startup can rebuild the keydir without reading values",
+    "The keydir's size scales with the number of unique keys, not the size of the values or the total data volume, and it must fit entirely in memory with no partial-degradation mode",
+    "Bitcask supports no range scans and no secondary indexes, because a hash table carries no order",
+    "An LSM tree is the answer to Bitcask's one real limit: it trades an exact, fully-resident index for an approximate, mostly on-disk one — a sparse index plus a Bloom filter — accepting occasional wasted reads in exchange for an index that does not have to hold every key in memory",
+  ]}
+/>

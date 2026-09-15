@@ -1,0 +1,152 @@
+---
+title: "LRU Cache"
+number: "02.29"
+summary: "A hash map finds the node in O(1); a doubly linked list orders nodes so eviction and refresh stay O(1) at the tail and head."
+status: published
+free: true
+difficulty: deep
+estMinutes: 18
+tags: [design, hash-map, linked-list]
+updated: "2026-09-15"
+---
+
+## O(1) lookup is not enough — you must also know who to evict
+
+Design an LRU cache with `get(key)` and `put(key, value)` both O(1) average, and fixed capacity. When `put` overflows capacity, evict the **least recently used** key. Capacity up to 3000; keys and values are integers.
+
+A hash map alone gives O(1) get/put but no recency order — you cannot find the LRU key without scanning. A linked list alone gives order but O(n) lookup. The standard fusion: map **key → list node** for O(1) access, doubly linked list for O(1) splice to mark a key as most-recently used or drop the tail on eviction.
+
+Head = MRU (most recently used). Tail = LRU victim.
+
+## Map plus doubly linked list
+
+Each node stores `{key, value, prev, next}`. The map points to nodes so you can relocate them without searching.
+
+- **get(key):** if missing, return -1. Else move node to head (remove from current position, insert at head), return value.
+- **put(key, value):** if key exists, update value and move to head. Else create node at head; if size > capacity, remove tail node **and** delete its key from the map.
+
+The invariant: list order matches recency — front touched most recently, back untouched longest.
+
+<Steps>
+<Step title="get hit — splice to head">
+  Remove node from list, prepend to head, return value.
+</Step>
+<Step title="put existing — update and promote">
+  Same splice as get after updating value.
+</Step>
+<Step title="put new — insert or evict">
+  Add at head; if over capacity, pop tail and map.delete(tail.key).
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+class LRUNode {
+  key = 0;
+  value = 0;
+  prev: LRUNode | null = null;
+  next: LRUNode | null = null;
+  constructor(key: number, value: number) {
+    this.key = key;
+    this.value = value;
+  }
+}
+
+class LRUCache {
+  private map = new Map<number, LRUNode>();
+  private head = new LRUNode(0, 0);
+  private tail = new LRUNode(0, 0);
+  private capacity: number;
+
+  constructor(capacity: number) {
+    this.capacity = capacity;
+    this.head.next = this.tail;
+    this.tail.prev = this.head;
+  }
+
+  get(key: number): number {
+    if (!this.map.has(key)) return -1;
+    const node = this.map.get(key)!;
+    this.moveToHead(node);
+    return node.value;
+  }
+
+  put(key: number, value: number): void {
+    if (this.map.has(key)) {
+      const node = this.map.get(key)!;
+      node.value = value;
+      this.moveToHead(node);
+      return;
+    }
+    const node = new LRUNode(key, value);
+    this.map.set(key, node);
+    this.addToHead(node);
+    if (this.map.size > this.capacity) {
+      const lru = this.removeTail()!;
+      this.map.delete(lru.key);
+    }
+  }
+
+  private removeNode(node: LRUNode): void {
+    node.prev!.next = node.next;
+    node.next!.prev = node.prev;
+  }
+  private addToHead(node: LRUNode): void {
+    node.prev = this.head;
+    node.next = this.head.next;
+    this.head.next!.prev = node;
+    this.head.next = node;
+  }
+  private moveToHead(node: LRUNode): void {
+    this.removeNode(node);
+    this.addToHead(node);
+  }
+  private removeTail(): LRUNode | null {
+    const node = this.tail.prev!;
+    if (node === this.head) return null;
+    this.removeNode(node);
+    return node;
+  }
+}
+```
+
+Time **O(1)** average per get/put. Space **O(capacity)**.
+
+<Tradeoff
+  forTitle="Hash map + doubly linked list when"
+  againstTitle="Ordered map / single structure when"
+  forItems={[
+    "Both get and put must be O(1) with explicit LRU eviction policy",
+    "Capacity is bounded — you evict on every overflow, not batch",
+    "Keys are arbitrary hashable identifiers — not contiguous integers only",
+    "Interview expects the canonical design — map for lookup, list for order",
+    "Follow-up is LFU (02.30) — LRU list structure is the baseline to extend",
+  ]}
+  againstItems={[
+    "Language provides LinkedHashMap with access-order mode (Java) — use built-in if allowed",
+    "Eviction policy is FIFO not LRU — queue plus map suffices",
+    "Capacity is 1 — single variable tracks lone entry",
+    "Only get-heavy with no puts — read-through cache without eviction logic",
+    "Approximate LRU with TTL timestamps is acceptable — simpler clock sweep",
+  ]}
+/>
+
+## In an interview
+
+Walk through capacity 2: put(1,1), put(2,2), get(1), put(3,3) evicts key 2. Draw head/tail sentinel nodes — they eliminate null checks at boundaries.
+
+Explain why **doubly** linked: removing an arbitrary node in O(1) needs `prev`. Say you store `key` inside the node so tail eviction knows which map entry to delete.
+
+Proactive bug: evicting from map but leaving orphan nodes in the list (or vice versa) — always delete tail.key from map when popping. Another: promoting on get — LRU requires get to count as use.
+
+Follow-ups: thread safety, TTL expiry, 02.30 LFU Cache, persistent cache.
+
+<KeyTakeaways items={[
+  "LRU needs O(1) lookup (hash map) and O(1) recency update (doubly linked list).",
+  "Map stores key → node pointer; list order is MRU at head, LRU at tail.",
+  "get and put on existing keys must move the node to head — access equals use.",
+  "Eviction removes the tail node and deletes its key from the map — keep both structures in sync.",
+  "Sentinel head/tail nodes simplify edge cases when the list is empty or has one element.",
+  "02.30 LFU Cache adds frequency buckets on top of similar key→node indirection.",
+]} />

@@ -1,0 +1,101 @@
+---
+title: "House Robber II"
+number: "01.23"
+summary: "First and last houses are neighbors on a ring — run the linear robber twice, each time leaving one end out."
+status: published
+free: true
+difficulty: core
+estMinutes: 13
+tags: [dynamic-programming, array]
+updated: "2026-09-15"
+---
+
+## A circle breaks the linear recurrence at the seam
+
+House Robber on a line: no two adjacent. Here the first and last houses are also adjacent — the street is a ring. `[2,3,2]` still yields `3` (middle only), but `[1,2,3,1]` yields `4` (`1 + 3`), and you cannot rob both ends even though they are far apart in the array index.
+
+Any solution that uses the linear recurrence unchanged may pick house `0` and house `n-1` together. That is illegal. The circle adds exactly one forbidden pair that a line does not have.
+
+## Split the ring into two lines
+
+If the optimal circular robbery includes house `0`, it cannot include house `n-1`. If it includes house `n-1`, it cannot include house `0`. If it includes neither, it is already a valid linear solution on the middle segment.
+
+So the answer is the maximum of two linear runs:
+
+1. Rob `nums[0..n-2]` — everything except the last house.
+2. Rob `nums[1..n-1]` — everything except the first house.
+
+Each subproblem is **01.22 House Robber** with two rolling variables. Edge case: one house → return that value; two houses → `max(nums[0], nums[1])` without calling the helper on empty slices.
+
+<Steps>
+<Step title="Extract helper">
+Pull the O(n) rolling-dp `robRange(nums, start, end)` from House Robber — same recurrence, bounds on the slice.
+</Step>
+<Step title="Run twice">
+`max(robRange(0, n-2), robRange(1, n-1))` for `n >= 2`.
+</Step>
+<Step title="Handle tiny n">
+`n === 1` → `nums[0]`. `n === 2` → max of both — both ranges would be single-element anyway, but stating it avoids off-by-one noise in the interview.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function rob(nums: number[]): number {
+  const n = nums.length;
+  if (n === 1) return nums[0];
+  if (n === 2) return Math.max(nums[0], nums[1]);
+
+  function robRange(start: number, end: number): number {
+    let prev2 = nums[start];
+    let prev1 = Math.max(nums[start], nums[start + 1]);
+    for (let i = start + 2; i <= end; i++) {
+      const cur = Math.max(prev1, prev2 + nums[i]);
+      prev2 = prev1;
+      prev1 = cur;
+    }
+    return prev1;
+  }
+
+  return Math.max(robRange(0, n - 2), robRange(1, n - 1));
+}
+```
+
+Two passes, each **O(n)**, space **O(1)**. No extra data structure encodes the circle — the case split does all the work.
+
+<Tradeoff
+  forTitle="Two-pass linear DP when"
+  againstTitle="Different structure when"
+  forItems={[
+    "The only twist on House Robber is first-last adjacency — splitting into two linear ranges is exact",
+    "You already know the rolling rob-or-skip recurrence and can reuse it verbatim",
+    "n is up to 10^3 — two O(n) passes are trivial",
+    "You want to demonstrate reduction: circle → two lines, not a new dp dimension",
+    "Follow-up may generalize to a tree (House Robber III), and this split is the 1D special case"
+  ]}
+  againstItems={[
+    "Houses form a general graph — independent set on a graph, not a ring; DFS or bitmask DP applies",
+    "Constraints mention k-consecutive skips or windows — state must track more than two prior optima",
+    "You need the actual houses robbed — reconstruct from two tables and compare totals",
+    "The ring is huge but sparse (linked neighbors given explicitly) — adjacency list DP, not array slice",
+    "Negative values appear — recurrence still works, but prove the split covers all optima with a short argument"
+  ]}
+/>
+
+## In an interview
+
+Connect to House Robber immediately: "Same recurrence, but I cannot rob both ends." Propose the two-case split before coding — exclude last, or exclude first, take the max.
+
+Walk `[1,2,3,1]`: range without last gives `1+3=4`, without first gives `2+3=5` capped by... actually without first is [2,3,1] → max(2+1, 3) = 4? [2,3,1]: dp: 2, max(2,3)=3, max(3, 2+1)=3, max(3, 3+?) = at i=2: max(3, 2+1)=3. Hmm [2,3,1]: rob 2 skip 3 rob 1 = 3, or rob 3 = 3. Without last [1,2,3]: 1+3=4. max(4,3)=4. Good.
+
+Follow-ups: **House Robber III** on a tree, or "what if there are three neighbors in a triangle graph." The bug to flag: running linear rob on the full array without splitting — that double-counts the seam.
+
+<KeyTakeaways items={[
+  "House Robber II is House Robber with one extra forbidden pair: house 0 and house n-1 cannot both be robbed.",
+  "Optimal circular loot equals max(rob without last house, rob without first house) — every valid circle plan falls into one case.",
+  "Reuse the linear O(n) rolling DP twice; no new recurrence and no dp dimension for 'is the circle closed'.",
+  "Handle n === 1 and n === 2 before the two-range logic to keep indices clean.",
+  "Total time O(n), space O(1); the insight is reduction, not a heavier algorithm.",
+  "House Robber III extends the rob-or-skip idea to trees with a post-order DFS returning (rob, skip) per node."
+]} />

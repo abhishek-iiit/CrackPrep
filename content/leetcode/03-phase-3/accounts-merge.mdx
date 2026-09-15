@@ -1,0 +1,146 @@
+---
+title: "Accounts Merge"
+number: "03.15"
+summary: "Shared emails define one person — Union-Find on email nodes, then bucket names and sort for output."
+status: published
+free: true
+difficulty: deep
+estMinutes: 18
+tags: [union-find, hash-map, graph]
+updated: "2026-09-15"
+---
+
+## Same email, different rows — the graph is implicit again
+
+Each account row is `[name, email1, email2, ...]`. Two accounts belong to the same person if they share **any** email. Merge and return accounts as `[name, sorted emails...]`, sorted by name then emails.
+
+Input:
+```
+John,john@mail.com,john_new@mail.com
+John,john_new@mail.com,john@google.com
+Mary,mary@mail.com
+```
+John's two rows share `john_new@mail.com` — one merged account with three emails sorted. Mary stays separate.
+
+Brute force: compare every pair of accounts for email overlap — **O(A² × E)**. Building an email → index map and unioning all emails within each account row collapses shared identity in near-linear time.
+
+## Union emails inside each account
+
+Treat each **unique email** as a node. For each account, union its first email with every other email in that row — that connects the whole clique. After all unions, emails with the same root belong to one person.
+
+Map `root email → list of emails` (use a canonical root per component). Map any email → display name (first name seen with that email). Sort each email list and sort accounts by name.
+
+<Steps>
+<Step title="Index emails">
+`emailToId: Map<string, number>` assigns stable ids; `idToEmail[]` reverses; `emailToName` stores the account holder name.
+</Step>
+<Step title="Union within each account">
+For account emails `[e0, e1, e2, ...]`, unite `e0` with `e1`, `e0` with `e2`, etc.
+</Step>
+<Step title="Bucket and format">
+For each email id, `root = find(id)`; append email to `groups[root]`. Output `[name, ...sorted emails]` for each non-empty group, sort rows.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function accountsMerge(accounts: string[][]): string[][] {
+  const emailToId = new Map<string, number>();
+  const idToEmail: string[] = [];
+  const emailToName = new Map<string, string>();
+
+  function idOf(email: string): number {
+    if (!emailToId.has(email)) {
+      emailToId.set(email, idToEmail.length);
+      idToEmail.push(email);
+    }
+    return emailToId.get(email)!;
+  }
+
+  const n = () => idToEmail.length;
+  const parent: number[] = [];
+
+  function find(x: number): number {
+    if (parent[x] === undefined) parent[x] = x;
+    if (parent[x] !== x) parent[x] = find(parent[x]);
+    return parent[x];
+  }
+
+  function unite(a: number, b: number): void {
+    const ra = find(a), rb = find(b);
+    if (ra !== rb) parent[rb] = ra;
+  }
+
+  for (const account of accounts) {
+    const name = account[0];
+    const first = idOf(account[1]);
+    emailToName.set(account[1], name);
+    for (let i = 2; i < account.length; i++) {
+      emailToId.set(account[i], idOf(account[i]));
+      emailToName.set(account[i], name);
+      unite(first, idOf(account[i]));
+    }
+  }
+
+  const groups = new Map<number, string[]>();
+  for (let i = 0; i < idToEmail.length; i++) {
+    const root = find(i);
+    if (!groups.has(root)) groups.set(root, []);
+    groups.get(root)!.push(idToEmail[i]);
+  }
+
+  const result: string[][] = [];
+  for (const emails of groups.values()) {
+    emails.sort();
+    const name = emailToName.get(emails[0])!;
+    result.push([name, ...emails]);
+  }
+  result.sort((a, b) =>
+    a[0] === b[0] ? a[1].localeCompare(b[1]) : a[0].localeCompare(b[0])
+  );
+  return result;
+}
+```
+
+Time **O(N × α(N) + E log E)** — N emails, E total emails across accounts, sorting dominates. Space **O(N)** for maps and union-find.
+
+<Callout type="gotcha">
+Two different people can share a name — merge only on **email overlap**, never on name equality. `"John"` appearing twice does not imply one person unless an email links the rows.
+</Callout>
+
+<Tradeoff
+  forTitle="Union-Find on emails when"
+  againstTitle="DFS adjacency on emails when"
+  forItems={[
+    "Accounts can be many and overlap transitively — UF handles clique union per row cleanly",
+    "You just practiced 03.14 Number of Provinces — same component machinery",
+    "Email strings are the unique keys — natural node identifiers",
+    "Output requires grouping all emails in a component — bucket by root is O(N)",
+    "Follow-ups add accounts online — UF supports incremental union"
+  ]}
+  againstItems={[
+    "Account count is tiny — build email graph, DFS each component, code is shorter to explain",
+    "You need the chain of merges for debugging — DFS tree gives traversal order",
+    "Memory for string-to-id maps is tight — adjacency list of strings avoids numeric ids",
+    "Problem variant uses phone numbers with formatting noise — normalize first, then either approach works",
+    "You must detect contradictory merges (same email, two names) — neither UF nor DFS alone; add validation"
+  ]}
+/>
+
+## In an interview
+
+Restate: merge account lists if any email intersects; output name plus sorted unique emails per person; sort accounts. Walk the John/Mary example with a shared middle email.
+
+Say Union-Find: each email is a node, union all emails in one account row, group by root. Mention sorting at the end — interviewers care that you do not forget output format.
+
+Expect: "What if two names share an email?" (impossible per problem — one email one person), graph DFS alternative, scale to millions of emails (external sort, disk-backed UF is overkill but mention batching). Bug to name first: merging accounts that share a **name** but not an email.
+
+<KeyTakeaways items={[
+  "Accounts Merge connects emails, not account rows — union every email in an account to the first email in that row.",
+  "Transitive closure is automatic: if A shares with B and B shares with C, Union-Find puts all emails in one component.",
+  "Map email → name when first seen; after grouping, take the name from any email in the component (they must agree).",
+  "Sort emails within each account and sort accounts lexicographically — output format is part of the problem.",
+  "Time is O(total emails × α(N) + E log E) for sorting; space O(unique emails).",
+  "Same Union-Find pattern as 03.14 Number of Provinces, but nodes are strings and cliques come from account rows."
+]} />

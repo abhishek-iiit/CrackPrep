@@ -1,0 +1,106 @@
+---
+title: "Product of Array Except Self"
+number: "01.04"
+summary: "Prefix and suffix products fold division into two linear passes with O(1) extra space beyond the output."
+status: published
+free: true
+difficulty: core
+estMinutes: 12
+tags: [array, prefix-sum]
+updated: "2026-09-15"
+---
+
+## Product of everyone else, no division
+
+Return an array `answer` where `answer[i]` is the product of all elements of `nums` except `nums[i]`. The follow-up constraint that usually matters: solve it in O(n) time **without using division**, and ideally O(1) extra space besides the output array.
+
+The division trick — multiply everything, divide by `nums[i]` — breaks on zeros (division by zero) and is explicitly banned. Two nested loops give O(n²), which fails at n = 10⁵.
+
+The structural fact: `answer[i]` equals (product of `nums[0..i-1]`) × (product of `nums[i+1..n-1]`). Those two products are independent and each computable in a prefix/suffix sweep.
+
+## Prefix into output, suffix on the fly
+
+First pass left to right: fill `answer[i]` with the product of all elements to the left of `i`. Use a running `prefix` variable starting at 1.
+
+Second pass right to left: multiply each `answer[i]` by a running `suffix` product of everything to the right. Update `suffix` as you go.
+
+Example: `nums = [1, 2, 3, 4]`. After pass one, `answer = [1, 1, 2, 6]`. Pass two folds in right-side products → `[24, 12, 8, 6]`.
+
+<Steps>
+<Step title="Initialize answer array of length n">
+  First pass will write prefix products directly into it.
+</Step>
+<Step title="Left-to-right: answer[i] = product of nums[0..i-1]">
+  Maintain running `prefix`, multiply after writing each slot.
+</Step>
+<Step title="Right-to-left: answer[i] *= product of nums[i+1..n-1]">
+  Maintain running `suffix`, multiply before decrementing index.
+</Step>
+</Steps>
+
+<Callout type="note">
+Zero in the input: one zero makes most entries 0; two zeros make the entire output zero. The prefix/suffix method handles this without special cases — any prefix containing a zero zeroes out the rest of that side.
+</Callout>
+
+## Solution
+
+```ts
+function productExceptSelf(nums: number[]): number[] {
+  const n = nums.length;
+  const answer = new Array<number>(n);
+
+  let prefix = 1;
+  for (let i = 0; i < n; i++) {
+    answer[i] = prefix;
+    prefix *= nums[i];
+  }
+
+  let suffix = 1;
+  for (let i = n - 1; i >= 0; i--) {
+    answer[i] *= suffix;
+    suffix *= nums[i];
+  }
+
+  return answer;
+}
+```
+
+Time **O(n)**, space **O(1)** auxiliary excluding the output array (two scalar accumulators).
+
+<Tradeoff
+  forTitle="Prefix/suffix in output when"
+  againstTitle="Explicit prefix and suffix arrays when"
+  forItems={[
+    "Division is disallowed or zeros make division unsafe",
+    "O(1) extra space is required beyond the return array",
+    "Single-threaded linear scan is enough — no online queries",
+    "n up to 10⁵ needs O(n), not O(n²)",
+    "You want one canonical interview solution without hash maps",
+  ]}
+  againstItems={[
+    "Clarity under stress beats space optimization — two helper arrays of length n are easier to explain",
+    "You need to answer many offline product queries on static data — precomputed prefix/suffix tables help",
+    "Modular arithmetic or overflow requires log-space or bigint — different problem",
+    "Input is tiny and triple loop is acceptable for teaching",
+    "Follow-up asks for division-based solution first to discuss tradeoffs",
+  ]}
+/>
+
+## In an interview
+
+Paraphrase with example: `[1, 2, 3, 4]` → `[24, 12, 8, 6]`. Confirm: no division, O(n) time, minimize extra space.
+
+Explain that index `i` splits the array into left and right products. Draw the two-pass reuse of the output array before coding.
+
+Follow-ups: handle overflow (use bigint or log sums), sparse arrays, or streaming input. Bug to mention: allocating separate prefix and suffix arrays when the interviewer asked for O(1) extra — the output array counts as allowed storage.
+
+<KeyTakeaways
+  items={[
+    "Product Except Self decomposes each index into prefix product × suffix product — no division needed",
+    "Two passes fold both products into the output array using running prefix and suffix scalars",
+    "O(n) time, O(1) extra space beyond output — the space constraint is about not using two auxiliary arrays",
+    "Zeros propagate naturally: one zero zeroes most entries; two zeros zero everything",
+    "This is the multiplicative twin of prefix-sum techniques used in range-query problems",
+    "Separate prefix and suffix arrays are correct but fail the follow-up space ask",
+  ]}
+/>

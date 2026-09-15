@@ -1,32 +1,98 @@
 ---
 title: "Database Backups And Restore"
 number: "14.07"
-summary: "Database Backups And Restore — notes in progress."
-status: draft
+summary: "The mechanics of backing up and restoring databases — physical versus logical copies, WAL archiving, point-in-time recovery, and why an untested dump is not a backup."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 14
+tags: [database, backups, restore, pitr]
+updated: "2026-09-15"
 ---
 
-## The problem
+## A backup you have never restored is a story you tell yourself
 
-What breaks without this, and the situation that forces the decision.
+Database backup mechanics are about producing a consistent copy of durable state and applying a continuous change stream so you can return to a chosen moment. Org-wide policy — how often, how long, who drills RTO — lives in 14.08 Backup And Restore Strategy. Here the subject is what the database actually does: snapshots, dumps, base backups, WAL/binlog shipping, and the restore path that makes them real.
 
-## How it works
+The failure that hurts is not "we forgot to enable backups." It is "we had backups and restore took fourteen hours longer than the outage window" or "the backup was silently incomplete for three weeks."
 
-The mechanism, step by step.
+## Physical versus logical
 
-## Tradeoffs
+| Kind | What you get | Strengths | Weaknesses |
+| --- | --- | --- | --- |
+| **Physical** (volume snapshot, base backup of data files) | Bytes on disk as the engine laid them out | Fast for large DBs; natural fit for PITR with WAL | Engine-version sensitive; harder to restore one table |
+| **Logical** (`pg_dump`, logical export) | SQL or rows | Portable, selectable tables, useful for migrations | Slow on huge datasets; longer consistency windows if naïve |
+
+Production systems often combine them: periodic physical base backup + continuous WAL/binlog archive for point-in-time recovery (PITR), plus occasional logical exports for selective restore or cross-version moves.
+
+## Consistency and the WAL
+
+A copy taken from a running database without coordination can capture torn pages — half-written blocks. Engines solve this with online backup modes, snapshot coordination, or copy-on-write volume snapshots that freeze a point in time at the storage layer while the engine continues. After a physical restore you replay **WAL** (or MySQL binlog, etc.) to roll forward to the target time — the same redo family discussed in 03.08 Database WAL And Recovery, now applied across backup boundaries.
+
+<Steps>
+  <Step title="Take a base backup">
+    Snapshot disks with engine-aware tooling, or run the engine's base-backup utility so page checksums and backup labels are consistent.
+  </Step>
+  <Step title="Archive the change stream continuously">
+    Ship WAL segments / binlogs to object storage as they complete. Gaps in the archive mean PITR holes — monitor archive lag as a paging condition.
+  </Step>
+  <Step title="Restore base, then replay">
+    Restore the snapshot or base backup to a clean instance, configure recovery to a timestamp or transaction id, apply archived WAL until that point.
+  </Step>
+  <Step title="Verify before cutover">
+    Checksums, row counts on critical tables, application smoke tests. Only then repoint traffic or declare the recovered instance primary.
+  </Step>
+</Steps>
+
+Logical dumps for large busy databases need dumps that are still consistent — transactional dumps or dump from a replica paused at a known LSN. Dumping from a lagging replica without recording *which* LSN you got leaves you unsure what you have.
+
+<Callout type="warn">
+Backing up only the primary's data volume while forgetting the WAL archive gives you crash-consistent-ish snapshots without fine-grained PITR. Backing up WAL without a recent base backup forces replay from ancient history — restore time explodes. Both pieces are required for practical PITR.
+</Callout>
+
+## What restore must handle
+
+- **Target choice** — latest consistent, or "one minute before the bad migration." PITR is how you undo destructive SQL; snapshots alone often cannot.
+- **Partial restore** — extract one table from logical backup or recover into a side cluster and copy out. Physical restore of a 10 TB fleet to fetch one table is painful; plan for it if it is a real support case.
+- **Users and roles, extensions, parameters** — logical restores miss cluster-global objects unless you export them; physical restores bring them along but may need connection string and topology surgery.
+- **Replication re-bootstrap** — after restore you usually rebuild replicas from the new primary rather than hoping old replicas reconcile.
+
+Encryption at rest for backup objects, separate accounts from production destroy credentials, and immutability/WORM options matter when the threat is ransomware that deletes the database *and* its backups with the same key.
+
+## Automation that catches silent failure
+
+Backup jobs must alert on failure **and** on success that is too small (size anomaly), archive lag, and age of latest restorable point. Schedule restores to a disposable environment on a cadence — weekly for critical systems is not excessive — and time them; that measurement is the real RTO input for 14.08.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Lean on physical + WAL PITR when"
+  againstTitle="Lean on logical dumps when"
+  forItems={[
+    "Database is large and restore-time budgets cannot afford full SQL replay of every row",
+    "You need point-in-time recovery to undo bad writes or schema accidents",
+    "Engine and version stay stable enough that data-file restores are supported",
+    "You already operate continuous WAL shipping with lag monitoring",
+    "Full-cluster recovery is the dominant scenario (disaster, corruption)",
+  ]}
+  againstItems={[
+    "You regularly need single-table or selective object restore into another environment",
+    "You are migrating across major engine versions where physical restore will not load",
+    "Dataset is small and dump/restore simplicity beats snapshot tooling",
+    "Compliance requires human-readable exports retained independently of the engine",
+    "You lack safe snapshot coordination and a logical transactional dump is the consistency tool you trust",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Separate mechanics from policy: "I take periodic consistent base backups, continuously archive WAL for PITR, and I measure restore by actually restoring." Name torn-page risk without engine-aware snapshots, and mention that backup success metrics must include archive completeness. If asked about a bad `DELETE`, the answer is PITR to just before the transaction — not "we have nightly dumps" alone.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Database backups are base copies plus a continuous change archive; either piece alone leaves a PITR or time gap",
+    "Physical backups restore large systems quickly; logical dumps trade speed for portability and selective restore",
+    "Online copies need engine-aware consistency — naïve file copy can capture torn pages",
+    "Restore is the product: verify data, rebuild replicas, and time the drill on production-sized data",
+    "Monitor backup failure, size anomalies, and WAL archive lag — silent incomplete archives are worse than loud failures",
+    "Encryption and isolated backup credentials matter when attackers target backups alongside production",
+  ]}
+/>

@@ -1,32 +1,92 @@
 ---
 title: "Mergeable Sketches For Analytics"
 number: "10.05"
-summary: "Mergeable Sketches For Analytics — notes in progress."
-status: draft
+summary: "Why sketches that combine by simple register algebra let you shard streams freely and still recover a global estimate without shipping raw events."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [sketches, mergeable, analytics, sharding]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Global analytics without a global stream
 
-What breaks without this, and the situation that forces the decision.
+Once traffic is sharded — by user id, by region, by Kafka partition — every interesting aggregate is split across machines. Exact answers then require either shipping every event to one reducer or maintaining a gigantic cross-shard key space. Both fight the reason you sharded in the first place.
 
-## How it works
+Mergeable sketches attack a narrower goal: keep a small summary on each shard, and define an associative combine operation so that `merge(sketch(A), sketch(B))` equals (or closely approximates) `sketch(A ∪ B)` without ever seeing the raw union. If the combine is also commutative and cheap, any reduce tree works — pairs of pods, then racks, then regions — and the final sketch is indifferent to the tree shape.
 
-The mechanism, step by step.
+That property is not automatic. A naive hash map of exact counters merges, but the merged map is as large as the union of keys. A sketch earns the word mergeable when the merged state stays the same fixed size as either parent.
 
-## Tradeoffs
+## What "merge" means for the common sketches
+
+| Sketch | Merge operation | Identical parameters required | Extra error from merge? |
+| --- | --- | --- | --- |
+| HyperLogLog — 10.04 | Per-register maximum | Same `m`, same hash | No beyond each side's own error |
+| Count-Min Sketch — 10.08 | Elementwise counter sum | Same `w`, `d`, same hashes | No beyond existing collision error |
+| Bloom filter — 04.13 | Bitwise OR | Same `m`, `k`, same hashes | False-positive rate can only worsen toward saturation |
+| t-digest — 10.11 | Concatenate centroids, recompress | Compatible compression | Small additional approximation |
+| Exact hash map | Key-wise sum / union | None | None, but size grows with union |
+
+The first three are the workhorses of sharded product analytics: unique counts, approximate frequencies, and membership. Reservoir samples (10.10) are trickier — merging two equal-probability samples of size `k` is not as simple as concatenation, and naive concat biases toward whichever stream was larger unless you reweight. Prefer structures whose algebra is documented before you bet a pipeline on ad-hoc merges.
+
+<Callout type="gotcha">
+Merging sketches built with different dimensions or different hash seeds is undefined. The cells do not line up. Teams discover this when one service deploys a "better" HLL precision and the global reduce starts mixing 12-bit and 14-bit register files — the merge either fails loudly or silently produces nonsense. Version the sketch parameters next to the data, the way you version event schemas.
+</Callout>
+
+## How a production reduce usually looks
+
+<Steps>
+  <Step title="Emit sketch updates on the hot path, not raw fan-in to analytics">
+    Each ingest worker maintains sketches for the dimensions it owns — HLL for unique users per day, CMS for query frequencies, maybe a Bloom filter for "seen event ids" in a window. Updates stay local to the worker's memory.
+  </Step>
+  <Step title="Flush sketches on a time or size boundary">
+    Every minute, or when a bucket closes, serialize the sketch bytes to object storage or a compact topic. The payload is kilobytes to low megabytes, not the raw event volume for that minute.
+  </Step>
+  <Step title="Reduce with the sketch's merge, in any associative order">
+    A job loads all shard sketches for the same time bucket and parameters, folds them with max/sum/OR, and writes one global sketch (or one sketch per business key like `campaign_id`). Partial reduces can run per region first.
+  </Step>
+  <Step title="Query the merged sketch; keep raw events elsewhere if you need replay">
+    Dashboards read the merged artifact. If someone later changes a filter definition, you need raw or lightly filtered events to rebuild — sketches do not resurrect dropped detail. 10.07 Raw Events Vs Derived Analytics is that split.
+  </Step>
+</Steps>
+
+Mergeability also composes with time. Independent sketches per five-minute bucket merge into an hour; hours merge into a day — as long as the underlying combine is valid for unions of the observed multisets. For Count-Min Sketch, summing bucket sketches estimates counts over the longer window; for HLL, register-wise max estimates distinct over the union (with the usual caveat that distinct over a week is not the sum of daily distincts — merge the HLLs, do not add the estimates).
+
+## When mergeability is the wrong promise
+
+Some analytics questions are not union-friendly. Medians of medians are not medians. Averages need sums and counts carried separately. Top-K lists from two shards are not the global top-K unless you keep enough candidates or use a sketch that supports the query after merge (CMS+heap rebuilt after merge, or a dedicated heavy-hitter structure). Say the algebraic identity out loud before you draw the reduce tree.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Design around mergeable sketches when"
+  againstTitle="Centralize exact aggregation when"
+  forItems={[
+    "Streams are already sharded and shipping every event to one counter is operationally painful",
+    "The metric you need has a known merge (HLL max, CMS sum, Bloom OR) with fixed-size state",
+    "Cross-region rollups must work with limited bandwidth — sketch bytes, not raw logs",
+    "You can standardize sketch parameters (width, depth, hash seed) across all producers",
+    "A small, characterized approximation error is acceptable after the final merge",
+  ]}
+  againstItems={[
+    "You need exact global counts, joins, or arbitrary drill-downs that sketches cannot answer",
+    "Producers cannot agree on sketch parameters, so merges would be meaningless",
+    "The statistic is not merge-friendly (naive median-of-medians, incorrect distinct-of-sums)",
+    "Cardinality and key spaces are small enough that exact maps merge cheaply anyway",
+    "Regulatory workflow demands a replayable event ledger as the only source of truth for that metric",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Frame the constraint first: "Events are partitioned across shards, so I will maintain a mergeable sketch per shard and reduce with the sketch algebra — HLL by register max, Count-Min by cell sum — instead of shipping raw events for every dashboard query." Then name the parameter contract (identical size and hashes) and one statistic that must not be merged naively. Follow-ups often ask how daily unique users relate to weekly: explain merging HLLs versus summing daily estimates, which double-counts users seen on multiple days.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "A sketch is mergeable when combining two summaries yields a fixed-size summary of the union, without retaining the union of raw keys",
+    "HyperLogLog merges by register-wise max; Count-Min Sketch by elementwise sum; Bloom filters by bitwise OR — each requires identical parameters and hash functions",
+    "Associative merges let you reduce in any tree order, which is what makes cross-shard and cross-region analytics practical at stream volume",
+    "Merging incompatible sketch versions produces undefined results — version precision and hash seeds like event schemas",
+    "Not every metric merges: summing HLL estimates overcounts multi-day users; medians and naive top-K lists need care or a post-merge recompute",
+    "Keep raw or filtered events when definitions may change; merged sketches are derived artifacts, not a substitute for replay",
+  ]}
+/>

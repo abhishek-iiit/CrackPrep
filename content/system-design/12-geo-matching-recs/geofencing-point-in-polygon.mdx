@@ -1,32 +1,105 @@
 ---
 title: "Geofencing Point In Polygon"
 number: "12.05"
-summary: "Geofencing Point In Polygon — notes in progress."
-status: draft
+summary: "The product problem of detecting that a device entered, exited, or currently sits inside a named region — delivery zones, campuses, surge polygons — and the system shape around that test."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 14
+tags: [geofencing, geospatial, events]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Radius search is not geofencing
 
-What breaks without this, and the situation that forces the decision.
+Nearby search asks: which points lie within distance `R` of this point? Geofencing asks a different product question: **is this point inside a named region**, and often **did it just enter or leave**?
 
-## How it works
+The region is a delivery catchment, a campus boundary, a municipal limit, a surge pricing polygon, a store floorplan, a no-fly zone. It is almost never a circle. Circles are a convenient special case; real fences are polygons with tens to thousands of vertices, sometimes with holes (a park inside a district you do not serve).
 
-The mechanism, step by step.
+Treating geofencing as "nearby with a big radius" produces wrong answers at every concave edge. Treating it as only an algorithm interview (ray casting, winding numbers) misses the system: how fences are authored, versioned, indexed, evaluated at ingest rate, and turned into events the rest of the product consumes. This lesson is that system. The geometric test itself is 12.06 Ray Casting Point In Polygon.
 
-## Tradeoffs
+## What the product actually needs
+
+Clarify which of these you are building — they share a PIP primitive and diverge everywhere else:
+
+- **On-demand containment.** At request time: "can we deliver to this address?" One point, many fences (or one fence). Latency-sensitive, often on the checkout path.
+- **Streaming enter/exit.** As locations arrive: emit `entered:zone_42` / `exited:zone_42`. Powers notifications, billing toggles, driver mode changes. Needs per-entity previous state.
+- **Batch enrichment.** Offline jobs tagging events with zone ids for analytics. Throughput over latency; eventual consistency fine.
+
+Also clarify **who owns the polygon**: ops tools drawing delivery zones, GIS imports of city boundaries, or algorithmically generated H3 unions. Authoring UX and validation (self-intersecting rings, wrong winding order) are part of the design, not polish.
+
+## System shape
+
+A durable **fence store** holds polygon geometries and metadata (name, active version, tenant, priority). A **spatial prefilter** turns "which fences could possibly contain this point" into a short list — bounding boxes, geohash/H3/S2 covers of each polygon (12.03), or an R-tree. An **exact PIP** step runs only on that short list (12.06). An optional **state machine** per entity remembers last zone set to detect transitions. An **event sink** (queue or bus) fans out enter/exit to billing, push, and matching.
+
+<Steps>
+  <Step title="Author and version the fence">
+    Validate geometry, compute a bounding box and a cell cover at a chosen resolution, store immutable version ids. Hot path reads should pin a version so a zone edit mid-flight does not split an enter from its exit.
+  </Step>
+  <Step title="Prefilter candidate fences for a point">
+    Point-in-bounding-box, or point-in-covering-cells against an inverted index of `cell → [fence_ids]`. Without this, every location ping tests every polygon in the city — fine at twenty fences, fatal at twenty thousand.
+  </Step>
+  <Step title="Exact point-in-polygon">
+    Run ray casting or an equivalent on each candidate. Respect holes and multi-polygons. Cache compiled fences in memory on the evaluator service so you are not parsing GeoJSON on every ping.
+  </Step>
+  <Step title="Diff against previous membership">
+    For streaming fences: load last zone set for the entity (Redis hash, wide-column row). Emit enter for new ids, exit for missing ones. Idempotent event keys `(entity_id, fence_id, version, transition_id)` save you from double billing on retries.
+  </Step>
+  <Step title="Handle flapping at boundaries">
+    GPS noise near an edge causes rapid enter/exit chatter. Hysteresis (require N consecutive samples inside), dwell timers, or a buffer band around the boundary are product choices with real billing impact — name them explicitly.
+  </Step>
+</Steps>
+
+## Capacity and placement
+
+Location pings at 5,000/s with an average of three candidate fences and a PIP cost of a few microseconds to tens of microseconds per polygon (vertex-count dependent) is usually CPU-cheap compared to network and state lookup. The expensive parts are **candidate fan-out** when covers are too coarse, and **state reads** for enter/exit if you hit a remote store on every ping.
+
+Evaluate PIP on the ingest path when enter/exit must be low-latency. Evaluate asynchronously from a location log when the consumer can wait seconds. Checkout-style containment often lives in the request path with fences cached in the API process.
+
+## Overlapping fences and priority
+
+Real cities stack fences: a citywide service area, a surge hex union, a restaurant's delivery polygon, a restricted zone. Define precedence rules up front — most specific wins, highest priority flag wins, or return *all* matching ids and let the consumer decide. Returning a single Boolean "inside something" is rarely enough for billing.
+
+| Approach | Returns | Use when |
+| --- | --- | --- |
+| First match by priority | One fence | Exclusive zones (one service area) |
+| All matches | Set of fence ids | Stacked products (surge + delivery + tax jurisdiction) |
+| Most specific (smallest area / highest resolution cell) | One fence | Nested admin boundaries |
+
+<Callout type="gotcha">
+A bounding-box prefilter alone is a notorious false-friend for long diagonal or crescent-shaped zones: the box is huge, candidates explode, and you discover it at peak when a popular area's box covers half the metro. Prefer cell covers (S2/H3/geohash) sized to the polygon's actual footprint, and monitor candidate-set size as a first-class metric.
+</Callout>
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Build a geofence evaluation path when"
+  againstTitle="Stick to radius / cell membership when"
+  forItems={[
+    "Business rules are defined on named irregular regions that circles misrepresent",
+    "Enter/exit transitions drive billing, notifications, or mode changes",
+    "Fence counts are large enough to need a prefilter index, not a linear scan",
+    "Ops must edit boundaries without redeploying application code",
+    "Overlapping regions with explicit priority are part of the product",
+  ]}
+  againstItems={[
+    "A circle or single H3 cell is an accepted product approximation — nearby search (12.01) is enough",
+    "You have a handful of static boxes and a linear PIP scan already clears the budget",
+    "The team cannot operate fence authoring, versioning, and flapping policy",
+    "Points are only used for display on a map with no containment semantics",
+    "All 'regions' are already exact cell ids and membership is cell-id equality",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Separate the product from the algorithm in the first sentence: "Geofencing is containment and optionally enter/exit against versioned polygons; I will prefilter with cell covers, exact-test with PIP, and emit transitions with hysteresis." Do not start at ray casting unless asked — that is 12.06. Be ready for overlap policy, GPS flapping, and where evaluation runs (sync vs async).
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Geofencing answers containment and enter/exit for named regions; it is not a radius nearby query with different branding",
+    "Production paths always pair a spatial prefilter (bbox or cell cover) with an exact PIP test — never scan every fence every time",
+    "Version fences and pin versions on the hot path so edits do not corrupt enter/exit pairs",
+    "Streaming geofences need per-entity previous membership plus idempotent transition events",
+    "Boundary flapping from GPS noise needs an explicit hysteresis or dwell policy, especially for billing",
+    "Define overlap semantics (all matches vs priority vs most specific) before writing the evaluator",
+  ]}
+/>

@@ -1,32 +1,105 @@
 ---
 title: "Soft Delete"
 number: "03.13"
-summary: "Soft Delete — notes in progress."
-status: draft
+summary: "Marking a row deleted instead of removing it buys an undo window and an audit trail, and quietly breaks every unique constraint it touches."
+status: published
 free: true
 difficulty: core
 estMinutes: 12
+tags: [soft-delete, constraints, data-retention]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Deleting a row is not the same as making it disappear
 
-What breaks without this, and the situation that forces the decision.
+A hard `DELETE` is honest about what it does: the row is gone, immediately, and anything that depended on it finding out finds out fast — a foreign key cascades, a constraint fires, an error surfaces right where the mistake was made. That honesty is also the cost. There is no undo. A user who deleted the wrong record, an admin action that cascaded further than intended, an audit requirement that says the record has to be reconstructible a year later — none of those are compatible with the row simply not existing anymore.
 
-## How it works
+Soft delete trades that honesty for a recovery window: instead of removing the row, you mark it. Add a `deleted_at` timestamp, or a boolean flag, and a "delete" becomes an ordinary `UPDATE`. The row is still there, in the same table, exactly where it always was — nothing about storage or foreign keys changes automatically, which is precisely the source of every failure mode below.
 
-The mechanism, step by step.
+## What has to change everywhere, not just where you added the flag
 
-## Tradeoffs
+<Steps>
+  <Step title="Add the column">
+    A nullable `deleted_at TIMESTAMP`, or an `is_deleted BOOLEAN` — the timestamp version is usually preferable, since it records *when* for free, which a boolean does not.
+  </Step>
+  <Step title="Turn deletes into updates">
+    The application's delete operation becomes `UPDATE ... SET deleted_at = now()` instead of `DELETE`. This part is easy and it is not where the risk lives.
+  </Step>
+  <Step title="Filter every read path">
+    Every query against the table — every listing, every admin panel, every join, every scheduled job, every analytics query, every ORM default scope — now has to remember to add `WHERE deleted_at IS NULL`. This is the part that is easy to get right once and forget everywhere else.
+  </Step>
+  <Step title="Fix the constraints that assumed the row was really gone">
+    A unique constraint and a foreign key both behave as if every row in the table is live. Soft delete violates that assumption the moment a "deleted" row's unique value needs to be reused, covered below.
+  </Step>
+  <Step title="Handle cascades by hand">
+    `ON DELETE CASCADE` never fires, because no `DELETE` statement was ever issued. Any cleanup that used to be automatic now has to be application logic or a trigger.
+  </Step>
+  <Step title="Purge on a retention schedule">
+    Soft-deleted rows accumulate forever unless something removes them eventually. That something is usually a separate, deliberate hard-delete job running against old soft-deleted rows.
+  </Step>
+</Steps>
+
+A missed filter in step three is not a crash. It is a "deleted" user reappearing in a report, a removed listing showing up in search results, or worse, a deactivated account still being billable — because somewhere, one query out of the dozens that touch this table never got the `WHERE` clause added. There is no error to catch this; the query runs fine and returns a row that should not exist anymore.
+
+## Soft delete breaks unique constraints, specifically
+
+This is the failure that surprises people who have not hit it before. Take a `users` table with `UNIQUE(email)`. A user is soft-deleted — `deleted_at` is set, the row stays. Someone else, or the same person, tries to sign up again with that email. The unique constraint fires, because as far as the database is concerned that email is still taken: the row holding it was never actually removed.
+
+The fix in Postgres is a partial unique index, scoped to only the live rows:
+
+```sql
+CREATE UNIQUE INDEX users_email_unique
+  ON users (email)
+  WHERE deleted_at IS NULL;
+```
+
+Uniqueness is now enforced only among rows that have not been soft-deleted, which is what you actually meant by "unique" in the first place. On a table already carrying production traffic, this index has to be built without locking out writes — 03.11 Online Indexing covers exactly that build, and it applies here without modification.
+
+<Callout type="gotcha">
+MySQL, which historically lacks partial indexes, cannot express "unique among live rows" directly. A common workaround is a generated column that evaluates to the natural key when the row is live and to `NULL` (or a value derived from the primary key, to keep it distinct per row) when it is soft-deleted, with a plain unique index over that generated column — because MySQL's unique indexes, like most engines', treat `NULL` as never conflicting with anything, including another `NULL`. It works, but it is a workaround built around a NULL-handling quirk rather than a direct expression of the intended constraint, and it is worth naming as a specific technique rather than assuming partial indexes are universally available.
+</Callout>
+
+## Foreign keys, index bloat, and the retention window that never arrives
+
+`ON DELETE CASCADE` is defined in terms of an actual `DELETE` statement. Soft-deleting the parent row never issues one, so nothing about a foreign key relationship changes automatically: dependent rows keep pointing at a parent that is semantically gone but structurally present, and any cleanup that was meant to cascade has to be reimplemented explicitly — in application code, or a trigger that fires on the `deleted_at` update instead of on an actual delete. Skip this and you get orphaned-in-spirit rows that still pass every foreign key check, because the row they reference technically still exists.
+
+Table and index growth is the slower-burning cost. A table that never truly loses rows only grows, and every index on it — unless it is a partial index scoped to live rows the way the unique index above is — grows along with it, including for rows nobody will ever query again. This does not present as an error. It presents as a query that runs fine in staging and gets slower every quarter in production, even though the number of *live* rows a user actually cares about has stayed flat, because the index the planner is walking has been silently carrying a growing tail of soft-deleted rows the whole time.
+
+The retention question soft delete raises but does not answer is what eventually removes these rows for good. Left alone, a soft delete is not a deletion policy — it is a promise to delete later, and later needs an actual job: a scheduled hard-delete of rows soft-deleted more than some retention period ago. 14.10 Data Retention And Deletion and 14.11 Privacy And Data Retention cover that policy layer directly, and the distinction matters legally as well as operationally — a right-to-be-forgotten request is not satisfied by `deleted_at` being set, because the personal data is still physically present in the table and likely in backups too. Soft delete buys the recovery window; a real hard delete on a schedule is what actually satisfies an erasure requirement.
+
+An alternative worth naming rather than defaulting past: instead of a flag on the live table, move deleted rows into a separate archive or tombstone table. The live table stays small and every read path is correct by construction, because deleted rows are not there to forget to filter — the cost shifts to a cross-table move operation on delete, and to foreign keys that now have to tolerate a parent living in a different table than its children expect. 04.14 Hot And Cold Storage Archival covers the general pattern of moving data out of the hot table on a lifecycle basis, which is the same idea applied more broadly than just "deleted."
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Reach for soft delete when"
+  againstTitle="Hard delete (or a separate archive table) when"
+  forItems={[
+    "Users need an undo window for their own delete actions, not just an admin restoring from backup",
+    "Audit or compliance requirements need the record's history reconstructible after it is logically gone",
+    "Other rows reference this one and an immediate hard delete would cascade further than intended, or fail on a restrictive foreign key",
+    "The volume of deletes is low enough that table and index growth from retained rows stays manageable",
+    "You are prepared to add a partial unique index wherever uniqueness matters and to build a real purge job for eventual retention",
+  ]}
+  againstItems={[
+    "A legal erasure requirement exists, where 'flagged but still present' does not satisfy the obligation and only a real hard delete (eventually) does",
+    "Every read path forgetting the filter even once is an unacceptable risk — a smaller, always-correct live table beats a larger one everyone has to remember to filter",
+    "Delete volume is high enough that the live table and its indexes would carry a permanently growing tail of rows nobody queries",
+    "A separate archive or tombstone table is affordable to build, and the correctness of never needing to filter is worth the extra move-on-delete step",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Introduce soft delete by the guarantee you are buying, not the column you are adding: "I'd keep the row and set a `deleted_at` instead of deleting it, so support can restore an accidental delete and we keep an audit trail — the cost is every query on this table now needs to filter it, and unique constraints need to be scoped to live rows only." Naming the unique-constraint break unprompted is the detail that signals you have actually hit this in production rather than read about the pattern in the abstract.
 
-<KeyTakeaways items={["", "", ""]} />
+If asked about GDPR or a similar erasure requirement, say plainly that soft delete does not satisfy it on its own — the data is still there — and that the real answer is a scheduled hard delete after a retention window, with soft delete providing the short-term recovery buffer in front of it.
+
+<KeyTakeaways
+  items={[
+    "Soft delete replaces a DELETE with an UPDATE that sets a deleted_at column, keeping the row in place for recovery and audit purposes",
+    "Every read path against the table must filter deleted_at IS NULL, and a single missed filter is a silent data leak with no error to surface it",
+    "A unique constraint has to be rescoped to a partial index over live rows only, or a soft-deleted row's value stays permanently unavailable for reuse",
+    "ON DELETE CASCADE never fires against a soft delete, since no DELETE statement runs, so cascading cleanup has to be handled explicitly",
+    "Soft-deleted rows accumulate forever without a separate hard-delete job, bloating indexes and tables in a way that looks like slow, unexplained degradation rather than an error",
+    "Soft delete alone does not satisfy a right-to-be-forgotten or similar erasure requirement, because the data is still physically present until a real hard delete removes it",
+  ]}
+/>

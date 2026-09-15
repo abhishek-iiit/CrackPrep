@@ -1,32 +1,88 @@
 ---
 title: "Distributed Locks And Leases"
 number: "06.08"
-summary: "Distributed Locks And Leases — notes in progress."
-status: draft
+summary: "Why mutual exclusion across machines needs a time bound, not just a flag, and why a lock without an expiry cannot survive a paused or crashed holder."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [locking, leases, coordination]
+updated: "2026-09-15"
 ---
 
-## The problem
+## A local mutex has a guarantee a network can't give you
 
-What breaks without this, and the situation that forces the decision.
+A mutex on one machine works because the runtime enforces two things at once: only one thread can hold it, and the operating system will not let the holder be silently swapped out and reappear somewhere else pretending nothing happened. When thread A holds the lock, thread B's attempt to acquire it blocks, full stop. There is no window in which both believe they hold it.
 
-## How it works
+Take the same idea across a network and both guarantees weaken. "Acquire the lock" is now a message to some other process — a database row, a ZooKeeper znode, a Redis key — and "hold the lock" means nothing more than that process still has a flag set on your behalf. Nothing stops your own process from being paused: a garbage collection pause, a hypervisor stealing your CPU to service another tenant, a laptop going to sleep mid-request, a slow disk write blocking the thread that was supposed to keep working. Pauses like this are not rare edge cases — a stop-the-world GC pause stretching into the hundreds of milliseconds, occasionally seconds, is unremarkable under memory pressure on a JVM, and a network partition can isolate a perfectly healthy process for just as long. A lock with no expiry cannot distinguish "the holder is still working" from "the holder died and never let go." Every other client is stuck waiting on a promise from a process that may no longer exist.
 
-The mechanism, step by step.
+## Turn the lock into a lease
 
-## Tradeoffs
+The fix is to stop granting the lock forever and start granting it *until a deadline*. A **lease** is a lock with a time-to-live: the holder gets exclusive access until the lease expires, and if it wants to keep working past that point it must renew the lease before the deadline, not after. Miss the renewal and the lock service treats the holder as gone — it releases the lease and lets someone else acquire it, without needing to know whether the original holder crashed, partitioned, or is merely slow. The lease turns an unbounded liveness problem ("wait for the holder to explicitly release") into a bounded one ("wait at most until the TTL expires").
+
+This is the mechanism Google's Chubby lock service formalized, and that ZooKeeper and etcd both implement under different names — ZooKeeper ties a lock to a **session**, which expires if the client's heartbeats stop arriving within the session timeout; etcd attaches an explicit **lease** object with a TTL to a key, and the client must send periodic keep-alives or the key is deleted. Both are the same idea: possession is conditional on a heartbeat, not a one-time grant.
+
+<Steps>
+  <Step title="Acquire">
+    The client asks the lock service for the lease on a named resource — typically a conditional write: create this key only if it does not already exist, or compare-and-swap a version number. Success means the client now holds the lease until `now + TTL`.
+  </Step>
+  <Step title="Do the work, and heartbeat concurrently">
+    The client proceeds with the critical section — writing to a shared resource, acting as the leader, whatever the lease was guarding — while a background thread sends periodic keep-alives well inside the TTL window, refreshing the deadline.
+  </Step>
+  <Step title="Renew before the deadline, every time">
+    A successful renewal extends the lease to `now + TTL` again. The margin between "renew" and "expire" has to absorb normal jitter — a renewal that lands 50ms before expiry on a lease with a 10-second TTL is fine; a client that only tries to renew after the deadline has already lost the lease and does not know it yet.
+  </Step>
+  <Step title="Release, or let it expire">
+    A clean shutdown releases the lease explicitly. A crash or a long enough pause does nothing — the lock service simply stops seeing heartbeats and lets the TTL run out, at which point the lease is free for the next client.
+  </Step>
+</Steps>
+
+## The TTL is a bet on how long a pause can get
+
+The lease fixes the case where the holder is simply gone. It does not fix the case where the holder is *not gone but paused* — suspended for longer than the TTL, then resumed, still convinced it holds the lease, and still sending requests to whatever it was protecting. Nothing about acquiring a lease prevents this: the client checked out a deadline, not a promise that its own scheduler would cooperate. If the pause outlasts the TTL, a second client can legitimately acquire the same lease and start working while the first one — unaware time has passed — is still mid-write.
+
+This is not a corner case to wave away. It is the reason a lease alone is a liveness mechanism, not a correctness mechanism: it guarantees the system does not deadlock forever on a dead holder, but by itself it does not guarantee only one client ever acts as though it holds the resource. Closing that gap needs the resource being protected to reject stale holders itself — a fencing token, which 06.09 Redis Redlock And Fencing Tokens covers as the actual fix, alongside a specific, well-known disagreement about how much a lease's timing assumptions can be trusted in practice.
+
+<Callout type="gotcha">
+Shortening the TTL does not make this safer, it makes it worse in a different way. A short TTL means more frequent renewals, which means more chances for a transient network hiccup to be mistaken for a dead holder — the lock flaps between clients under exactly the conditions (network stress) when you most need it to hold steady. A long TTL means a genuinely dead holder blocks everyone else for longer. There is no TTL that avoids both failure modes; there is only a choice of which one you would rather have, sized against your actual pause and network-jitter distribution rather than a round number.
+</Callout>
+
+## Where the lease itself lives matters
+
+A lease is only as trustworthy as the store granting it. A single database row with an `expires_at` column is a lease in spirit, and it is fine for low-stakes coordination — but it inherits that database's own availability story, and a naive read-then-write acquisition race (two clients both see the row as expired and both write) needs a real conditional update (`UPDATE ... WHERE expires_at < now()` with the affected-row-count as the success signal, or an equivalent compare-and-swap) to avoid two winners. A purpose-built coordination service — ZooKeeper, etcd, Chubby — replaces that with a system built on consensus (06.06 Consensus) specifically so that "who currently holds the lease" has one agreed-upon answer even while individual nodes fail, which is a stronger guarantee than a single database instance can give on its own. 06.07 Leader Election is the same primitive pointed at a different job: instead of guarding a critical section, the lease decides who gets to act as leader until the TTL says otherwise.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Use an external lease when"
+  againstTitle="A plain lock (or no lock) is enough when"
+  forItems={[
+    "The critical section spans a network call or a background job, so a thread-local or single-process mutex cannot see the whole operation",
+    "The holder can crash or partition mid-operation, and the system must recover access automatically rather than wait for a human to clear a stuck lock",
+    "Multiple independent processes across machines need mutual exclusion over a shared external resource — a job, a partition, a leader slot",
+    "You can afford the TTL's tradeoff — a short unavailability window after a crash, in exchange for automatic recovery",
+    "The resource being protected can enforce a fencing token, so a stale holder that wakes up late gets rejected rather than silently corrupting state",
+  ]}
+  againstItems={[
+    "Everything touching the resource lives in one process, where a language-level mutex or semaphore already gives exact guarantees",
+    "The operation is naturally idempotent or already safe under concurrent execution — the lock would be overhead protecting nothing",
+    "A database's own transaction isolation already serializes the operation (03.06 Database Locking And Isolation) without a separate coordination layer",
+    "The cost of two workers occasionally doing the same job twice is cheaper than the lock service's own availability risk — e.g. an idempotent cache warm rather than a billing charge",
+    "You cannot bound how long a pause can get, and the system genuinely cannot tolerate two holders even briefly — that calls for fencing at the resource, not just a shorter TTL",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Introduce the lease before the lock: "I need mutual exclusion across processes, so I will use a lease with a TTL from a coordination service, not a bare lock — that way a crashed holder does not block everyone else forever." Expect the immediate follow-up: what stops a paused holder from waking up after its lease expired and still acting? Answer it before it is finished being asked — a lease bounds *liveness*, not *safety*, and safety needs the protected resource to check a fencing token, not just trust that whoever is asking currently holds the lease.
 
-<KeyTakeaways items={["", "", ""]} />
+Naming the TTL sizing tradeoff unprompted is worth more than getting the mechanism right: a short TTL trades false expirations under network jitter for faster recovery from a real crash, a long TTL trades the reverse, and the right answer is "sized against the actual pause distribution of this system," not a number picked because it looked reasonable.
+
+<KeyTakeaways
+  items={[
+    "A local mutex relies on the OS never letting a paused holder resume without noticing; a network cannot make that promise, so a lock with no expiry cannot tell a slow holder from a dead one",
+    "A lease is a lock with a TTL: possession requires periodic renewal, and a missed renewal releases the resource automatically instead of blocking everyone forever",
+    "The TTL is a tradeoff, not a safety margin — shorter risks false expirations under jitter, longer risks blocking on a genuinely dead holder longer",
+    "A lease bounds liveness, not correctness: a holder paused longer than the TTL can resume believing it still owns the resource while someone else has already acquired it",
+    "Coordination services like ZooKeeper, etcd, and Chubby back leases with consensus so there is one agreed answer to 'who holds it' even as individual nodes fail",
+    "A lease alone does not stop a stale holder from acting after it wakes up — that gap is closed by fencing tokens at the resource itself, covered in 06.09 Redis Redlock And Fencing Tokens",
+  ]}
+/>

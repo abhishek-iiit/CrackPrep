@@ -1,0 +1,101 @@
+---
+title: "Invert Binary Tree"
+number: "02.12"
+summary: "Swap every node's left and right pointers — one post-order or pre-order pass rewires the whole tree."
+status: published
+free: true
+difficulty: intro
+estMinutes: 9
+tags: [binary-tree, dfs, recursion]
+updated: "2026-09-15"
+---
+
+## Flip every edge downward
+
+Given a binary tree root, invert it: every node's left and right children swap. The root stays in place; the shape mirrors across the vertical axis through the root.
+
+Example: `4 / 2,7 / 1,3,6,9` becomes `4 / 7,2 / 9,6,3,1`. An empty tree stays empty. A single node stays a single node.
+
+There is no optimization puzzle here — you must touch every node once. The failure mode is **partial inversion**: swapping at the root but forgetting deeper levels, or swapping then losing a pointer because you did not save references before reassignment. The algorithm is O(n); the interview tests whether you can write a clean tree traversal without dropping a child.
+
+## Swap at each node, then recurse
+
+For each node, exchange `left` and `right`. Then invert the new left subtree and the new right subtree (order of the two recursive calls does not matter if you swap first at the current node).
+
+Alternatively, recurse first then swap at the current node — also correct. Pick one order and stay consistent.
+
+<Steps>
+<Step title="Null guard">
+  If root is null, return null — nothing to invert.
+</Step>
+<Step title="Swap children">
+  `[root.left, root.right] = [root.right, root.left]`.
+</Step>
+<Step title="Recurse into both subtrees">
+  Call invert on the new left and new right; return root.
+</Step>
+</Steps>
+
+BFS level-order also works: enqueue nodes, swap each node's children when visited. Same O(n) time, different space profile.
+
+## Solution
+
+```ts
+class TreeNode {
+  val: number;
+  left: TreeNode | null;
+  right: TreeNode | null;
+  constructor(val?: number, left?: TreeNode | null, right?: TreeNode | null) {
+    this.val = val ?? 0;
+    this.left = left ?? null;
+    this.right = right ?? null;
+  }
+}
+
+function invertTree(root: TreeNode | null): TreeNode | null {
+  if (root === null) return null;
+
+  [root.left, root.right] = [root.right, root.left];
+  invertTree(root.left);
+  invertTree(root.right);
+  return root;
+}
+```
+
+Time **O(n)** — every node visited once. Space **O(h)** recursion stack, O(n) worst on a skewed tree; iterative queue is O(w) where w is max width.
+
+<Tradeoff
+  forTitle="Recursive swap-down when"
+  againstTitle="Iterative BFS when"
+  forItems={[
+    "Tree height is moderate and stack overflow is not a concern",
+    "You want the shortest correct code in a timed interview",
+    "In-place pointer swap is allowed — no new nodes needed",
+    "You are chaining into mirror-check problems (invert then compare to another tree)",
+    "DFS post-order or pre-order both work; pick the one you can explain cleanly",
+  ]}
+  againstItems={[
+    "Tree is extremely deep — explicit queue avoids stack limits",
+    "Interviewer asks for level-by-level output while inverting (combine with 02.14)",
+    "You must invert a threaded tree without breaking thread pointers — swap logic changes",
+    "Functional style requires building new nodes instead of mutating — recursion with new TreeNode copies",
+    "Memory profiling shows stack frames dominating on wide shallow trees (rare, but BFS is predictable)",
+  ]}
+/>
+
+## In an interview
+
+Draw a three-node example. Confirm you may mutate the tree in place and return the root. Say: "At each node I swap left and right, then recurse on both subtrees."
+
+Mention the null base case first so you do not call swap on a missing node. Common bug: swapping children of null after a bad guard, or returning a new root when the problem expects the same root reference.
+
+Follow-ups: invert only every other level; invert a subtree bounded by depth; check whether two trees are mirrors (invert one, then 02.11 Same Tree).
+
+<KeyTakeaways items={[
+  "Inverting a binary tree means swapping left and right at every node exactly once.",
+  "Mutate pointers in place — O(n) time, O(h) stack for DFS.",
+  "Swap at the current node, then recurse; order of recursive calls does not matter after the swap.",
+  "Empty tree and single-node tree are already valid inversions — handle null early.",
+  "BFS with a queue is equivalent if you prefer iterative traversal or fear stack depth.",
+  "Invert-then-compare reduces mirror-equality to 02.11 Same Tree.",
+]} />

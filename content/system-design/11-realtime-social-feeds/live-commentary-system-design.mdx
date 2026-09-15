@@ -1,32 +1,116 @@
 ---
 title: "Live Commentary System Design"
 number: "11.12"
-summary: "Live Commentary System Design — notes in progress."
-status: draft
+summary: "How live comments survive huge concurrent writers, stay ordered enough to read, and fan out to viewers without turning one match into one database row."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: deep
+estMinutes: 18
+tags: [live, comments, realtime, fanout]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Everyone talks at once at the same match
 
-What breaks without this, and the situation that forces the decision.
+Live commentary — match threads, premiere chats, launch-day posts with a roaring comment box — is a different shape from ordinary post comments. Ordinary comments are a write-light, read-heavy append log on a quiet post. Live commentary is a write storm: tens of thousands of users submitting at once, hundreds of thousands reading the stream, all keyed to one room id. A naive `INSERT INTO comments (post_id, …)` plus `SELECT … WHERE post_id = ? ORDER BY created_at` on a primary database collapses in two ways at once — hot partition on write (04.06 Hot Partitions) and a read path that cannot page fast enough for clients polling or reconnecting mid-event.
 
-## How it works
+The design goals conflict if you treat them as one system: durable archive of what was said, low-latency fan-out of new lines to connected viewers, enough ordering that the conversation is readable, and moderation that can remove a line without rebuilding history. Real systems split **ingest**, **live distribution**, and **durable history**, and they accept that "live" ordering is causal enough for chat, not a global total order across regions.
 
-The mechanism, step by step.
+Transport choices (WebSocket vs SSE vs long poll) live in 11.02–11.04. This lesson assumes you can push bytes to connected clients and focuses on what those bytes represent and where they are stored.
 
-## Tradeoffs
+## Capacity sketch for one hot room
+
+Round numbers for a large live event — order-of-magnitude, not a benchmark. 500k concurrent viewers, 1% actively commenting in a peak minute → 5k writers. If each active commenter sends 2 comments/minute at peak, that is ~10k comments/min ≈ ~170 comments/s sustained to one logical room, with bursts several times higher when a goal drops. Each comment might be ~200 bytes of text plus metadata → tens of KB/s of raw text, trivial as bandwidth, brutal as single-row contention if every write locks the same parent post row or the same database partition.
+
+On the read/fan-out side, 500k clients receiving each comment is 500k × 170 ≈ 85M message-deliveries/minute if you naively broadcast every comment to everyone — ~1.4M deliveries/s. That number is why live commentary almost never means "the API server loops all sockets itself" for big rooms: you need a pub/sub or gateway tier that fans out by room channel, and often a sampling or slow-mode policy so the stream stays human-readable.
+
+## Three layers that must not be one table
+
+| Layer | Job | Typical mechanism |
+| --- | --- | --- |
+| Ingest | Accept, auth, rate-limit, assign id, durably record | Stateless API → queue or log; id from Snowflake (04.10) |
+| Live distribution | Push new comments to subscribers of `room_id` | Redis Pub/Sub, Kafka room topic, specialized realtime gateway |
+| History / catch-up | Replay recent window for joiners and refresh | Per-room recent list (Redis ZSET / memory cache) + cold store for archive |
+
+<Steps>
+  <Step title="Ingest validates and rate-limits before any fan-out">
+    Authenticate, check the user may write to the room, apply slow-mode or per-user token buckets (14.13 Rate Limiter Placement And Keys). Reject or queue overload rather than letting a bot army own the partition. Assign a monotonic-ish id for ordering.
+  </Step>
+  <Step title="Persist intent durably, then publish to the room channel">
+    Append to a durable log or comments store partitioned by `room_id` (and often by time bucket). Publish a compact payload `{id, user, text, ts}` to the room's live channel. If you publish before durability, reconnects invent gaps; if you only write SQL and expect every client to poll, you will not hit live latency at this fan-out.
+  </Step>
+  <Step title="Gateways fan out to local subscribers">
+    Each realtime server holds a subset of sockets, subscribed by room. Pub/sub delivers once per server (or per shard), then locally to sockets — not once per global viewer from the writer. Scale gateways horizontally; shard rooms across pub/sub partitions if one channel's throughput saturates a node.
+  </Step>
+  <Step title="Catch-up uses a recent buffer, not a full table scan">
+    On join or reconnect, clients fetch `ZRANGE room:{id}:recent` by id/time (last N comments or last T minutes), then attach to the live stream and dedupe by id. Deep history ("load earlier") goes to cold storage with keyset pagination (04.12 Keyset Pagination), not to the hot path.
+  </Step>
+</Steps>
+
+```text
+client POST /rooms/{id}/comments
+  -> API: rate limit, create comment_id
+  -> durable append (partition = room_id)
+  -> PUBLISH room:{id}  {comment_id, user, text, ts}
+  -> 202 + comment_id
+
+client WS subscribe room:{id}
+  <- snapshot recent N
+  <- stream of PUBLISH payloads (dedupe by comment_id)
+```
+
+## Ordering, gaps, and moderation
+
+**Ordering.** Use server-assigned ids (Snowflake, ticket server from 03.09 Database Ticket Servers, or a per-room sequence). Client timestamps lie under clock skew (04.11 Clock Skew And ID Ordering). Per-room sequences give dense order but need a sequencer; Snowflake gives global uniqueness with rough time order — usually enough for commentary.
+
+**Gaps.** At-least-once delivery to gateways means clients see duplicates; idempotent display by `comment_id` is mandatory. Lost pub/sub messages mean the live stream skipped a line — reconnect catch-up from the recent buffer fills gaps for anyone who refreshes; purely ephemeral pub/sub without a buffer cannot.
+
+**Moderation and deletes.** Tombstone by id: live clients receive `{type: delete, id}`, history buffers drop or mark deleted, cold store soft-deletes. Do not rewrite the entire recent list. Shadowban and block lists filter on ingest or on each viewer's gateway path — filtering only at write leaves blocked users still receiving each other's messages if you are not careful.
+
+**Slow mode and sampling.** When rate exceeds what humans can read, products throttle writers (one comment per N seconds) or sample what default viewers see (show every k-th comment, or prefer verified / high-reputation). The full durable log can still keep everything for VOD-style replay. Say this as a product lever, not only a fairness lever — it protects the fan-out tier too.
+
+<Callout type="warn">
+Pinning live commentary to the same storage and request path as cold post comments invites a self-DoS: one viral room takes down comment reads for the entire site. Isolate hot rooms — separate cluster, separate Redis, partition keys that include `room_id`, and load-shed ingest for that room (02.13 Load Shedding) before the shared data plane melts.
+</Callout>
+
+## Reactions and presence in the same room
+
+Live rooms often mix comments with emoji reactions and viewer counts. Reactions at broadcast scale belong to the approximate / sharded counter world of 10.13 Live Reactions High Throughput Design and 11.10 Reaction Modeling — do not insert an edge row per flying emoji if the UI only needs a burst animation and a coarse count. Presence ("12.4k watching") is a sampled counter or HyperLogLog-style estimate updated every few seconds, not a precise roster at half a million sockets.
+
+Keep the comment path strict (durable, attributable) and the sugar paths lossy on purpose. Conflating them is how a reaction stampede blocks actual commentary ingest.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Split ingest / pub-sub / recent-buffer when"
+  againstTitle="Stick to request-response SQL comments when"
+  forItems={[
+    "Concurrent writers and viewers share one room at scales where a single DB partition or poll loop cannot keep up",
+    "Viewers expect sub-second appearance of new lines without refreshing",
+    "Reconnects and late joiners need a short catch-up window without scanning cold storage",
+    "You must isolate hot rooms from the rest of the product's comment traffic",
+    "Moderation deletes must propagate live as tombstones, not as full history rewrites",
+  ]}
+  againstItems={[
+    "Audience is small (hundreds) and a primary database plus short polling already meets the latency bar",
+    "Comments are not 'live' — asynchronous discussion on a static post is the product",
+    "You cannot yet operate a realtime gateway tier, and volume does not justify it",
+    "Strict cross-region total order matters more than fan-out (rare for commentary; closer to finance ledgers)",
+    "Durability of every ephemeral 'wow' reaction is required — wrong tool; that is a different pipeline",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Frame the room as a hot key from the first minute: "I will not put peak live commentary on the shared comments table alone — ingest assigns an id, appends durably by room, publishes to a room channel, and catch-up reads a recent buffer." Do the delivery arithmetic once so they see why app servers cannot foreach sockets.
 
-<KeyTakeaways items={["", "", ""]} />
+Pre-empt: slow mode, delete tombstones, dedupe by id, isolation from cold comments, and lossy reactions/presence. If asked WebSocket vs SSE, pick one briefly and return to the data plane — transport is not the hard part at this scale; hot-key ingest and fan-out are.
+
+<KeyTakeaways
+  items={[
+    "Live commentary fails as a hot partition and a fan-out problem long before raw text bandwidth matters",
+    "Split durable ingest, room pub/sub distribution, and a recent catch-up buffer — one SQL table cannot be all three at event scale",
+    "Server-assigned ids plus client-side dedupe handle ordering and at-least-once delivery; client clocks do not",
+    "Moderation publishes tombstones into the same live channel and recent buffer rather than rewriting history",
+    "Slow mode and sampling are product and capacity controls when humans and gateways cannot keep up with raw write rate",
+    "Keep lossy reactions and presence off the durable comment path so emoji storms cannot block attributable chat",
+  ]}
+/>

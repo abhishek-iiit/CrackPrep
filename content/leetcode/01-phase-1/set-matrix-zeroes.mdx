@@ -1,0 +1,116 @@
+---
+title: "Set Matrix Zeroes"
+number: "01.46"
+summary: "Use the first row and column as zero flags, then sweep — O(1) extra space if you track whether row0/col0 had a zero."
+status: published
+free: true
+difficulty: core
+estMinutes: 14
+tags: [matrix, in-place]
+updated: "2026-09-15"
+---
+
+## One zero zeros its whole row and column
+
+Given an `m × n` integer matrix, if an element is `0`, set every element in that row and column to `0`. Do it **in place**.
+
+The trap is order of operations. If you zero a row as soon as you see a `0`, you destroy information — later cells in that row that were originally nonzero look like they were always zero, and you may zero rows or columns that should stay.
+
+Example: `[[1,1,1],[1,0,1],[1,1,1]]` becomes all zeros in row 1 and column 1. A separate `m × n` boolean mask is correct but uses O(mn) extra space. The interview target is **O(1)** auxiliary space by reusing the matrix itself to record which rows and columns must be cleared.
+
+## First row and column as markers
+
+Pass 1: if `matrix[i][j] === 0`, set `matrix[i][0] = 0` and `matrix[0][j] = 0`. Row 0 and column 0 become a bitmask of affected lines — except row 0 and column 0 themselves need special handling because they share the `(0,0)` cell.
+
+Pass 2: for `i ≥ 1` and `j ≥ 1`, if `matrix[i][0] === 0` or `matrix[0][j] === 0`, set `matrix[i][j] = 0`.
+
+Pass 3: zero row 0 if `matrix[0][0]` was marked via a column-0 zero, and zero column 0 if marked via a row-0 zero — tracked with two booleans `row0` and `col0` set in an initial scan.
+
+<Steps>
+<Step title="Record whether row0/col0 originally had zeros">
+  `row0 = matrix[0].some(v => v === 0)`, same for `col0` on column 0. These booleans survive the marker pass.
+</Step>
+<Step title="Mark using first row/column">
+  For each cell with a zero, stamp `matrix[i][0]` and `matrix[0][j]`.
+</Step>
+<Step title="Apply marks to inner cells">
+  Inner loop uses only markers at indices 0; skip row 0 and col 0 until the end.
+</Step>
+<Step title="Clear row0/col0 if needed">
+  If `row0`, fill row 0 with zeros. If `col0`, fill column 0.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function setZeroes(matrix: number[][]): void {
+  const m = matrix.length;
+  const n = matrix[0].length;
+  let row0 = false;
+  let col0 = false;
+
+  for (let j = 0; j < n; j++) {
+    if (matrix[0][j] === 0) row0 = true;
+  }
+  for (let i = 0; i < m; i++) {
+    if (matrix[i][0] === 0) col0 = true;
+  }
+
+  for (let i = 1; i < m; i++) {
+    for (let j = 1; j < n; j++) {
+      if (matrix[i][j] === 0) {
+        matrix[i][0] = 0;
+        matrix[0][j] = 0;
+      }
+    }
+  }
+
+  for (let i = 1; i < m; i++) {
+    for (let j = 1; j < n; j++) {
+      if (matrix[i][0] === 0 || matrix[0][j] === 0) {
+        matrix[i][j] = 0;
+      }
+    }
+  }
+
+  if (row0) matrix[0].fill(0);
+  if (col0) {
+    for (let i = 0; i < m; i++) matrix[i][0] = 0;
+  }
+}
+```
+
+Time **O(m n)**, space **O(1)** beyond the matrix.
+
+<Tradeoff
+  forTitle="First row/column markers when"
+  againstTitle="Separate boolean grids when"
+  forItems={[
+    "O(1) extra space is required",
+    "Matrix values are mutable and overwriting markers after the mark phase is acceptable",
+    "m and n are large and O(m+n) marker storage beats O(mn)",
+    "You want one pass to record and one pass to apply without hash structures",
+  ]}
+  againstItems={[
+    "Original matrix must remain readable for other consumers during the algorithm",
+    "Values are not numeric zeros but objects — marker encoding does not apply",
+    "Sparse matrices with few zeros — storing coordinate lists may be smaller than touching every cell twice",
+    "Clarity under time pressure beats optimization and O(m+n) auxiliary arrays are allowed",
+  ]}
+/>
+
+## In an interview
+
+Draw a 3×3 with one interior zero. Show how eager zeroing propagates falsely. Propose marker row/column, then mention `row0`/`col0` flags before coding.
+
+Bug to name: zeroing row 0 and column 0 during the marking pass before reading original zeros there. Follow-ups: sparse matrix with mostly nonzero; follow-up with read-only matrix (use O(m+n) arrays).
+
+<KeyTakeaways items={[
+  "Zeroing cells during the first scan destroys information about which other cells were originally zero.",
+  "Use row 0 and column 0 to record which rows and columns must become zero in later passes.",
+  "Track row0 and col0 separately because (0,0) participates in both the row and column marker roles.",
+  "Apply markers to inner cells (i,j ≥ 1) before clearing the first row and column.",
+  "Time is O(mn); marker trick achieves O(1) extra space versus an O(mn) boolean copy.",
+  "Same in-place marking idea appears in other matrix problems like 01.47 Spiral Matrix boundary tracking — different goal, similar care with indices.",
+]} />

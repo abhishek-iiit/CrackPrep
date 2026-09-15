@@ -1,32 +1,118 @@
 ---
 title: "Direct To Object Storage Upload"
 number: "13.01"
-summary: "Direct To Object Storage Upload — notes in progress."
-status: draft
+summary: "Why browsers and apps upload media straight to object storage with short-lived credentials — and what your API still must own before and after the bytes move."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [upload, object-storage, media]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Your app servers should not be a USB cable for photos
 
-What breaks without this, and the situation that forces the decision.
+The first media architecture everyone builds is: client `POST`s a multipart file to an API, the API buffers it (or streams it), then the API writes to disk or S3. It works for profile avatars at low QPS. It collapses when payloads become megabytes to gigabytes, clients sit on mobile networks, and horizontal scale means every upload occupies an app instance, a load balancer timeout, and often a second copy of the bytes in memory.
 
-## How it works
+**Direct-to-object-storage upload** flips the path: the client puts bytes straight into the bucket (or a CDN origin that fronts it). The API issues permission, records intent, and learns completion — it never relays the file body. Bandwidth and retries become the client's problem against a store built for large objects; app pods stay available for JSON.
 
-The mechanism, step by step.
+## What the API still does
 
-## Tradeoffs
+Direct upload is not "give the world a public bucket". The control plane stays yours:
+
+- **Authenticate the user** and authorise that they may create an object of this type/size.
+- **Mint a short-lived credential** — a pre-signed URL (PUT/POST), a post policy, or a temporary STS token scoped to one key prefix.
+- **Choose the object key** — never trust the client to pick a final public path; use opaque ids (`uploads/{userId}/{uuid}`).
+- **Enforce constraints** in the signature where the store allows: max size, `Content-Type` prefix, expiry (minutes, not days).
+- **Register metadata** in your database: upload id, owner, status=`pending`, intended purpose.
+- **Confirm completion** via client callback, S3 event notification, or head-object check — then mark `ready` and kick processing (virus scan, image variants, transcoding).
+
+Skip any one of those and you get either an open write hole or orphaned bytes you cannot attribute.
+
+## The happy path
+
+<Steps>
+  <Step title="Client requests an upload slot">
+    `POST /uploads` with filename, content type, byte size, and purpose. API validates quotas and MIME allowlist.
+  </Step>
+  <Step title="API inserts a pending row and returns a signed PUT">
+    Response includes `uploadId`, object key, URL (or fields for POST policy), and expiry. Optional: multipart thresholds for large video — see 13.04.
+  </Step>
+  <Step title="Client uploads directly to the bucket">
+    Retries are cheap and resumable at the HTTP layer. App servers see no body traffic.
+  </Step>
+  <Step title="Completion signal">
+    Client calls `POST /uploads/{id}/complete`, and/or the bucket emits an `ObjectCreated` event your worker consumes. Prefer verifying with `HeadObject` (size, etag) rather than trusting the client alone.
+  </Step>
+  <Step title="Promote and process">
+    Mark ready, enqueue image pipeline (13.02) or video transcoder (13.05), move/copy from an untrusted `incoming/` prefix to a `clean/` prefix after scanning if that is your threat model.
+  </Step>
+</Steps>
+
+```text
+Client                API                  Object store
+  |  POST /uploads     |                        |
+  |------------------->|  pending row           |
+  |  signed URL        |                        |
+  |<-------------------|                        |
+  |         PUT object (bytes)                  |
+  |-------------------------------------------->|
+  |  POST .../complete |                        |
+  |------------------->|  verify + enqueue      |
+```
+
+## Design details that show up as outages
+
+**Expiry too short on poor networks.** A 60-second URL and a 50 MB upload on hotel Wi-Fi fail forever. Size expiry to max expected upload time with margin, or use multipart with per-part URLs (13.04).
+
+**Content-Type and size not bound in the signature.** Clients can upload a 5 GB executable to a slot meant for a 2 MB JPEG. Bind what the cloud provider lets you bind; enforce the rest on complete via HeadObject.
+
+**Public-read buckets as a shortcut.** Prefer private buckets plus signed **download** URLs or a CDN that can authorize. Accidental listing and hotlinking are the failure modes.
+
+**Orphan cleanup.** Pending rows and abandoned objects need a reaper — TTL on pending uploads, lifecycle rules on `incoming/` prefixes. Otherwise you pay for every failed attempt forever.
+
+**CORS.** Browser direct upload requires explicit bucket CORS for your origins and methods. Missing CORS presents as a frontend bug.
+
+**Quotas and abuse.** Init endpoints need per-user rate limits and total pending-byte caps. Otherwise a stolen session mints thousands of signed URLs and fills the bucket with noise before any complete callback runs. Pending-row count and incoming-prefix bytes are the metrics that catch this.
+
+## How this composes with the rest of media
+
+Images go from complete → variant pipeline / CDN (13.02, 13.03). Video goes from complete → multipart when large (13.04) → transcoder (13.05) → ABR playback (13.06). The direct-upload control plane is shared; the processing graph forks on content type at the complete step — one queue family for image jobs, another for video, so a backlog of 4K encodes does not stall avatar thumbs.
+
+<Callout type="warn">
+Treat everything in the incoming prefix as hostile until validated. Direct upload means anyone who obtained a valid signed URL during its lifetime can write whatever fits the policy. Virus scan and type sniffing belong before the object becomes user-visible or is copied to a public CDN origin.
+</Callout>
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Upload directly to object storage when"
+  againstTitle="Proxy the file through your API when"
+  forItems={[
+    "Payloads are large or numerous enough that proxying would dominate app CPU, memory, and LB timeouts",
+    "Clients can speak HTTPS to the bucket and you can set CORS / mobile SDK flows",
+    "You want retries and throughput handled by the storage system rather than your pods",
+    "Processing is already asynchronous — the API only needs a completion event",
+    "You can operate signed URL minting, orphan reaping, and an incoming vs clean prefix split",
+  ]}
+  againstItems={[
+    "Files are tiny, rare, and already fit comfortably in your API's request limits",
+    "You must transform or redact bytes synchronously before they may touch durable storage (compliance)",
+    "Environment constraints block client-to-bucket networking (some locked-down enterprises)",
+    "You need a single transactional write that couples row insert and byte durability in one two-phase story you are not ready to split",
+    "The team cannot safely manage bucket policies and signing without creating an open write hole",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Say: "Clients upload with a pre-signed URL; the API authorises, records pending metadata, verifies completion, then processes asynchronously." Mention key design, short TTL, size/type constraints, and event-driven complete. For video, point forward to multipart (13.04) and transcoder (13.05). Name orphans and hostile incoming objects as the ops failures.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Direct upload keeps media bytes off app servers — the API mints scoped credentials and owns metadata lifecycle",
+    "Never trust the client for object keys, completion, or content type without server-side verification",
+    "Bind size, type, and expiry in the signature where possible; verify with HeadObject on complete",
+    "Separate incoming and clean prefixes; scan before anything becomes publicly readable",
+    "Reap abandoned pending uploads with DB TTLs and bucket lifecycle rules",
+    "Large video should graduate to multipart signed uploads (13.04) rather than one giant PUT",
+  ]}
+/>

@@ -1,32 +1,115 @@
 ---
 title: "Image CDN And Resizing"
 number: "13.02"
-summary: "Image CDN And Resizing — notes in progress."
-status: draft
+summary: "Serve one master image and let an edge resize/transcode pipeline produce the byte sizes phones actually need — with caching so you do not resample on every hit."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 14
+tags: [cdn, images, media]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The phone does not want your 12 MP original
 
-What breaks without this, and the situation that forces the decision.
+A client upload may be a 4–12 megapixel JPEG of several megabytes. A feed thumbnail needs a few kilobytes at 200 px. Shipping the original everywhere wastes mobile bandwidth, burns client decode time, and multiplies origin egress. Generating every width×format variant at upload time wastes storage and forces a combinatorial explosion (width × crop × format × DPR).
 
-## How it works
+An **image CDN** (or image-aware origin shield) sits in the middle: store one or a few masters, accept requests that name the desired transformation, produce the derivative on first miss, and cache it at the edge. The product talks in logical URLs; the edge talks in bytes.
 
-The mechanism, step by step.
+## Request shape
 
-## Tradeoffs
+Common patterns:
+
+- **Path-based:** `/img/{id}/w400/h300/fit-cover.webp`
+- **Query-based:** `/img/{id}?w=400&h=300&fit=cover&fm=webp`
+- **Preset-based:** `/img/{id}/thumb` where `thumb` is a server-defined recipe (safest against parameter abuse)
+
+Presets are the usual production preference for user-generated content: clients cannot ask for `w=8000` and turn your CPU into a free render farm. Open parameter spaces need hard caps, allowlists, and signed URLs.
+
+## Pipeline on a cache miss
+
+<Steps>
+  <Step title="Edge receives the derivative URL">
+    CDN checks whether this exact variant is cached. Hit → serve. Miss → continue.
+  </Step>
+  <Step title="Authorize if required">
+    Private images need signed URLs or token validation at the edge/origin. Public avatars may skip this.
+  </Step>
+  <Step title="Fetch the master from object storage">
+    Preferably from a nearby origin shield or regional cache of masters so every POP does not pull from a single distant bucket.
+  </Step>
+  <Step title="Decode, transform, encode">
+    Resize, crop, strip EXIF (privacy), convert to WebP/AVIF/JPEG based on `Accept` or an explicit `fm`. Cap pixel dimensions and output bytes.
+  </Step>
+  <Step title="Store the derivative and serve">
+    Write through to edge cache (and optionally a persistent derivative bucket). Set long `Cache-Control` for immutable URLs; short or versioned for editable images.
+  </Step>
+</Steps>
+
+Immutability is a lever: if the URL includes a content hash or version (`v=3`), you can cache for a year and purge by changing the version in your HTML/API. If the URL is stable and the bytes change, you need explicit CDN purge on every edit — slower and easier to get wrong.
+
+## Eager variants vs on-demand
+
+| Strategy | When it fits | Cost |
+| --- | --- | --- |
+| On-demand at edge | Many possible sizes, long-tail images rarely viewed | First-hit latency; CPU on miss |
+| Eager at upload (fixed presets) | Few presets, every image is viewed hot (avatars) | Storage × preset count; upload-path latency or queue |
+| Hybrid | Eager thumbs + on-demand large/hero | Best common compromise |
+
+Avatars and feed thumbs often eager-generate two or three sizes (13.03). Product photography libraries lean on-demand with presets.
+
+## Formats and responsive delivery
+
+Modern stacks negotiate AVIF/WebP with JPEG fallback. The CDN can vary on `Accept` — but then the cache key must include that variance, or you will serve WebP to a client that asked for JPEG. Explicit `fm=` in the URL makes cache keys obvious at the cost of smarter clients or server-side user-agent logic in HTML generation (`<picture>` sources).
+
+Retina / DPR: either accept a `dpr=2` parameter inside a capped preset or generate 2× widths in the preset list. Unbounded DPR is another CPU abuse vector.
+
+## Where the bytes live
+
+Masters stay in a private (or tightly ACL'd) bucket. Derivatives may live only on the CDN cache, or also be written through to a derivatives bucket for warmer long-tail hits after edge eviction. Write-through costs storage; cache-only costs more origin CPU on the next miss. Hot avatars and catalog heroes almost always deserve write-through or eager publish. Long-tail UGC often accepts cache-only with an origin shield so a viral miss collapses to one resize, not one per POP.
+
+## Failure modes
+
+- **Origin stampede** on a popular new image before the edge is warm — use origin shield and singleflight / request collapsing.
+- **Uncapped transforms** — attacker-forced 8K AVIF encodes; allowlist presets.
+- **EXIF orientation and GPS** — strip location metadata from user photos before public serve.
+- **Animated GIF/WebP** — resize paths that only handle stills will break stickers; detect and special-case.
+- **Cache poisoning via unsigned open params** — sign transformation URLs when params are client-influenced.
+
+<Callout type="gotcha">
+"We purge the CDN on every profile photo change" without changing the URL is how half the internet still sees the old avatar. Prefer versioned or hash-based URLs so the HTML reference moves forward and old edge entries simply expire unused.
+</Callout>
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Use an image CDN / on-demand resize when"
+  againstTitle="Pre-render static files only when"
+  forItems={[
+    "Clients need many display sizes and formats from one master",
+    "Most of the catalog is long-tail — paying storage for every variant up front is wasteful",
+    "You can enforce presets or signed transform params and operate edge caching well",
+    "Global users benefit from edge hit latency on derivatives",
+    "Masters stay private in object storage while derivatives are what the world fetches",
+  ]}
+  againstItems={[
+    "A single fixed size is enough (rare) and a static object URL already meets the product",
+    "Compliance requires that derived bytes never be produced outside a controlled batch pipeline",
+    "You cannot bound transform CPU and an open resize API would be abused",
+    "Offline / air-gapped clients need all variants packaged ahead of time",
+    "Extremely hot tiny set of images where eager generation + immutable URLs is simpler ops",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Store masters in object storage (13.01), serve via CDN with **preset** transforms, cache derivatives at the edge, version URLs on change. Mention EXIF stripping and stampede control. Distinguish eager avatar thumbs from on-demand catalog images. Link forward to video: images are resize-cache; video needs a transcoding pipeline (13.05) and ABR (13.06).
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Keep a master object and generate display derivatives at the edge (or upload-time presets), cached by exact variant key",
+    "Prefer server-defined presets or signed params over an open-ended resize query string",
+    "Immutable versioned URLs beat purge-heavy mutable URLs for avatar and catalog updates",
+    "Strip sensitive EXIF; cap dimensions and output bytes to protect CPU",
+    "Hybrid eager thumbs plus on-demand large sizes matches most product traffic shapes",
+    "Include format and DPR in the cache key when you negotiate them, or put them in the URL explicitly",
+  ]}
+/>

@@ -1,0 +1,99 @@
+---
+title: "Composite"
+number: "02.03"
+summary: "Treat a tree of objects as one unit so client code runs the same operation on a leaf and a whole subtree."
+status: published
+free: true
+difficulty: core
+estMinutes: 13
+tags: [structural, trees, recursion]
+updated: "2026-09-15"
+---
+
+## Folders and files should not be different types to the caller
+
+A file explorer renders icons, computes total size, and applies "delete" to whatever the user selected. Selection might be one JPEG, a folder containing twelve thousand files, or a folder inside a folder inside a folder. If `File` and `Folder` expose different methods — `file.getSize()` versus `folder.getTotalSizeIncludingChildren()` — every feature that touches both writes two code paths. Copy, move, search, permission checks, undo: each doubles.
+
+Composite makes leaf and container share one interface. A `FileSystemNode` declares `getSize()`, `render()`, `delete()`. A `File` returns its byte count; a `Folder` returns the sum of its children's `getSize()` calls. The client calls `node.getSize()` without knowing whether `node` is a leaf or a subtree with ten thousand descendants. The recursion lives inside the composite, not at every call site.
+
+The pattern fits any part-whole hierarchy where clients should ignore depth: UI component trees, org charts, document sections, scene graphs, menu structures, syntax trees in an editor.
+
+## Component, leaf, and composite
+
+Three roles:
+
+- **Component** — the shared interface (`getSize()`, `add(child)`, `remove(child)`). Sometimes `add`/`remove` live only on Composite; purists put them on Component with default no-ops on Leaf to keep the interface uniform.
+- **Leaf** — a node with no children. Implements operations directly.
+- **Composite** — a node with a child list. Implements operations by delegating to children and aggregating results.
+
+<Steps>
+<Step title="Client holds a Component reference">
+`selected: FileSystemNode` — could be a file or a folder; the type system does not force a branch.
+</Step>
+<Step title="Operation invoked on the root of the selection">
+`selected.delete()` — one call regardless of depth.
+</Step>
+<Step title="Leaf handles itself">
+A `File` removes its inode and returns.
+</Step>
+<Step title="Composite fans out to children">
+A `Folder` iterates children, calls `child.delete()` on each, then removes its own directory entry. The client never wrote a loop.
+</Step>
+</Steps>
+
+```typescript
+interface FileSystemNode {
+  getSize(): number;
+  delete(): void;
+}
+
+class Folder implements FileSystemNode {
+  private children: FileSystemNode[] = [];
+  getSize() { return this.children.reduce((s, c) => s + c.getSize(), 0); }
+  delete() { this.children.forEach(c => c.delete()); /* remove self */ }
+}
+```
+
+Transparency has a cost. Putting `add` and `remove` on the Component interface means leaves must reject or no-op those calls — otherwise someone adds a child to a JPEG. Two pragmatic fixes: keep mutators only on Composite (slightly breaks uniform interface) or throw from Leaf (runtime guard). Interviewers care that you have noticed the trade, not which option you pick.
+
+<Callout type="warn">
+Deep trees plus eager aggregation can blow the stack or the latency budget. `getSize()` on a folder with a million files walks every leaf synchronously. Production code often caches aggregated values and invalidates on mutation, or streams results — the pattern still holds, the implementation adds bookkeeping.
+</Callout>
+
+Composite pairs naturally with **03.10 Visitor** when operations proliferate: instead of adding `print()`, `exportJson()`, `spellCheck()` to every Component class, a Visitor walks the tree and dispatches by concrete type. Composite gives you uniform traversal; Visitor gives you open-ended operations without bloating the Component interface.
+
+<Tradeoff
+  forTitle="Reach for Composite when"
+  againstTitle="Skip Composite when"
+  forItems={[
+    "Clients must treat individual objects and groups identically — same method names, same return shapes",
+    "The structure is a tree (or forest) that grows at runtime — folders, UI nodes, org units",
+    "Operations naturally recurse: size, render, save, search, delete, permission inherit",
+    "You want to add new node types without changing client code — new Leaf or Composite, same Component interface",
+    "Multiple algorithms will walk the same tree structure (rendering, validation, export)",
+  ]}
+  againstItems={[
+    "The hierarchy is fixed and shallow — three levels hard-coded do not need a pattern, they need three fields",
+    "Leaf and container genuinely need different operations — forcing one interface hides real differences and fills Leaf with throws",
+    "You only need to store nested JSON, not execute polymorphic behavior on it — a plain data tree suffices",
+    "Performance requires flat storage (array of rows) and the tree is a view — Composite objects per row allocate too much",
+    "Child ordering, cycles, or cross-links break the simple tree model — a graph needs different machinery",
+  ]}
+/>
+
+## In an interview
+
+Lead with the uniform interface: "I'd model files and folders both as `FileSystemNode` so delete and getSize work on whatever the user selected without type checks in the UI." Sketch Component at the top, Leaf and Composite below, children pointing to Component. Expect: "Where does recursion live?" In Composite's methods. "What about adding children to a leaf?" Name the transparency problem and your guard. "Visitor?" Mention 03.10 Visitor when operations outnumber node types.
+
+Failure mode to name early: every object is a Composite, leaves are empty composites, and `getSize()` returns zero while the real bytes live somewhere else — the uniform interface became a lie.
+
+<KeyTakeaways
+  items={[
+    "Composite lets clients treat leaf nodes and subtrees through one Component interface — recursion moves inside the composite, not into every caller",
+    "Leaf implements operations directly; Composite implements them by delegating to children and aggregating",
+    "The pattern fits any part-whole tree where depth should be transparent: UI, files, documents, org charts",
+    "Uniform mutator methods on Component create the 'add child to a leaf' problem — guard with typing, throws, or split interfaces",
+    "Deep trees may need cached aggregates or lazy evaluation; naive recursion is correct but not always fast enough",
+    "When operations multiply faster than node types, pair Composite with 03.10 Visitor instead of bloating Component",
+  ]}
+/>

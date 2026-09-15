@@ -1,0 +1,107 @@
+---
+title: "Permutations"
+number: "03.01"
+summary: "n! orderings explode under nested loops — backtrack by marking used elements and undoing each choice."
+status: published
+free: true
+difficulty: core
+estMinutes: 13
+tags: [backtracking, recursion, array]
+updated: "2026-09-15"
+---
+
+## Every ordering counts — nested loops do not scale
+
+Given an array of **distinct** integers, return every permutation. For `[1, 2, 3]` that is six orderings: `[1,2,3]`, `[1,3,2]`, `[2,1,3]`, `[2,3,1]`, `[3,1,2]`, `[3,2,1]`.
+
+The brute force is nested loops: pick the first element from n choices, the second from n−1, and so on. That is n! leaf nodes — 10 elements is 3,628,800 permutations, and you still have to collect them. The constraint n ≤ 6 on some variants is a hint that backtracking is fine; on the standard n ≤ 10 problem, you need a template that builds one complete ordering at a time instead of materializing the full decision tree upfront.
+
+## Build the path, mark used, undo
+
+Treat permutation generation as filling `path` position by position. At each depth, try every index `i` that is not yet used. Push `nums[i]`, mark it used, recurse, then pop and unmark — classic choose-explore-unchoose.
+
+The invariant: `path.length === depth`, and exactly `depth` indices are marked used. When `path.length === n`, copy `path` into the answer.
+
+<Steps>
+<Step title="Track used indices">
+  A boolean array `used[i]` (or a Set) records which elements already sit in `path`. Distinct input means you never need value-based dedup — only index-based exclusion.
+</Step>
+<Step title="Try each unused candidate at this depth">
+  Loop `i` from 0 to n−1. Skip if `used[i]`. Push `nums[i]`, set `used[i] = true`, recurse, then undo both.
+</Step>
+<Step title="Collect at full length">
+  When `path.length === nums.length`, append `[...path]`. No pruning beyond "already used" — every complete ordering is valid.
+</Step>
+</Steps>
+
+<Callout type="tip">
+An equivalent swap-based approach fixes elements at positions 0..i−1 and swaps `nums[i]` with each j ≥ i. Same n! output, no `used` array — useful when the interviewer asks for in-place generation.
+</Callout>
+
+## Solution
+
+```ts
+function permute(nums: number[]): number[][] {
+  const result: number[][] = [];
+  const used = new Array(nums.length).fill(false);
+  const path: number[] = [];
+
+  function backtrack(): void {
+    if (path.length === nums.length) {
+      result.push([...path]);
+      return;
+    }
+    for (let i = 0; i < nums.length; i++) {
+      if (used[i]) continue;
+      used[i] = true;
+      path.push(nums[i]);
+      backtrack();
+      path.pop();
+      used[i] = false;
+    }
+  }
+
+  backtrack();
+  return result;
+}
+```
+
+Time **O(n × n!)** — n! permutations, each copied in O(n). Space **O(n)** for recursion depth and auxiliary structures, excluding output.
+
+<Tradeoff
+  forTitle="Used-array backtracking when"
+  againstTitle="Swap-in-place or iterative when"
+  forItems={[
+    "Input values are distinct and you want the clearest interview template",
+    "You must return new arrays, not mutate the input in place",
+    "Follow-ups include Permutations II (duplicates) — the used array extends to skip-same-at-depth logic",
+    "n is at most 8–10 and n! output is acceptable on the judge",
+    "You are teaching the choose-explore-unchoose pattern before harder constraint problems",
+  ]}
+  againstItems={[
+    "Interviewer asks for in-place generation without O(n) extra marking per level",
+    "You only need the next permutation (03.01 follow-up: next permutation via lex order)",
+    "Memory for the used array matters on deep recursion with large n",
+    "Input has duplicates — switch to sorted skip logic (Permutations II), not this bare template",
+    "Problem asks to stream permutations one at a time without storing all n! in memory",
+  ]}
+/>
+
+## In an interview
+
+Restate: distinct integers, return all orderings. Example `[1,2,3]` → six results. Confirm whether duplicates exist (they do not here) and whether output order matters (usually any order is fine).
+
+Say you will backtrack with a `used` array before coding — that frames the n! structure as intentional, not accidental brute force. Mention the undo step explicitly; interviewers watch for forgotten unmarking.
+
+Follow-ups: **Permutations II** (sorted input, skip duplicate values at the same tree depth), **Next Permutation** (iterative lex successor, no full enumeration), or "count permutations satisfying a constraint." The bug to name first: pushing the same index twice because you forgot to check `used[i]`.
+
+<KeyTakeaways
+  items={[
+    "Permutations is the canonical backtracking template: at each depth, try every unused element, recurse, then undo push and unmark.",
+    "Distinct input means index-level used tracking is enough — no sort-and-skip dedup required.",
+    "Time is O(n × n!) because you emit n! arrays of length n; space excluding output is O(n) recursion depth.",
+    "Swap-based in-place generation is an equivalent interview variant when mutation is allowed.",
+    "Permutations II adds sorted duplicates and skip-if-same-as-previous-at-this-depth on the for-loop.",
+    "If the follow-up is next permutation only, drop backtracking for the O(n) lexicographic successor algorithm.",
+  ]}
+/>

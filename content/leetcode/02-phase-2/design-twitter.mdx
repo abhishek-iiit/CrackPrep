@@ -1,0 +1,126 @@
+---
+title: "Design Twitter"
+number: "02.28"
+summary: "A user's feed spans many timelines; merge the ten most recent posts from each followee like merge-k-sorted-lists."
+status: published
+free: true
+difficulty: deep
+estMinutes: 20
+tags: [design, heap, hash-map]
+updated: "2026-09-15"
+---
+
+## One user's tweets are easy — the feed is a merge problem
+
+Implement a simplified Twitter: `postTweet(userId, tweetId)`, `getNewsFeed(userId)` (10 most recent from self plus everyone they follow), `follow(followerId, followeeId)`, and `unfollow(followerId, followeeId)`. tweetId is globally unique and monotonically increasing — use it as timestamp. Up to 10⁴ operations.
+
+Storing every tweet in one global list and filtering on read works until `getNewsFeed` must scan all followees' histories — O(total tweets) per call. Each user may follow hundreds of accounts; each account may have thousands of posts. The constraint that only **10** results matter is the hint: you never need the full cross product, only the ten largest tweetIds among a handful of per-user lists.
+
+## Per-user timelines, merge on read
+
+Store:
+
+- `tweets: Map<userId, number[]>` — tweetIds in post order (append on post; newest at end, or prepend for O(1) front access).
+- `follows: Map<userId, Set<userId>>` — who each user follows.
+
+`postTweet` appends to the user's list — O(1). `follow` / `unfollow` mutate a set.
+
+`getNewsFeed` merges timelines from `{userId} ∪ followees` like 01.43 Merge K Sorted Lists: each list is sorted by tweetId ascending (older first). Use a max-heap keyed by tweetId (negate for min-heap simulation) — pop 10 times, each time advancing that user's pointer.
+
+With at most ~500 followees and k = 10 output, heap merge is O(500 log 500) worst case per feed — acceptable at 10⁴ ops. A simpler interview variant collects all heads and sorts — fine when follow count is small.
+
+<Steps>
+<Step title="postTweet — append with global order">
+  tweetId increases globally, so later posts sort higher.
+</Step>
+<Step title="Build source list — self plus followees">
+  Skip duplicates; user always sees own tweets.
+</Step>
+<Step title="Heap merge — pick 10 largest tweetIds">
+  Push (tweetId, userIndex, listIndex) for each non-empty list head; pop max 10 times.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+class Twitter {
+  private tweets = new Map<number, number[]>();
+  private follows = new Map<number, Set<number>>();
+  private time = 0;
+
+  postTweet(userId: number, tweetId: number): void {
+    if (!this.tweets.has(userId)) this.tweets.set(userId, []);
+    this.tweets.get(userId)!.push(tweetId);
+  }
+
+  getNewsFeed(userId: number): number[] {
+    const sources = new Set<number>([userId]);
+    this.follows.get(userId)?.forEach(id => sources.add(id));
+
+    const candidates: number[] = [];
+    for (const uid of sources) {
+      const list = this.tweets.get(uid);
+      if (list) {
+        // recent last — take up to 10 from the end
+        for (let i = Math.max(0, list.length - 10); i < list.length; i++) {
+          candidates.push(list[i]);
+        }
+      }
+    }
+    candidates.sort((a, b) => b - a);
+    return candidates.slice(0, 10);
+  }
+
+  follow(followerId: number, followeeId: number): void {
+    if (!this.follows.has(followerId)) this.follows.set(followerId, new Set());
+    this.follows.get(followerId)!.add(followeeId);
+  }
+
+  unfollow(followerId: number, followeeId: number): void {
+    this.follows.get(followerId)?.delete(followeeId);
+  }
+}
+```
+
+The slice-last-10-then-sort shortcut avoids a full heap when each user contributes at most 10 candidates — O(f × 10 log(f × 10)) for f followees. Heap merge is the scalable version for unbounded per-user history.
+
+Space **O(total tweets + follow edges)**. `postTweet` **O(1)** amortized; `getNewsFeed` **O(f log f)** with heap or **O(f × 10 log(f×10))** with truncated sort.
+
+<Tradeoff
+  forTitle="Per-user lists + merge on read when"
+  againstTitle="Global chronological index when"
+  forItems={[
+    "Reads need only top 10 — merge-k stops early instead of scanning all tweets ever posted",
+    "tweetId monotonic gives free ordering without storing separate timestamps",
+    "Follow graph is sparse edits, feed reads are frequent — partition by author matches access pattern",
+    "Each user's history is append-only — vector push is O(1)",
+    "Interview scope fits in-memory maps; no persistence layer required",
+  ]}
+  againstItems={[
+    "Feed must include every tweet globally ranked — single sorted log is simpler",
+    "Fan-out on write (push to followers' inboxes) is required at scale — this pull model is wrong for production Twitter",
+    "getNewsFeed called once — precomputed timeline per user may be acceptable offline",
+    "Memory is unlimited and reads are rare — materialized feed caches win",
+    "Followee count is tiny — brute collect-and-sort all tweets from sources is enough",
+  ]}
+/>
+
+## In an interview
+
+Clarify: user sees own tweets; cannot follow self; unfollow is idempotent; tweetIds increase over time so higher id = newer.
+
+Draw three users' tweet lists and show merging for top 3. Mention production contrast: real Twitter fan-out on write; LeetCode version fan-out on read is acceptable here.
+
+Proactive bug: including unfollowed users in feed — must read current follow set, not cache stale graph. Another: returning more than 10 tweets or wrong order (ascending vs descending).
+
+Follow-ups: add `getTweet`, limit history per user, design at scale with push fan-out and ranking.
+
+<KeyTakeaways items={[
+  "Store each user's tweetIds in post order; global tweetId monotonicity replaces explicit timestamps.",
+  "getNewsFeed merges timelines from self and followees — same pattern as 01.43 Merge K Sorted Lists, capped at 10.",
+  "follow/unfollow are graph edge updates in a hash map of sets — O(1) expected.",
+  "Truncating each user's last 10 before merging reduces work when only the recent head matters.",
+  "Pull model (merge on read) fits LeetCode; production feeds often push on write for read latency.",
+  "Use a max-heap keyed by tweetId when followee count or history depth grows beyond interview constants.",
+]} />

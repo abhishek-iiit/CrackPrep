@@ -1,32 +1,78 @@
 ---
 title: "Storage Engine Design Constraints"
 number: "07.01"
-summary: "Storage Engine Design Constraints — notes in progress."
-status: draft
+summary: "The latency, throughput, and durability gap between memory and disk that every storage engine design is a response to, not a choice."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: intro
+estMinutes: 9
+tags: [storage-engines, disk-io, durability, fundamentals]
+updated: "2026-09-15"
 ---
 
-## The problem
+## A disk is not a slow version of memory
 
-What breaks without this, and the situation that forces the decision.
+Every storage engine in this module — a hand-rolled file format, Bitcask, an LSM tree — is an answer to the same three physical facts about the hardware underneath it. Get the facts straight first, because every "why does it work this way" question in the lessons that follow resolves to one of them.
 
-## How it works
+The first fact is that memory and disk are not the same thing running at different speeds; they are different enough that a design which ignores the gap does not work at all. A random access into DRAM costs on the order of 100 nanoseconds. A random read from an SSD costs on the order of 100 microseconds — a thousand times slower. A seek on a spinning disk costs several milliseconds, commonly cited around 5–10 ms — another thousand times slower again. Those are ballparks to reason with, not a benchmark; the exact numbers move with the device, but the ratios do not move by much, and the ratios are the whole point. A data structure that assumes "storage is just slightly slower memory" — one extra pointer chase here, one more comparison there — is making an error of three to six orders of magnitude, not a rounding error.
 
-The mechanism, step by step.
+| Medium | Random access latency | Sequential throughput |
+| --- | --- | --- |
+| DRAM | ~100 ns | tens of GB/s |
+| SSD (NVMe) | ~50–150 µs | hundreds of MB/s to a few GB/s |
+| HDD | ~5–10 ms (seek + rotation) | ~100–250 MB/s |
 
-## Tradeoffs
+The second fact follows from the first: disk and memory also differ on durability and price, and that difference is what gives a storage engine its reason to exist. DRAM is volatile — a power cut erases it — and expensive enough per gigabyte that keeping years of data resident is not a serious option for most systems. Disk is cheap per gigabyte and, once a write reaches it, durable across a crash or a power loss. A storage engine's entire mission is to give an application something close to memory's speed for the data it touches often, backed by disk's price and durability for everything else, without asking the application to manage that split itself.
+
+## Sequential beats random by orders of magnitude, and the number depends on why
+
+The third fact is that "disk" does not mean one access pattern; it means two, with wildly different costs, and which one you get is a property of your write pattern, not a knob on the device.
+
+On a spinning disk the mechanism is physical: a random write means moving a head to a new track and waiting for the platter to rotate into position before a single byte lands, and that seek-plus-rotation cost dominates everything else about the operation. A sequential write never re-seeks — the head is already where the next byte belongs — so a device that manages a few hundred random writes a second can sustain sequential throughput in the hundreds of megabytes per second. That gap, three to four orders of magnitude between "the same device, two access patterns," is why sequential I/O is treated as close to free throughout this module and random I/O is treated as the thing every design tries to avoid.
+
+SSDs removed the seek, and it is tempting to conclude the gap went with it. It did not; it moved. Flash erases in blocks of megabytes, not bytes, so a small random write anywhere inside an already-used block forces the drive's own firmware to read the whole block, patch in the change, and write it back elsewhere — write amplification happening inside the device, invisible to your code and your profiler, on hardware you do not control the algorithm for. Sequential writes on an SSD line up cleanly with those erase blocks and avoid the shuffle. The mechanism changed; the shape of the penalty for scattered writes did not.
+
+## Durability costs a synchronous trip to the device
+
+A `write()` call returning does not mean your bytes are safe. By default it means the bytes reached the operating system's page cache — memory, not disk — and the OS will flush that cache to the device on its own schedule. If the machine loses power before that flush happens, the write is gone, and the caller who was told it succeeded was told something that was, at that moment, not true yet.
+
+The only way to know a write survived is to force it: an `fsync` (or an equivalent synchronous write mode) that blocks until the device confirms the bytes are on stable storage, not just queued for it. That call is where latency stops being "however fast memory is" and becomes "however fast this specific device's durable write path is" — which, on a spinning disk, means paying the seek cost above on every single acknowledgment, and even on an SSD means waiting on the device's own write-cache commit.
+
+<Callout type="gotcha">
+The gap between "written" and "durable" is exactly where data loss lives, and it is invisible in every test that does not pull the power cord. Code that calls `write()`, gets a success return, and immediately acknowledges the caller looks correct under every ordinary test, including a crash test that kills the process but leaves the machine running — the OS page cache survives a killed process. It does not survive power loss. The only way to actually exercise this path is to cut power (or the equivalent in a VM) between the write and the fsync and see what comes back.
+</Callout>
+
+That single fact — durability requires a synchronous, blocking trip to the device — is in permanent tension with throughput, because throughput wants many writes in flight and durability wants each one individually confirmed before it counts. Every durable storage engine in this module resolves that tension the same way: by batching many logical writes behind one durable confirmation rather than paying the confirmation cost per write. 07.07 Log-Structured Storage and 07.09 LSM Tree Storage Engine both come back to this under the name "group commit," but the tradeoff it exists to solve is exactly the one above.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Confirm durability synchronously, on every write, when"
+  againstTitle="Buffer and batch writes when"
+  forItems={[
+    "A caller is told 'saved' and that statement must be true even if the machine loses power one instruction later — financial ledgers, order confirmations, anything with a legal or contractual weight",
+    "The write rate is low enough that the per-write device round trip is not the bottleneck",
+    "You cannot tolerate rebuilding or discarding any acknowledged write during crash recovery",
+    "The workload has no natural way to batch — writes arrive one at a time, far apart, from independent callers",
+  ]}
+  againstItems={[
+    "Many writers can share one fsync without any of them waiting materially longer than they would have alone — group commit",
+    "A bounded window of loss is contractually acceptable — analytics events, metrics, anything with a documented at-least-once or best-effort guarantee",
+    "Write throughput, not per-write latency, is the metric that matters, and the workload arrives in bursts that batch naturally",
+    "The durability boundary can be pushed to a different layer — a replicated queue in front of the engine, for instance — so the engine itself can buffer",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Name the constraint before you are asked to justify a design choice that depends on it. If you are about to say "buffer writes in memory and flush periodically," say why in the same breath: "a write to disk is orders of magnitude slower than a write to memory, and sequential writes beat random ones by another few orders of magnitude, so I want the hot path to touch memory and disk sequentially, and nothing else." That sentence justifies the design and shows you know where the actual cost lives, rather than treating "disk" as an undifferentiated slow thing.
 
-<KeyTakeaways items={["", "", ""]} />
+Expect the follow-up: "what happens if the process dies right after you acknowledge the write." If your design buffers before an fsync, the honest answer is that the write is lost, and the fix is either to fsync before acknowledging (slower, always durable) or to document the acknowledged guarantee as weaker than "durable" (faster, and now it is a product decision, not an accident).
+
+<KeyTakeaways
+  items={[
+    "DRAM, SSD, and HDD differ by three to six orders of magnitude in random-access latency, not by a small constant factor, so a design that treats disk as 'slow memory' is wrong by orders of magnitude, not approximately right",
+    "Sequential I/O beats random I/O by three to four orders of magnitude on both spinning disks (seek and rotation) and SSDs (erase-block write amplification inside the device), even though the physical cause is different on each",
+    "A write() call returning success only means the bytes reached the OS page cache; only an fsync (or equivalent) forces them to the durable medium, and only a real power-loss test exposes the gap between the two",
+    "Durability and throughput are in direct tension because durability wants each write confirmed individually and throughput wants many writes in flight; batching many writes behind one fsync (group commit) is how every engine in this module resolves it",
+    "Storage engines exist to give an application memory-like speed for hot data backed by disk's price and durability, without the application managing that split itself",
+  ]}
+/>

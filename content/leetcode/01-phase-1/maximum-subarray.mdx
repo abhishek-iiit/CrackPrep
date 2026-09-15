@@ -1,0 +1,85 @@
+---
+title: "Maximum Subarray"
+number: "01.05"
+summary: "Kadane's rule: extend the running sum when it helps, reset when it doesn't — O(n) for the max contiguous block."
+status: published
+free: true
+difficulty: core
+estMinutes: 11
+tags: [array, dynamic-programming]
+updated: "2026-09-15"
+---
+
+## Which contiguous block sums the most?
+
+Given an integer array, find the contiguous subarray with the largest sum and return that sum. At least one element must be included — the subarray has length ≥ 1.
+
+Brute force tries every `(start, end)` pair: O(n²) subarrays, O(n) sum each → O(n³), or O(n²) with a running sum. n = 10⁵ makes that impossible.
+
+Kadane's algorithm is the standard linear scan. The decision at each index: does the best subarray ending here extend the previous best, or start fresh at this element?
+
+## Kadane: extend or restart
+
+Track `currentSum` — max sum of a subarray ending at the current index — and `maxSum` — global best.
+
+At each `nums[i]`: `currentSum = max(nums[i], currentSum + nums[i])`. Then `maxSum = max(maxSum, currentSum)`.
+
+The invariant: after processing index `i`, `currentSum` is the optimal sum among subarrays that must end at `i`.
+
+Walk `[−2, 1, −3, 4, −1, 2, 1, −5, 4]`. The winning block `[4, −1, 2, 1]` sums to 6. Negative running totals get discarded because starting over at the next positive beat carrying debt forward.
+
+## Solution
+
+```ts
+function maxSubArray(nums: number[]): number {
+  let currentSum = nums[0];
+  let maxSum = nums[0];
+
+  for (let i = 1; i < nums.length; i++) {
+    currentSum = Math.max(nums[i], currentSum + nums[i]);
+    maxSum = Math.max(maxSum, currentSum);
+  }
+
+  return maxSum;
+}
+```
+
+Time **O(n)**, space **O(1)**.
+
+<Tradeoff
+  forTitle="Kadane when"
+  againstTitle="Divide and conquer when"
+  forItems={[
+    "You only need the maximum sum, not the subarray indices",
+    "Single pass O(n) is required for n up to 10⁵",
+    "Negative numbers are present — greedy 'take all positives' fails",
+    "Contiguous constraint is fixed — this is not 'pick any subset'",
+    "Interview time favors a short loop over recursion",
+  ]}
+  againstItems={[
+    "Follow-up requires returning the actual subarray — track start/end while running Kadane",
+    "You need the k-th largest subarray sum — different data structure (heap or prefix set)",
+    "Circular array variant — Kadane on doubled array or split case analysis",
+    "Teaching divide-and-conquer maximum subarray crossing the midpoint — O(n log n)",
+    "Non-contiguous maximum subset sum — that is a different DP (01.06 shares the sign-flip idea for products)",
+  ]}
+/>
+
+## In an interview
+
+State contiguous, non-empty subarray, maximize sum. Example: all negatives `[-1]` → answer `-1`, not 0.
+
+Explain the local choice: best ending here is either extend or restart. Code Kadane in five lines.
+
+Follow-ups: return indices, circular array, at most k elements. Bug: initializing `maxSum` to 0 when all entries are negative — seed with `nums[0]`.
+
+<KeyTakeaways
+  items={[
+    "Maximum Subarray is Kadane's algorithm: at each index, the best subarray ending here extends the prior or starts fresh",
+    "currentSum holds the best ending-at-i sum; maxSum tracks the global winner",
+    "O(n) time, O(1) space — the baseline for 'optimal contiguous segment' problems",
+    "All-negative input still returns the least negative single element — never return 0 for an empty choice",
+    "01.06 Maximum Product Subarray extends the same extend-or-restart idea but tracks min and max because negatives flip",
+    "Divide-and-conquer O(n log n) exists but Kadane is what you ship in interviews",
+  ]}
+/>

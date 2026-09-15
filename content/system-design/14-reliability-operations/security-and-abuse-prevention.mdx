@@ -1,32 +1,99 @@
 ---
 title: "Security And Abuse Prevention"
 number: "14.12"
-summary: "Security And Abuse Prevention — notes in progress."
-status: draft
+summary: "How to design for hostile and abusive traffic — authn/authz boundaries, abuse loops, and layered controls that fail closed without freezing legitimate users."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 14
+tags: [security, abuse, authz, fraud]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Your public surface is a shared resource attackers optimize against
 
-What breaks without this, and the situation that forces the decision.
+System design that ignores abuse assumes clients are polite and credentials stay secret. Real systems face credential stuffing, scraping, spam account creation, card testing, content abuse, and DDoS — often automated, often indistinguishable from "enthusiastic" users until you look at graphs. Security and abuse prevention is the set of controls that keep unauthorized action expensive and automated abuse unprofitable, without turning every login into a CAPTCHA farm.
 
-## How it works
+Rate limiting (14.13, 14.14) is one tool. It is not a security strategy by itself. Authn, authz, audit, fraud signals, and operational response close the loop.
 
-The mechanism, step by step.
+## Boundaries first
 
-## Tradeoffs
+- **Authenticate** what you can; treat anonymous endpoints as hostile by default (stricter quotas, proof-of-work, or disable expensive queries).
+- **Authorize** on every sensitive action with server-side checks — never trust client-supplied roles, prices, or user ids.
+- **Least privilege** for service credentials; blast radius of a leaked worker token should not be "entire datastore."
+- **Encrypt in transit everywhere**; encrypt sensitive fields at rest when breach impact demands it.
+- **Audit** security-relevant events (login failures, permission denials, admin actions) with retention suited to investigation (14.11).
+
+Signed URLs and DRM (13.07) are media-specific authorization at the edge — the same idea as capability tokens generally.
+
+## Abuse as a feedback loop
+
+Attackers probe, you block a signal, they rotate the signal. Durable defenses stack layers that raise cost at each step:
+
+| Layer | Examples | Limit |
+| --- | --- | --- |
+| Network / edge | WAF, IP reputation, volumetric DDoS scrubbing | Spoofing, distributed botnets, false positives on NATs |
+| Protocol / API | Auth required, schema validation, size limits, load shedding (02.13) | Authenticated abuse |
+| Identity | MFA, device binding, step-up auth on risky actions | Account takeover after session theft |
+| Velocity / rate limits | Per IP, account, device, API key (14.13) | Key choice errors punish NATs or miss distributed bots |
+| Risk scoring | Fraud models, graph of linked accounts, payment signals | Needs data, creates bias/privacy tensions |
+| Human ops | Trust & safety queues, takedowns | Does not scale alone; needed for novel attacks |
+
+<Steps>
+  <Step title="Inventory expensive and dangerous operations">
+    Login, password reset, OTP send, search, export, payment authorize, content post, URL expand — anything costly or harmful when automated.
+  </Step>
+  <Step title="Attach controls proportional to risk">
+    Cheap GETs might get IP rate limits; OTP send gets per-account and per-destination limits plus anomaly detection; admin APIs get MFA and allowlists.
+  </Step>
+  <Step title="Instrument attempts, not only successes">
+    Failed logins, `429`s, CAPTCHA serves, and fraud declines are first-class metrics. Silent success-only metrics miss the war.
+  </Step>
+  <Step title="Plan the false-positive path">
+    Legitimate users hit blocks. Support runbooks, graduated challenges (step-up MFA before hard ban), and fast unblocks matter as much as the block itself.
+  </Step>
+</Steps>
+
+<Callout type="gotcha">
+IP-only blocking on mobile and university NATs collapses thousands of users into one key — you will rate-limit a campus to protect yourself from one scraper. Combine keys (14.13) and prefer account- and device-scoped limits once identity exists.
+</Callout>
+
+## Fail closed on authz, carefully on availability
+
+Authorization checks should fail closed: if the policy service is down, do not grant admin. Availability controls are subtler — failing closed on every dependency can amplify an outage into a total lockout. Distinguish **security decisions** (fail closed) from **enrichment** (risk score timeout → treat as medium risk + step-up, not as allow-all).
+
+Secrets belong in a manager, not in images. Rotate. Assume leak. SSRF, path traversal, and injectible query surfaces are implementation bugs that architecture reviews should still call out when drawing upload or URL-fetch features.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Add stricter abuse layers when"
+  againstTitle="Keep lighter controls when"
+  forItems={[
+    "The endpoint creates irreversible cost or harm (SMS OTP, payments, bulk export, trust & safety risk)",
+    "You already see automated attack traffic or credential stuffing on related surfaces",
+    "Anonymous access is required but the operation is expensive — need proof and tight quotas",
+    "Regulatory or card-brand rules mandate fraud controls on the flow",
+    "A single abused feature can exhaust an error budget or a third-party quota",
+  ]}
+  againstItems={[
+    "The surface is internal, strongly authenticated, and already allowlisted",
+    "False positives would block core revenue flows and you lack a step-up/appeal path",
+    "You have not instrumented attempts yet — you would tune blind",
+    "Complexity of a risk engine exceeds the threat at current scale",
+    "Load shedding and basic authz already bound the worst case and attack evidence is absent",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Refuse the "we will add a firewall" shrug. Inventory dangerous operations, put authz on the server, rate-limit with thoughtful keys, and add step-up challenges for high risk. Mention false positives and fail-closed authz. Tie volumetric overload to load shedding and rate limits as related but distinct. Abuse is an expected workload, not an edge case.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Abuse and attack traffic are normal workloads — design expensive and dangerous endpoints with explicit controls",
+    "Server-side authn/authz and least-privilege credentials are the foundation; rate limits alone are not a security strategy",
+    "Layer edge, API, identity, velocity, and risk controls so attackers must pay at each step",
+    "Instrument failed attempts and blocks; success-only metrics hide credential stuffing and scraping",
+    "Plan false-positive recovery — NATs and shared IPs make blunt IP bans hazardous",
+    "Fail closed on authorization; degrade carefully on risk enrichment so dependency outages do not grant access",
+  ]}
+/>

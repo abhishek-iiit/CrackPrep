@@ -1,0 +1,91 @@
+---
+title: "Find Minimum in Rotated Sorted Array"
+number: "01.07"
+summary: "One rotation breaks global order but leaves a sorted half — binary search compares against the right edge."
+status: published
+free: true
+difficulty: core
+estMinutes: 12
+tags: [binary-search, array]
+updated: "2026-09-15"
+---
+
+## Sorted, then rotated at one pivot
+
+A strictly ascending array was rotated at unknown index k: `[3, 4, 5, 1, 2]` came from `[1, 2, 3, 4, 5]`. Find the minimum in O(log n) time. All values are distinct.
+
+Linear scan is O(n) — works but ignores the structure. The structure: at most one "drop" where `nums[i] > nums[i+1]`; the element after the drop is the minimum. Binary search finds that drop without walking every index.
+
+Compare `nums[mid]` to `nums[right]` (not `nums[left]` — the left comparison has an off-by-one pitfall when `left === mid`). If `nums[mid] > nums[right]`, the minimum lies strictly to the right of `mid` — the left half including mid is sorted and entirely above the tail. Otherwise the minimum is at `mid` or left of it — shrink `right = mid`.
+
+## Binary search on the rotation point
+
+Invariant: the minimum is always in `[left, right]`. Loop while `left < right`. Never use `left <= right` with `right = mid` — infinite loop.
+
+When loop ends, `left === right` at the minimum index.
+
+Example `[4, 5, 6, 7, 0, 1, 2]`: mid 7 > right 2 → search right. Eventually narrow to index of 0.
+
+<Callout type="gotcha">
+Using `nums[mid] >= nums[left]` to decide direction fails on `[2, 1]` — both sides look "sorted" from the left. Anchoring against `nums[right]` avoids that asymmetry.
+</Callout>
+
+## Solution
+
+```ts
+function findMin(nums: number[]): number {
+  let left = 0;
+  let right = nums.length - 1;
+
+  while (left < right) {
+    const mid = left + Math.floor((right - left) / 2);
+    if (nums[mid] > nums[right]) {
+      left = mid + 1;
+    } else {
+      right = mid;
+    }
+  }
+
+  return nums[left];
+}
+```
+
+Time **O(log n)**, space **O(1)**.
+
+<Tradeoff
+  forTitle="Binary search on rotation when"
+  againstTitle="Linear scan when"
+  forItems={[
+    "O(log n) is required and the array is a single rotation of sorted distinct values",
+    "n up to 5000 — linear passes but binary search is the intended pattern",
+    "This is warmup for 01.08 Search in Rotated Sorted Array on the same structure",
+    "No duplicates — the mid vs right comparison has a strict direction",
+    "You need only the minimum, not a general search key",
+  ]}
+  againstItems={[
+    "Duplicates allowed (follow-up variant) — mid vs right equality stalls; shrink right slowly",
+    "Array is fully sorted (k = 0) — binary search still works, linear scan is one comparison",
+    "n is tiny and interviewer wants readable linear first",
+    "Multiple rotations or arbitrary permutation — binary search prerequisites gone",
+    "You need the rotation index k explicitly — same algorithm, return left",
+  ]}
+/>
+
+## In an interview
+
+Draw rotated sorted array, mark the drop. State distinct values, O(log n). Explain why compare to `nums[right]`.
+
+Walk `[3,4,5,1,2]` on the whiteboard. Before coding, note `right = mid` not `mid - 1` on the left branch.
+
+Follow-ups: with duplicates, find peak in rotated array, 01.08 search target. Bug: infinite loop from `left = mid` when it should be `left = mid + 1`.
+
+<KeyTakeaways
+  items={[
+    "Find Minimum in Rotated Sorted Array locates the rotation pivot with binary search in O(log n)",
+    "Compare nums[mid] to nums[right]: if mid is greater, minimum is strictly right; else minimum is at mid or left",
+    "Loop invariant uses left < right and right = mid on the shrink-left branch to avoid skipping the answer",
+    "Distinct values make the comparison decisive; duplicates require a different tie-break",
+    "01.08 Search in Rotated Sorted Array reuses this structure to decide which half stays sorted",
+    "Linear O(n) is correct but misses the log-time requirement the problem signals",
+  ]}
+/>

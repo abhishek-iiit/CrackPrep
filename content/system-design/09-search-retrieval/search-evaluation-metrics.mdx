@@ -1,32 +1,118 @@
 ---
 title: "Search Evaluation Metrics"
 number: "09.09"
-summary: "Search Evaluation Metrics — notes in progress."
-status: draft
+summary: "Precision, recall, MAP, nDCG, and online tests — how to know a ranking change helped before it reshapes what users click."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 15
+tags: [search, evaluation, metrics, nDCG]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Feeling that results got better is not a release criterion
 
-What breaks without this, and the situation that forces the decision.
+Search quality is easy to argue about and hard to measure. One impressive query in a demo does not mean the new BM25 boosts, champion cutoff, or learning-to-rank model (09.05, 09.06, 09.08) improved the system. Another team's favorite query may have gotten worse. **Evaluation metrics** turn ranking into something you can compare across versions: offline against labeled judgments, and online against live user outcomes.
 
-## How it works
+09.01 Information Retrieval System Design already defined precision and recall for sets. Ranking evaluation extends them to *ordered* lists — because showing the right document at position 10 is worse than showing it at position 1, even if both lists contain it. Without that, two systems with identical recall look identical while users experience them as night and day.
 
-The mechanism, step by step.
+## Offline set metrics (unordered)
 
-## Tradeoffs
+Given a query, a set of retrieved documents, and a set of known relevant documents:
+
+- **Precision** = |retrieved ∩ relevant| / |retrieved|
+- **Recall** = |retrieved ∩ relevant| / |relevant|
+- **F1** = harmonic mean of precision and recall
+
+Useful for the retrieval stage (09.03): did boolean + champions still recover the judged relevant docs? Less useful alone for ranking, because they ignore order. A system that puts all relevant docs at ranks 90–100 can score perfect recall@100 and still be unusable.
+
+## Offline ranked metrics
+
+Judgments are usually graded (0 irrelevant … 3 perfect) or binary. Metrics differ in how they reward putting good documents high.
+
+| Metric | What it asks | Notes |
+| --- | --- | --- |
+| Precision@k | Of the top k, what fraction are relevant? | Simple; ignores order inside k and anything below k |
+| Recall@k | Of all known relevant, what fraction appear in top k? | Critical for retrieval-tier changes |
+| MRR (Mean Reciprocal Rank) | Averaged 1/rank of first relevant hit | Good when one right answer matters (navigational) |
+| MAP (Mean Average Precision) | Mean of per-query average precision over ranks | Classic binary-relevance ranking metric |
+| nDCG@k | Normalized discounted cumulative gain | Handles graded relevance; discounts lower ranks |
+
+**DCG** sums `gain(rel_i) / log2(i+1)` over positions `i` in the result list — lower ranks contribute less. **nDCG** divides by the DCG of the ideal ordering of the same judgments, so scores sit in [0, 1] and can be compared across queries with different amounts of relevant material.
+
+<Formula label="Discounted cumulative gain">DCG@k = Σ_{i=1..k} (2^{rel_i} − 1) / log2(i + 1)</Formula>
+
+(The `2^{rel} − 1` gain is a common graded formulation; some setups use `rel_i` directly. State which you use.)
+
+**nDCG@k** = DCG@k / IDCG@k. Report at the depth users actually see — nDCG@10 for a ten-blue-link page, nDCG@3 for a mobile product grid. Quoting nDCG@1000 when the UI shows three cards optimizes a fantasy product.
+
+### Worked fragment
+
+Judged relevance for a query's top-4: `[3, 0, 2, 1]` with gains `2^rel − 1` → `[7, 0, 3, 1]`.
+
+DCG ≈ 7/log2(2) + 0/log2(3) + 3/log2(4) + 1/log2(5) = 7/1 + 0 + 3/2 + 1/2.322 ≈ 7 + 1.5 + 0.43 ≈ **8.93**.
+
+Ideal order `[3, 2, 1, 0]` → gains `[7, 3, 1, 0]`; IDCG ≈ 7 + 3/1.585 + 1/2 + 0 ≈ 7 + 1.89 + 0.5 ≈ **9.39**.
+
+nDCG@4 ≈ 8.93/9.39 ≈ **0.95**. Swapping the 0 and the 2 would move DCG materially — that is the metric doing its job.
+
+## Building a judgment set
+
+Metrics are only as honest as the labels:
+
+- **Pooling.** Take top-k from several systems, union, judge the pool — otherwise documents never retrieved by any system look "irrelevant" forever and metrics punish recall innovations unfairly.
+- **Query sampling.** Mix head and tail queries from logs; optimizing only head queries abandons the long tail.
+- **Inter-judge agreement.** Relevance is subjective; measure agreement and use multiple judges on hard queries.
+- **Freshness.** Stale judgments drift from the live corpus (09.10 Search Index Synchronization) — retire or refresh sets on a cadence.
+
+Offline metrics catch regressions before users do. They miss presentation effects, latency, and personalization that only appear in production.
+
+## Online evaluation
+
+| Method | Measures | Risk |
+| --- | --- | --- |
+| A/B test | CTR, reformulation rate, dwell, conversion | CTR theater without success metrics (09.08) |
+| Interleaving | Which system wins pairwise clicks | Sensitive setup; still click-biased |
+| Guardrail metrics | p99 latency, empty-result rate, error rate | A "better" ranker that times out is not better |
+
+Run online tests with a primary success metric aligned to the product (purchase, session success) plus guardrails (latency, revenue, complaint rate). Offline nDCG lifts that fail online often mean labels disagree with users — or position bias / caption changes dominated.
+
+<Callout type="tip">
+When proposing a ranking change in an interview or a design review, name the metric and the depth up front: "I would gate this on nDCG@10 on a pooled judgment set plus an A/B on purchase rate with latency guardrails." That one sentence signals you know search quality is measured, not asserted.
+</Callout>
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Trust offline metrics to decide when"
+  againstTitle="Require online evidence when"
+  forItems={[
+    "You are comparing retrieval/ranking algorithms on a stable, pooled, graded judgment set",
+    "The change is dangerous enough that you want a gate before any live traffic (e.g. new stop list)",
+    "Query classes are well represented in the labels, including long-tail samples",
+    "You need fast iteration — judging once, scoring many candidate runs offline",
+    "Latency and ops guardrails are checked separately; offline only answers relevance ordering",
+  ]}
+  againstItems={[
+    "UI, snippets, or latency change how users examine results — labels cannot see that",
+    "Personalization or session context dominates and offline sets are query-only",
+    "Labels are old, thin, or disagree with downstream success metrics historically",
+    "The metric you can compute (CTR) is known to diverge from business success",
+    "You are validating exploration / cold-start policies that intentionally sacrifice short-term CTR",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Define success in one breath: "Offline I care about nDCG@k on graded judgments for ranking and recall@k for retrieval changes; online I A/B a success metric with latency guardrails — not CTR alone." If they ask how you get labels, say pooling from multiple rankers and sampling head+tail queries.
 
-<KeyTakeaways items={["", "", ""]} />
+Name a failure mode unprompted: optimizing precision@3 can hide a recall collapse from an aggressive champion list — always watch a recall-oriented metric when touching 09.03/09.06. That diagnostic split mirrors "missing doc vs wrong order" from 09.01.
+
+<KeyTakeaways
+  items={[
+    "Precision and recall describe sets; ranked search needs order-aware metrics like precision@k, MAP, MRR, and nDCG@k",
+    "nDCG discounts lower ranks and supports graded relevance — report it at the depth users actually see",
+    "Judgment sets should be pooled and should sample head and tail queries, or metrics will lie about recall and long-tail quality",
+    "Use recall@k to evaluate retrieval-tier changes and nDCG/MAP to evaluate reranking",
+    "Online A/B tests need a product success metric and latency guardrails; CTR alone is easy to game and misread",
+    "Gate ranking launches on named metrics — search quality that cannot be measured will be debated forever instead of improved",
+  ]}
+/>

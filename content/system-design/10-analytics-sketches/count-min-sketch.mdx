@@ -1,32 +1,123 @@
 ---
 title: "Count-Min Sketch"
 number: "10.08"
-summary: "Count-Min Sketch — notes in progress."
-status: draft
+summary: "A fixed-size counter array that estimates how many times any key has occurred, trading a small one-sided overestimate for memory that never grows with the number of distinct keys."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: deep
+estMinutes: 20
+tags: [sketches, probabilistic, counting, streaming]
+updated: "2026-09-15"
 ---
 
-## The problem
+## A counter per distinct key does not fit in memory
 
-What breaks without this, and the situation that forces the decision.
+Count how many times each search query ran today and a hash map is the obvious answer: one entry per distinct query, incremented on every occurrence. It works until the query vocabulary itself becomes the problem. A large search engine sees tens of millions of distinct query strings a day, many of them typos, generated URLs, or a single user's one-off phrasing, appearing once and never again. The hash map grows with every new distinct key, not with traffic volume, and there is no natural ceiling — the long tail of one-off keys is often larger than the set of keys anyone will ever ask about again.
 
-## How it works
+The same shape shows up counting distinct IP addresses hitting an endpoint, hashtags used today, or product ids viewed in the last hour. In every case you do not actually want to remember every key forever; you want a running count you can query for any key, cheaply, in memory the whole time, without the structure's size depending on how many distinct keys have shown up.
 
-The mechanism, step by step.
+You cannot get an exact count without storing something per key — that is a counting argument, not an engineering problem, and no clever encoding gets around it. What you can get is an approximate count with a one-sided error: a structure that never undercounts, sometimes overcounts by a bounded amount, and whose size you fix in advance regardless of how many distinct keys eventually appear.
 
-## Tradeoffs
+A Count-Min Sketch is that structure. Like a Bloom filter, it is a fixed array touched through a handful of hash functions with no key material stored anywhere — 04.13 Bloom Filters covers that shared family of technique in detail, and is worth reading first if the "bit array plus hash functions" idea is new. Where a Bloom filter answers a yes/no membership question, a Count-Min Sketch answers "about how many" — and where a Bloom filter's error is a false "probably present", a Count-Min Sketch's error is a count that is too high, never too low.
+
+## Mechanism
+
+The state is a two-dimensional array of counters, `d` rows by `w` columns, all initialised to zero, plus `d` hash functions — one per row, each mapping a key to one of the `w` columns in that row. No keys are stored; only integers.
+
+<Steps>
+  <Step title="Insert: increment one counter per row">
+    Hash the key with each of the `d` row hash functions to get `d` column positions, one per row, and increment each of those `d` counters by one (or by the event's weight, if you are summing something other than a plain count). Two different keys can land on the same counter in a given row — that is a collision, and it is expected. It only ever inflates a counter; it never decrements one.
+  </Step>
+  <Step title="Query: probe the same d counters">
+    Hash the key the same `d` ways and read the `d` counters those hashes point to.
+  </Step>
+  <Step title="Return the minimum, not the average">
+    Every one of those `d` counters is greater than or equal to the key's true count, because a collision can only add to a counter, never take from it. The minimum of `d` independent overestimates is the tightest bound the sketch can offer without extra structure — an average would be dragged upward by whichever row happened to collide worst. The returned value is therefore always at least the true count, and the sketch's whole error budget is in how much larger it can be.
+  </Step>
+</Steps>
+
+Insert and query are both O(d) — a handful of hash computations and array reads, independent of how many keys the sketch has absorbed or how many distinct keys exist. That constant-time property, not the accuracy, is what makes it fit a stream: a request handler's counter update cannot afford to slow down as the key space grows, and this does not.
+
+<Callout type="gotcha">
+Querying a key that was never inserted does not reliably return zero — it returns whatever the collision floor happens to be at its `d` positions, which can be small but nonzero. This is a real difference from a Bloom filter, which promises a certain "definitely not present" for exactly this case. A Count-Min Sketch promises something narrower: every returned count is at least the true count, and inflated above it only by collisions. It cannot tell you a key is absent; it can only tell you a count, and the count for an absent key is usually close to zero rather than exactly zero.
+</Callout>
+
+## The error is a knob, and the knob has a formula
+
+<Formula label="Sizing for a target error">width w = ⌈e / ε⌉,  depth d = ⌈ln(1 / δ)⌉</Formula>
+
+Here `ε` (epsilon) bounds how much the estimate can overshoot, as a fraction of `N` — the total count of everything inserted so far, summed across all keys, not the number of distinct keys. `δ` (delta) is the probability the bound fails to hold. The guarantee the formula buys is:
+
+<Formula label="Error bound">estimated count ≤ true count + ε·N, with probability ≥ 1 − δ</Formula>
+
+Two things fall out of this that matter more than the formula itself:
+
+- **The error term scales with total stream volume, not with the key's own frequency.** A sketch sized for `ε` = 0.001 over a stream of 10 million events can overshoot any single count by up to 10,000 with 99% confidence. For a key whose true count is 2 million, that is noise. For a key whose true count is 50, the estimate could read anywhere up to 10,050 — useless as a precise count, though still informative as "this key is not a heavy hitter." This is exactly why Count-Min Sketch is normally paired with a threshold or a heap rather than trusted for a single number in isolation; 10.09 Top-K Heavy Hitters builds that pairing directly on top of this sketch.
+- **`d` depends only on the confidence you want, not on the error size.** Tightening `ε` costs more columns; tightening `δ` costs more rows. They are independent knobs, which is why the formula splits them into two separate terms rather than one.
+
+### Worked example: three error targets over the same 10M-event stream
+
+Fix `δ` = 0.01 (99% confidence) and a stream of `N` = 10,000,000 events, and vary `ε`.
+
+| Target `ε` | Width `w = ⌈e/ε⌉` | Depth `d = ⌈ln(1/δ)⌉` | Total counters | Size at 4 bytes/counter | Error bound (ε·N) |
+| --- | --- | --- | --- | --- | --- |
+| 1% | 272 | 5 | 1,360 | 5.3 KB | ≤ 100,000 |
+| 0.1% | 2,719 | 5 | 13,595 | 53.1 KB | ≤ 10,000 |
+| 0.01% | 27,183 | 5 | 135,915 | 530.9 KB | ≤ 1,000 |
+
+`d` does not move down the table because `δ` did not move — `ln(1/0.01)` = 4.605, rounded up to 5 regardless of how tight `ε` is. Each additional decimal digit of accuracy costs roughly a 10x wider array, which is a steeper price than a Bloom filter's flat 4.8-bits-per-decade curve, because here the thing being bounded is an absolute count rather than a fixed-size membership bit.
+
+Set against the alternative: holding exact counts for, say, 50 million distinct keys in a hash map — 16 bytes for a hashed key, 8 for a 64-bit counter, plus bucket and pointer overhead that commonly runs the total to 40–60 bytes an entry in a typical runtime — lands around 2–3 GB, and that figure grows every time a new distinct key shows up. The 0.1% row above is 53 KB, fixed, forever, no matter whether the stream sees a thousand distinct keys or a billion. That gap is the entire reason to reach for the sketch, and those figures are order-of-magnitude, not a benchmark — the ratio is the point, not the exact byte count.
+
+<Callout type="tip">
+Plain Count-Min Sketch increments all `d` counters unconditionally on every insert, which lets colliding keys drag each other's estimates up over time. A common refinement called **conservative update** reads the current `d` counters first, computes what the post-insert minimum would be, and raises a counter only as far as that minimum requires — never higher. It costs one extra read per insert and noticeably tightens the overestimate in practice, at no change to the sizing formula or the worst-case guarantee.
+</Callout>
+
+## What each operation costs
+
+| Operation | Count-Min Sketch | Exact hash map of counters |
+| --- | --- | --- |
+| Insert | O(d) hash + increment, fixed array, never resizes | Amortised O(1), but the table grows with distinct keys |
+| Query | O(d) hash + read + min | O(1), exact |
+| Space | `w · d` counters, fixed regardless of key cardinality | Proportional to distinct keys, unbounded in the long tail |
+| Error | One-sided overestimate, bounded by `ε·N` at confidence `1 − δ` | None |
+| Delete / decrement | Not supported without going negative on shared counters | Trivial |
+| Merge two sketches | Elementwise sum — but only with identical `w`, `d`, and hash functions | Map merge, proportional to combined key count |
+
+Merging is worth pausing on: because every counter is a sum, two sketches built with the same dimensions and hash functions can be combined by adding corresponding cells, giving the sketch for the union of both streams with no extra error introduced beyond what each sketch already carried. That property is what lets a Count-Min Sketch live per shard and roll up into a global view cheaply — 10.05 Mergeable Sketches For Analytics covers the general pattern this belongs to.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Reach for a Count-Min Sketch when"
+  againstTitle="Use something else when"
+  forItems={[
+    "Cardinality is large or unbounded and an exact per-key counter map would grow without limit",
+    "You mainly care about relative frequency or heavy hitters, where the additive error is small next to the true count",
+    "You need constant memory fixed in advance, independent of how many distinct keys eventually appear",
+    "Counters need to merge across shards or time windows — elementwise sum with no extra error",
+    "The workload is append-only counting: increments only, no deletes or decrements required",
+  ]}
+  againstItems={[
+    "You need an exact count for billing, quotas, or anything audited — a bounded overestimate is a bug there, not a tuning parameter",
+    "Most of the keys you care about are rare, where ε·N swamps the true value and the estimate is not informative",
+    "You need to know whether a key exists at all, not how often — that is a membership question, and 04.13 Bloom Filters answers it with a real guarantee of no false negatives",
+    "The key population is small enough to fit an exact hash map in memory anyway, where exactness costs nothing extra",
+    "Counts must decrease over time (expiring events, decrementing on removal) without a workaround like time-windowed sketches",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Introduce it by the cost you are avoiding: "Tracking an exact counter per distinct query string does not bound memory, because the tail of one-off queries is unbounded — I would use a Count-Min Sketch, a fixed `w`-by-`d` array of counters, sized once for a target error rate and confidence." Be ready to do the sizing arithmetic out loud — width from `e/ε`, depth from `ln(1/δ)` — and to state the guarantee precisely: the estimate is never below the true count, and it is above it by at most `ε·N` with probability `1 − δ`, where `N` is total stream volume, not the key's own count.
 
-<KeyTakeaways items={["", "", ""]} />
+The follow-up that separates a real understanding from a memorised formula is: "what happens for a rare key?" The honest answer is that the sketch is a poor tool for rare keys in isolation, because the error term does not shrink with the key's own frequency — which is exactly why it is almost always paired with a heap or a threshold rather than read directly, the way 10.09 Top-K Heavy Hitters does.
+
+<KeyTakeaways
+  items={[
+    "A Count-Min Sketch estimates per-key counts in fixed memory by hashing each key into d rows of a w-column array and incrementing one counter per row on every insert",
+    "Querying takes the minimum across the d hashed counters, because collisions can only inflate a counter, never deflate it — the estimate is always greater than or equal to the true count",
+    "Width is sized from the target error ε as w = ⌈e/ε⌉, and depth from the target confidence δ as d = ⌈ln(1/δ)⌉ — the two knobs are independent",
+    "The error bound ε·N scales with total stream volume, not with any single key's frequency, so the sketch is strong for heavy hitters and weak for precise counts of rare keys",
+    "Two sketches with identical dimensions and hash functions merge by elementwise addition, which is what lets per-shard sketches roll up into a global count with no extra error",
+    "It answers 'about how many', never 'does this exist' — for a membership question with a real no-false-negatives guarantee, reach for 04.13 Bloom Filters instead",
+  ]}
+/>

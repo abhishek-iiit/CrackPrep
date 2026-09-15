@@ -1,0 +1,84 @@
+---
+title: "Missing Number"
+number: "01.14"
+summary: "XOR every index and value cancels duplicates and leaves the one missing integer — no overflow, no sort, O(n) time."
+status: published
+free: true
+difficulty: intro
+estMinutes: 9
+tags: [bit-manipulation, array, math]
+updated: "2026-09-15"
+---
+
+## The gap in a perfect sequence
+
+An array `nums` contains `n` distinct integers in the range `[0, n]`. Exactly one number from that range is missing. Find it.
+
+`nums = [3, 0, 1]` → missing `2`. `nums = [0, 1]` → missing `2`. The domain is known and complete except for one hole — that structure is the entire problem.
+
+Sort and scan: **O(n log n)**. Sum formula `n*(n+1)/2 - sum(nums)`: **O(n)** but risks integer overflow on languages with fixed-width ints (LeetCode still accepts it in JS/TS). Hash set of seen numbers: **O(n)** time and extra **O(n)** space. XOR does **O(n)** time, **O(1)** extra space, with no overflow anxiety.
+
+## XOR cancels pairs; one survivor remains
+
+XOR is associative and commutative, and `x ^ x = 0`. If you XOR every number that *should* appear with every number that *does* appear, matched pairs annihilate. The missing value is the only one without a partner.
+
+Include **indices** `0..n` as well as **values** — that way the duplicate index/value pairs from present numbers cancel, and the extra index (or value slot) for the missing number survives.
+
+For `[3, 0, 1]` (n = 3): XOR `0^1^2^3` (indices) with `3^0^1` (values). Pair by pair: `0^0`, `1^1`, `3^3` cancel; `2` remains.
+
+<Steps>
+<Step title="Initialize result to 0">XOR identity.</Step>
+<Step title="Loop i from 0 to n - 1">XOR both index `i` and value `nums[i]` into the running result.</Step>
+<Step title="Return result">The lone unmatched integer.</Step>
+</Steps>
+
+## Solution
+
+```ts
+function missingNumber(nums: number[]): number {
+  let xor = 0;
+  for (let i = 0; i < nums.length; i++) {
+    xor ^= i ^ nums[i];
+  }
+  xor ^= nums.length; // index n has no nums[n]
+  return xor;
+}
+```
+
+Time **O(n)**. Space **O(1)**.
+
+## XOR versus sum formula
+
+<Tradeoff
+  forTitle="XOR when"
+  againstTitle="Sum or hash set when"
+  forItems={[
+    "You want O(1) extra space without overflow concerns on large n",
+    "The problem is 'find the unmatched element' in a paired set — XOR is the canonical tool",
+    "You are chaining bit-manipulation lessons and need a clean canceling narrative",
+    "Values are arbitrary integers, not just 0..n — XOR still works if you XOR expected vs actual",
+  ]}
+  againstItems={[
+    "The range is 1..n instead of 0..n — sum formula adjusts with one line and is very readable",
+    "You already need a set for another reason (detecting duplicates elsewhere)",
+    "Interviewer asks for a approach that handles repeated missing numbers — XOR assumes exactly one gap",
+    "JavaScript numbers are doubles — sum is safe here; in Java/C++ mention overflow and pick XOR",
+  ]}
+/>
+
+## In an interview
+
+Restate with example: n = 3, nums = [3,0,1], missing 2. Offer sum formula first if it is faster to write, then upgrade to XOR: "every present number appears twice — once as value, once as index — except the missing one."
+
+Follow-ups: two missing numbers (XOR alone is not enough — need bit partitioning), missing number in a stream, or 0-indexed vs 1-indexed range adjustment.
+
+Bug to flag: forgetting to include index `n` in the XOR — `nums.length` is `n`, and there is no `nums[n]`, but index `n` must still participate.
+
+<KeyTakeaways items={[
+  "XOR all indices 0..n and all values; pairs cancel, the missing integer survives.",
+  "O(n) time, O(1) space — no sort, no hash set, no overflow unlike the sum trick.",
+  "The sum formula n(n+1)/2 - sum(nums) works but mention overflow in fixed-width languages.",
+  "Include index n explicitly — nums has length n, so the last index in the full range is n itself.",
+  "XOR find-the-odd-one-out generalizes to 'single number among pairs' variants.",
+  "For two missing numbers, XOR gives their XOR but not their values — need an extra bit to split groups.",
+]} />

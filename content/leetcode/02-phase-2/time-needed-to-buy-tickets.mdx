@@ -1,0 +1,93 @@
+---
+title: "Time Needed to Buy Tickets"
+number: "02.47"
+summary: "Person k finishes after k full rounds plus the tickets they still need — O(n) simulation or direct arithmetic."
+status: published
+free: true
+difficulty: intro
+estMinutes: 10
+tags: [array, simulation]
+updated: "2026-09-15"
+---
+
+## Simulating every second works — but you can count rounds
+
+People stand in a queue; each second the person at the front buys one ticket and goes to the back if they still need more. Given ticket counts and index `k`, return how many seconds until person `k` finishes (buys their last ticket).
+
+Naive simulation runs a loop every second, decrementing the front — O(total tickets), which can reach 100 × 100 = 10⁴ here, acceptable but unnecessary. Person `k` buys once per full queue rotation until their count hits zero, plus partial rotations at the end.
+
+## Count full rounds plus the tail
+
+Person `k` participates in every second until their last ticket. In each full pass through the queue, they buy exactly once — that costs `n` seconds per round. After `tickets[k] - 1` full rounds they have one ticket left. For rounds before they finish, everyone ahead with tickets remaining also buys once per round.
+
+Direct formula: sum over all `i` of `min(tickets[i], tickets[k])` when `i < k`, plus `min(tickets[i], tickets[k] - 1)` when `i > k`, plus `tickets[k]` for person k themselves — or simulate with a queue in one pass.
+
+<Steps>
+<Step title="For each person i, count how many times they buy before k finishes">
+  If i ≤ k: they buy min(tickets[i], tickets[k]) times. If i > k: min(tickets[i], tickets[k] - 1).
+</Step>
+<Step title="Sum all purchases — each purchase is one second">
+  Person k always contributes tickets[k] seconds; others contribute less once k is on their last ticket.
+</Step>
+<Step title="Alternatively, simulate with a queue of (index, remaining) pairs">
+  Stop when person k's remaining hits 0; count seconds elapsed.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function timeRequiredToBuy(tickets: number[], k: number): number {
+  let seconds = 0;
+
+  for (let i = 0; i < tickets.length; i++) {
+    if (i <= k) {
+      seconds += Math.min(tickets[i], tickets[k]);
+    } else {
+      seconds += Math.min(tickets[i], tickets[k] - 1);
+    }
+  }
+
+  return seconds;
+}
+```
+
+Time **O(n)**. Space **O(1)**.
+
+<Tradeoff
+  forTitle="Direct counting when"
+  againstTitle="Queue simulation when"
+  forItems={[
+    "n and ticket counts are modest — O(n) arithmetic beats O(total tickets) simulation",
+    "You see the round structure: k gets tickets[k] turns, others capped by k's remaining",
+    "No mutable queue state — single pass over the array",
+    "Space O(1) vs O(n) for a simulated queue",
+    "The formula handles k at any position without index bookkeeping during simulation",
+  ]}
+  againstItems={[
+    "The problem variant changes rules (priority queue, multiple windows) — simulation generalizes",
+    "Ticket counts are huge and queue logic has complex per-second rules",
+    "You need the exact second-by-second order for debugging or output",
+    "Interviewer asks you to simulate first to build intuition before optimizing",
+    "People can leave mid-queue — counting formula breaks, simulation survives",
+  ]}
+/>
+
+## In an interview
+
+Restate: `[2, 3, 2]`, k = 2 → 6 seconds. Confirm one ticket per second, front person buys then re-queues if more tickets remain, stop when person k buys their last.
+
+Say out loud that simulating every second is O(total tickets) but person k's finish time depends only on how many times each person buys before k's last purchase — O(n) counting. Mention the asymmetry: people after k do not get a turn during k's final ticket.
+
+Follow-ups: priority queue variant, or multiple ticket windows. The bug interviewers watch for is using `tickets[k]` for everyone instead of `tickets[k] - 1` for indices after k.
+
+<KeyTakeaways
+  items={[
+    "Time Needed to Buy Tickets counts purchases per person before k finishes, not every simulated second",
+    "For i ≤ k: person i buys min(tickets[i], tickets[k]) times; for i > k: min(tickets[i], tickets[k] - 1)",
+    "Person k's last ticket happens without a full re-queue cycle for people behind them",
+    "Time O(n), space O(1) — one pass, no queue allocation",
+    "Queue simulation is correct but O(total tickets); counting is the intended optimization",
+    "The i > k vs i ≤ k split is the edge case that breaks naive full-round counting",
+  ]}
+/>

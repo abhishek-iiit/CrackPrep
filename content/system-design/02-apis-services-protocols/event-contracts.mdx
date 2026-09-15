@@ -1,32 +1,96 @@
 ---
 title: "Event Contracts"
 number: "02.08"
-summary: "Event Contracts — notes in progress."
-status: draft
+summary: "The rules that let a producer change an event's shape without silently breaking every consumer reading it downstream."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [events, schema, contracts, messaging]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The problem: a bad request fails once; a bad event fails at every consumer, later
 
-What breaks without this, and the situation that forces the decision.
+A REST or gRPC contract fails synchronously and locally. Send a malformed request and you get a 400 back in milliseconds, from the one caller who sent it, and nobody else is affected. An event contract has none of that safety net. A producer publishes a fact to a topic — "order placed," "user deleted" — and walks away. It does not know who is listening, how many consumers there are, whether they were written last week or two years ago, or whether they are even running right now. If the shape of that event is wrong, or changes in a way a consumer did not expect, the failure does not happen at publish time. It happens later, independently, in every consumer that reads the event, and by the time someone notices, the bad shape may already sit in the topic's retention window for days, waiting to be replayed into an equally confused consumer that gets added next month.
 
-## How it works
+That asymmetry — one producer, an unknown and unbounded set of consumers, none of them synchronously connected to it — is why "just publish the event" is not a contract. A contract is a promise you can be held to, and a promise only the producer can see is not one.
 
-The mechanism, step by step.
+## What actually has to be pinned down
 
-## Tradeoffs
+An event contract is smaller than it sounds. It has four parts, and skipping any one of them is where the incidents come from.
+
+- **A stable event type and version.** `order.placed.v1`, not just `order.placed` — the version is what lets a consumer's parsing code make an assumption about shape and be right about it.
+- **A schema.** Field names, types, which fields are required versus optional, and what an absent field means. Enforced by a schema registry (Avro, Protobuf, JSON Schema) if you have consumers you do not control directly; enforced by convention and code review if you do.
+- **A delivery guarantee.** At-least-once is the default for almost every broker in production use, which means every consumer must tolerate duplicates — the same idempotency problem 02.09 Retries Timeouts And Idempotency covers on the request path, and it does not go away just because the transport changed.
+- **An ordering guarantee, or the explicit absence of one.** "Events for the same order arrive in order" is only true if they share a partition key, and a consumer that assumes global ordering across an unpartitioned topic will occasionally process a cancellation before the order it cancels.
+
+Skip the version and you cannot change the shape without a flag day across every consumer. Skip the schema and the first consumer to misparse a field finds out in production. Skip the delivery and ordering guarantees and you get code that looks correct and is wrong exactly once in a while — worse than code that is wrong every time, because nobody trusts it enough to look.
+
+## Evolving the shape without a flag day
+
+<Steps>
+  <Step title="Add new fields as optional, with a default">
+    A consumer built against the old schema should be able to read a message with fields it has never heard of and ignore them. This is backward compatibility from the consumer's side: old code, new data.
+  </Step>
+  <Step title="Never repurpose or remove a field consumers may still read">
+    Removing a required field, changing its type, or reusing its name for something else breaks every consumer still on the old assumption, silently, because the field is either missing or means something different now. If a field must go, stop populating it only after every known consumer has migrated off it, not before.
+  </Step>
+  <Step title="Treat a new enum value as a breaking change">
+    A consumer written with a `switch` over `{pending, shipped, cancelled}` and no default case does not error on a new `returned` value — it silently falls through and does nothing, which is worse than a crash because nobody sees it happen. Contracts that use enums need either a documented default-case rule or a version bump when a new value is added.
+  </Step>
+  <Step title="Dual-publish across a breaking change">
+    When a change cannot be made compatible — a field genuinely needs a new type, an event needs to split in two — publish both the old and new shapes for a deprecation window long enough for every consumer to migrate, then retire the old shape on a schedule you announced, not one you assumed.
+  </Step>
+</Steps>
+
+<Callout type="gotcha">
+A schema registry with compatibility checking (Avro's BACKWARD, FORWARD, and FULL modes are the common vocabulary) enforces most of this automatically — it rejects a producer's new schema at publish time if it breaks the promised compatibility mode. What it will not catch is the enum default-case problem above, or a consumer relying on an undocumented invariant the schema never captured, like field ordering or the assumption that a particular optional field is "always actually present in practice." Those are contract violations a type system cannot see.
+</Callout>
+
+## Thin events versus fat events
+
+The other decision baked into an event contract is how much it carries. A thin event says only that something happened and a key to look it up — `{orderId, eventType, timestamp}` — and every consumer calls back to the source of truth for the rest. A fat event carries the full state at the time of the change, so a consumer never has to call back at all.
+
+| | Thin event (notification) | Fat event (full payload) |
+| --- | --- | --- |
+| Payload size | Small, cheap to publish and store | Proportional to the entity — can be kilobytes per event |
+| Consumer work | Must call back to the source for details — a read, with its own availability and latency | Self-contained; no callback, no dependency on the source being up |
+| Staleness risk | None — the callback reads current state | The payload is a snapshot at publish time; a consumer acting on it later may act on stale data |
+| Coupling | Every consumer depends on the source service's read API and its uptime | Consumer depends only on the topic; the source can be down and consumers still catch up |
+| Best fit | Low-volume, latency-tolerant consumers, or when only current state matters | High-volume replay, consumers that must not add read load to the source, audit and history use cases |
+
+Most systems land on fat events for one reason: a callback per event turns every consumer into a source of read load on the producer, and that read load scales with the number of consumers, which a schema does not.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Enforce a formal, versioned schema contract when"
+  againstTitle="Keep it informal when"
+  forItems={[
+    "More than one team owns a consumer — nobody can walk over and ask what a field means",
+    "The event is replayed from retained history, sometimes months later, by code that did not exist when it was published",
+    "Consumers are added over time by people who were not in the room when the event was designed",
+    "A wrong field breaks money, inventory, or anything else expensive to reconcile after the fact",
+    "You need automated compatibility checking to gate deploys, not a changelog someone might read",
+  ]}
+  againstItems={[
+    "One producer and one consumer, both owned by the same team, deployed together",
+    "The event is a low-stakes internal signal — a cache invalidation hint, a metrics tick — where a missed or malformed message costs nothing but a stale value",
+    "The data model is still changing weekly and locking a schema would slow iteration more than a bad message would cost",
+    "There is no replay and no retention beyond a few seconds, so there is no old data to remain compatible with",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Introduce it as a coupling problem, not a formatting one: "The producer and consumers are decoupled in time, so I need the schema to be a contract they can both check independently, not tribal knowledge." Expect a follow-up on compatibility — be ready to say which direction you are optimizing for (old consumers reading new data is the common one) and to name at least one concrete rule, like additive-only fields or a version bump on removal. If asked about delivery, say plainly that at-least-once is the default assumption and that means consumers need to be idempotent regardless of how careful the schema is — a clean schema does not make duplicates disappear.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "A request contract fails once, synchronously, to the caller who sent it; a broken event contract fails independently in every consumer, often much later",
+    "An event contract needs a stable versioned type, a schema with explicit optional/required fields, a stated delivery guarantee, and a stated ordering guarantee",
+    "Safe evolution means additive-only changes for existing consumers — new optional fields with defaults, no removed or repurposed fields, and a version bump for anything else",
+    "A new enum value is a breaking change for any consumer whose switch statement has no default case, even though no field type changed",
+    "At-least-once delivery is the default in production brokers, so every consumer needs its own idempotency handling regardless of how strict the schema is",
+    "Fat events that carry full state avoid turning every consumer into read load on the producer; thin events cost less to publish but couple consumers to the producer's uptime",
+  ]}
+/>

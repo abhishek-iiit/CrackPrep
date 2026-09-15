@@ -1,0 +1,109 @@
+---
+title: "Interleaving String"
+number: "03.29"
+summary: "s3 must be built by interleaving s1 and s2 in order — dp[i][j] tracks whether the first i+j chars of s3 can come from i chars of s1 and j of s2."
+status: published
+free: true
+difficulty: core
+estMinutes: 15
+tags: [dynamic-programming, string]
+updated: "2026-09-15"
+---
+
+## Two pointers is not enough
+
+Given `s1`, `s2`, and `s3`, return whether `s3` can be formed by interleaving characters from `s1` and `s2` **preserving each string's internal order**. `"aabcc"`, `"dbbca"`, `"aadbbcbcac"` → true.
+
+Greedy two-pointer fails: choosing to take from `s1` now may block a valid interleaving later. The state you need is **how many characters consumed from each source** — `(i, j)` with `i + j` matching progress in `s3`.
+
+If lengths do not sum (`|s1| + |s2| !== |s3|`), return false immediately. Otherwise `dp[i][j]` = can we form `s3[0 .. i+j-1]` using `s1[0..i-1]` and `s2[0..j-1]`?
+
+## Boolean 2D DP
+
+`dp[0][0] = true`. Transition to `(i,j)` from `(i-1,j)` if `s1[i-1] === s3[i+j-1]`, or from `(i,j-1)` if `s2[j-1] === s3[i+j-1]`. Answer: `dp[m][n]`.
+
+The invariant: any valid interleaving of the consumed prefixes corresponds to a path through the grid from `(0,0)` to `(m,n)`.
+
+<Steps>
+<Step title="Reject length mismatch">
+If `s1.length + s2.length !== s3.length`, return false.
+</Step>
+<Step title="Initialize dp[0][0] = true">
+Zero characters taken from both — empty prefix matches.
+</Step>
+<Step title="Fill dp[i][j] from top and left neighbors">
+OR the two possible last-character sources.
+</Step>
+<Step title="Return dp[m][n]">
+Both strings fully consumed iff interleaving is valid.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function isInterleave(s1: string, s2: string, s3: string): boolean {
+  if (s1.length + s2.length !== s3.length) return false;
+
+  const m = s1.length;
+  const n = s2.length;
+  const dp = Array.from({ length: m + 1 }, () =>
+    new Array(n + 1).fill(false)
+  );
+  dp[0][0] = true;
+
+  for (let i = 0; i <= m; i++) {
+    for (let j = 0; j <= n; j++) {
+      const k = i + j;
+      if (i > 0 && s1[i - 1] === s3[k - 1]) {
+        dp[i][j] = dp[i][j] || dp[i - 1][j];
+      }
+      if (j > 0 && s2[j - 1] === s3[k - 1]) {
+        dp[i][j] = dp[i][j] || dp[i][j - 1];
+      }
+    }
+  }
+
+  return dp[m][n];
+}
+```
+
+Time **O(m · n)**. Space **O(m · n)**, or **O(n)** with one row if `j` iterates ascending and you keep previous row values.
+
+<Tradeoff
+  forTitle="2D boolean DP when"
+  againstTitle="DFS + memo / greedy two pointers when"
+  forItems={[
+    "Each string up to 100 characters — O(mn) fits easily",
+    "Greedy choice of s1 vs s2 at each step is ambiguous — need full (i,j) state",
+    "Same DP family as 03.27 Edit Distance and 03.28 Distinct Subsequences on two-string prefixes",
+    "Boolean output — no overflow concerns unlike counting variants",
+    "DFS with memo on (i,j) is equivalent but bottom-up avoids recursion limit",
+  ]}
+  againstItems={[
+    "Only need one valid split point — special structure might allow linear scan (rare)",
+    "Strings very short — brute force all interleavings for explanation then optimize",
+    "03.28 Distinct Subsequences counts matchings into a fixed t — harder counting version",
+    "Space-critical — single-row rolling boolean DP suffices",
+    "k strings instead of two — DP dimension grows to k indices (hard follow-up)",
+  ]}
+/>
+
+## In an interview
+
+Example: `s1="abc"`, `s2="def"`, `s3="adbefc"` → true (a from s1, d from s2, …). Confirm order within s1 and s2 must hold; characters need not alternate strictly.
+
+Say: state is (i,j) chars used from each; s3 index is i+j implicitly. Check length sum first.
+
+Follow-ups: count interleavings, k-way interleaving, space O(n). Bug: comparing wrong s3 index (must be `i+j-1` for last char).
+
+<KeyTakeaways
+  items={[
+    "Interleaving String is 2D boolean DP: dp[i][j] asks if s3's first i+j chars come from s1[:i] and s2[:j]",
+    "Length check |s1|+|s2|===|s3| is O(1) disqualifier — run it before allocating the table",
+    "Transitions pull from (i-1,j) if s1[i-1] matches s3[i+j-1], or (i,j-1) if s2[j-1] matches",
+    "Greedy two-pointer fails because early choices constrain later matches — full state required",
+    "O(m·n) time and space; rolls to O(n) with one boolean row",
+    "03.28 Distinct Subsequences counts subsequence embeddings; this problem checks existence of one interleaved merge",
+  ]}
+/>

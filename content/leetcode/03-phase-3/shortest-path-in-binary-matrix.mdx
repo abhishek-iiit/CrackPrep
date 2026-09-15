@@ -1,0 +1,114 @@
+---
+title: "Shortest Path in Binary Matrix"
+number: "03.21"
+summary: "An n×n 0/1 grid with eight-way moves is unweighted shortest path — BFS beats any DFS that explores long dead ends first."
+status: published
+free: true
+difficulty: core
+estMinutes: 14
+tags: [bfs, grid, graph]
+updated: "2026-09-15"
+---
+
+## Eight neighbors, unit edge weight
+
+You have an n×n grid where `0` is blocked and `1` is open. Start at `(0, 0)`, reach `(n-1, n-1)`, and move in all eight directions including diagonals. Return the number of cells on the shortest clear path, counting both endpoints. If no path exists, return `-1`.
+
+DFS that explores depth-first will eventually find a path, but on a 100×100 grid it can wander through exponential dead ends before stumbling on the optimum. Every step costs the same — there is no reason to prefer one direction over another except distance already traveled. That is the signature of **BFS on an unweighted graph**: the first time you dequeue a cell is via a shortest route.
+
+The traps: `(0,0)` or `(n-1,n-1)` blocked returns `-1` immediately; revisiting cells without marking them visited lets the queue balloon; forgetting diagonal moves misses valid shortcuts.
+
+## Layer-by-layer BFS
+
+Treat each open cell as a node; edges connect the eight neighbors that are `1`. Enqueue `(0, 0)` with path length `1`. Mark visited by flipping `grid[r][c]` to `0` — no separate structure needed. Dequeue, check if you reached the bottom-right, otherwise push every unvisited open neighbor with length `+ 1`.
+
+The invariant: all nodes at distance `d` are dequeued before any node at distance `d + 1`. When `(n-1, n-1)` is first dequeued, that length is minimal.
+
+<Steps>
+<Step title="Reject blocked endpoints">
+If `grid[0][0] === 0` or `grid[n-1][n-1] === 0`, return `-1`.
+</Step>
+<Step title="Seed the queue at (0,0) with length 1">
+Mark `(0,0)` visited immediately so it cannot be re-enqueued.
+</Step>
+<Step title="Expand eight directions per cell">
+For each neighbor in bounds with value `1`, mark visited and enqueue with incremented length.
+</Step>
+<Step title="Return on first reach of (n-1,n-1)">
+If the queue empties without reaching the target, return `-1`.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function shortestPathBinaryMatrix(grid: number[][]): number {
+  const n = grid.length;
+  if (grid[0][0] === 0 || grid[n - 1][n - 1] === 0) return -1;
+
+  const dirs = [
+    [-1, -1], [-1, 0], [-1, 1],
+    [0, -1],          [0, 1],
+    [1, -1],  [1, 0], [1, 1],
+  ];
+
+  const queue: [number, number, number][] = [[0, 0, 1]];
+  grid[0][0] = 0;
+
+  while (queue.length) {
+    const [r, c, steps] = queue.shift()!;
+    if (r === n - 1 && c === n - 1) return steps;
+
+    for (const [dr, dc] of dirs) {
+      const nr = r + dr;
+      const nc = c + dc;
+      if (nr >= 0 && nc >= 0 && nr < n && nc < n && grid[nr][nc] === 1) {
+        grid[nr][nc] = 0;
+        queue.push([nr, nc, steps + 1]);
+      }
+    }
+  }
+
+  return -1;
+}
+```
+
+Time **O(n²)** — each cell enqueued at most once. Space **O(n²)** for the queue in the worst case (a wide frontier across the grid).
+
+<Tradeoff
+  forTitle="BFS when"
+  againstTitle="DFS or A* when"
+  forItems={[
+    "Every move costs exactly 1 — unweighted shortest path is BFS's native problem",
+    "Grid size up to 100×100 makes exponential DFS exploration lethal on the judge",
+    "You only need the path length, not the path itself — BFS stops at first arrival",
+    "Eight-way connectivity still yields unit edges; no priority queue overhead needed",
+    "Same pattern as 03.20 Rotting Oranges and 03.19 Walls and Gates on grids",
+  ]}
+  againstItems={[
+    "Edge weights vary by cell — Dijkstra or 0-1 BFS replaces plain BFS",
+    "You must enumerate all shortest paths, not one length — BFS alone is insufficient (see 03.23 Word Ladder II)",
+    "Heuristic toward the goal is available and weights are non-uniform — A* can prune search",
+    "Grid is tiny (under 10×10) and interviewer wants recursive DFS with memo for practice",
+    "Problem asks for longest path instead — different structure entirely",
+  ]}
+/>
+
+## In an interview
+
+Restate with a 3×3 example: diagonal `(0,0) → (1,1) → (2,2)` may beat a Manhattan route when diagonals are open. Confirm eight directions, count includes start and end, return `-1` when blocked.
+
+Say out loud: unit weights → BFS, mark visited when enqueueing (not when dequeuing) to avoid duplicate queue entries. Mention checking both corners before the loop.
+
+Follow-ups: reconstruct the path, weighted cells, four directions only. The bug to name first: using DFS and claiming O(n²), or only checking four neighbors.
+
+<KeyTakeaways
+  items={[
+    "Unit-cost grid reachability is unweighted shortest path — BFS dequeues cells in nondecreasing distance order",
+    "Mark visited when enqueueing (mutate the grid or a set) so each cell enters the queue at most once",
+    "Eight directions including diagonals are explicit in this problem — four-way BFS is a common wrong answer",
+    "Blocked start or end is an immediate -1; do not run BFS hoping to find a workaround",
+    "Time and space are O(n²) for an n×n grid — the same family as multi-source BFS on matrices",
+    "If edge costs differ, upgrade to Dijkstra (03.24 Path With Minimum Effort) rather than plain BFS",
+  ]}
+/>

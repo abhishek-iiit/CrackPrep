@@ -1,0 +1,104 @@
+---
+title: "Reverse Linked List"
+number: "01.40"
+summary: "Three pointers walk the list once — save next, point back, advance; the tail becomes the new head."
+status: published
+free: true
+difficulty: intro
+estMinutes: 10
+tags: [linked-list, pointers, recursion]
+updated: "2026-09-15"
+---
+
+## Flip every `next` pointer in place
+
+Given `1 → 2 → 3 → null`, return `3 → 2 → 1 → null`. Copy values into an array, reverse, rebuild — O(n) time but O(n) extra space and not what the problem asks. The in-place requirement means rewiring `next` fields only, constant extra space.
+
+The iterative pattern uses three pointers: `prev` (reversed prefix), `curr` (node being rewired), `next` (saved successor so the list is not lost mid-flip).
+
+## Iterative three-pointer walk
+
+Initialize `prev = null`, `curr = head`. While `curr` exists:
+
+1. Save `next = curr.next`.
+2. Set `curr.next = prev` — reverse the link.
+3. Advance: `prev = curr`, `curr = next`.
+
+When `curr` is null, `prev` is the new head.
+
+<Steps>
+<Step title="Save the rest">
+`next = curr.next` before mutating — otherwise you lose the tail.
+</Step>
+<Step title="Reverse one link">
+`curr.next = prev` points backward.
+</Step>
+<Step title="Slide the window">
+Move `prev` and `curr` one step forward.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+class ListNode {
+  val: number;
+  next: ListNode | null;
+  constructor(val?: number, next?: ListNode | null) {
+    this.val = val ?? 0;
+    this.next = next ?? null;
+  }
+}
+
+function reverseList(head: ListNode | null): ListNode | null {
+  let prev: ListNode | null = null;
+  let curr = head;
+
+  while (curr) {
+    const next = curr.next;
+    curr.next = prev;
+    prev = curr;
+    curr = next;
+  }
+
+  return prev;
+}
+```
+
+Time **O(n)**, space **O(1)**.
+
+Recursive form (optional): reverse the tail, attach `head` after the new head, set `head.next = null`. Same O(n) time, **O(n)** stack space — fine to mention, iterative is usually preferred in interviews.
+
+<Tradeoff
+  forTitle="Iterative reversal when"
+  againstTitle="Recursive reversal when"
+  forItems={[
+    "O(1) extra space is required or strongly implied",
+    "List length can reach 10⁵ — recursion risks stack overflow",
+    "This is the building block for 01.45 Reorder List and palindrome checks",
+    "Interviewer asks for in-place mutation with a loop invariant you can state aloud",
+    "Follow-up is reverse between positions m and n — same pointer machinery extended"
+  ]}
+  againstItems={[
+    "List is guaranteed short and recursive clarity is valued over stack bounds",
+    "You immediately follow with 'now reverse back' — recursion mirrors the call structure",
+    "Language has tail-call optimization (not TypeScript in practice) and depth is bounded",
+    "Problem is reverse in k-groups — recursion naturally hands off sublists",
+    "You are teaching divide-and-conquer on linked structures before optimizing space"
+  ]}
+/>
+
+## In an interview
+
+Draw three nodes. State invariant: `prev` is the head of the reversed prefix, `curr` is next to process. Empty list and single node return unchanged. Code the loop; return `prev`.
+
+Follow-ups: reverse between m and n, reverse k-group, palindrome linked list (reverse second half). Bug to call out before running: forgetting to save `next` before setting `curr.next = prev` — the remainder of the list disappears.
+
+<KeyTakeaways items={[
+  "Save `next` before reversing `curr.next` — otherwise the unreversed tail is lost.",
+  "After the loop, `prev` is the new head; `curr` is null.",
+  "Iterative reversal is O(n) time, O(1) space — the baseline linked-list manipulation.",
+  "Empty list and single-node list need no special case beyond initializing `prev = null`.",
+  "01.41 Detect Cycle and 01.44 Remove Nth Node reuse pointer discipline on the same node shape.",
+  "Recursive reversal is the same logic but costs O(n) call stack — prefer iterative for long lists."
+]} />

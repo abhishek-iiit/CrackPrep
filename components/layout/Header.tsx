@@ -1,16 +1,19 @@
 import Link from "next/link";
 import { ThemeToggle } from "./ThemeToggle";
 import { SearchPalette } from "@/components/search/SearchPalette";
-import { courseSlug, getCourseStats } from "@/lib/content";
+import { getTotalPublishedCount } from "@/lib/content";
 
 const NAV = [
   { href: "/system-design", label: "Course" },
+  { href: "/leetcode", label: "LeetCode" },
+  { href: "/design-patterns", label: "Patterns" },
+  { href: "/case-studies", label: "Cases" },
   { href: "/syllabus", label: "Syllabus" },
   { href: "/courses", label: "Paths" },
 ];
 
 export function Header() {
-  const stats = getCourseStats(courseSlug);
+  const publishedCount = getTotalPublishedCount();
 
   return (
     <header className="sticky top-0 z-40 border-b-2 border-structural bg-paper/90 backdrop-blur">
@@ -35,10 +38,8 @@ export function Header() {
         </nav>
 
         <div className="ml-auto flex items-center gap-2">
-          {/* publishedCount, NOT topicCount: getSearchIndex() indexes published
-              lessons only, so the placeholder has to promise the size of the
-              index the palette actually fetches. */}
-          <SearchPalette publishedCount={stats.publishedCount} />
+          {/* publishedCount across all live courses — matches the search index. */}
+          <SearchPalette publishedCount={publishedCount} />
           <ThemeToggle />
         </div>
       </div>

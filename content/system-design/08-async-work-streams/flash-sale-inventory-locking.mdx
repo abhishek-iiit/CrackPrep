@@ -1,32 +1,111 @@
 ---
 title: "Flash Sale Inventory Locking"
 number: "08.10"
-summary: "Flash Sale Inventory Locking — notes in progress."
-status: draft
+summary: "How a burst of buyers for a tiny stock pile turns ordinary inventory updates into a hot-row fight — and which locking patterns survive the rush."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 15
+tags: [inventory, locking, flash-sale, concurrency]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Ten thousand buyers, one hundred units
 
-What breaks without this, and the situation that forces the decision.
+A flash sale is not "e-commerce with a discount." It is a sudden, correlated spike of mutually exclusive claims on a scarce counter: 100 units, 50,000 people who all click Buy in the same thirty seconds. The ordinary checkout path — read stock, reserve, charge, decrement — was built for sparse contention. Under a sale it serializes on a single hot row (or a single hot Redis key), retries explode, payment authorizations outrun real stock, and you either oversell or show "out of stock" while the database is still thrashing.
 
-## How it works
+The design problem is reservation under contention: **exactly as many successful purchases as units**, with latency that does not fall over when everyone arrives at once, and with a clear story for payment failure after a hold. 03.06 Database Locking And Isolation and 06.08 Distributed Locks And Leases are the primitives; this lesson is about how they compose when the workload is adversarial by marketing design.
 
-The mechanism, step by step.
+## What actually races
 
-## Tradeoffs
+Without an explicit reservation model, two checkouts both read `stock = 1`, both proceed, both decrement, and you have sold two units of one. Serializing every checkout on a row lock fixes correctness and destroys throughput: one transaction at a time through payment means p99 becomes "however long the payment provider takes," multiplied by queue depth.
+
+So separate **hold** from **commit**:
+
+1. Atomically decrement (or mark) available inventory into a short-lived reservation tied to a checkout id.
+2. Run payment and the rest of checkout against that reservation, not against a hopeful read of stock.
+3. On payment success, finalize the reservation into an order. On failure or timeout, release the hold back to available stock.
+
+The atomic step in (1) is the whole game. Everything else is retry policy, TTL, and load shedding.
+
+## Patterns that hold under burst
+
+### Conditional decrement in the datastore
+
+One round trip that only succeeds if stock remains:
+
+```sql
+UPDATE inventory
+SET available = available - 1
+WHERE sku = $1 AND available >= 1
+RETURNING available;
+```
+
+Zero rows returned means sold out — no lost update, no separate read. The same shape exists in Redis (`DECR` after a check, or a Lua script that checks-and-decs atomically). This is the minimum correct primitive; it still concentrates contention on one key, so pair it with a tight critical section: decrement fast, do not hold a DB transaction open across the payment HTTP call.
+
+### Lease the unit, don't lock the whole SKU for payment
+
+A reservation row (or Redis key) with `checkout_id`, `sku`, `expires_at` lets you free stock automatically when buyers abandon. TTL of 5–15 minutes is a common product range — short enough that abandoned carts return inventory during the sale, long enough that a slow 3-D Secure flow can finish. Expiry workers (08.05 Distributed Task Scheduler) or Redis key expiry reclaim stock; both need idempotent release so double-expiry does not inflate `available`.
+
+### Shard the counter when one key melts
+
+If a single SKU's atomic decrement becomes the bottleneck — Redis single-threaded CPU, or Postgres row lock wait — split available stock into N buckets (`sku#0 .. sku#N-1`) and assign each attempt to a random or hashed bucket. Oversell risk appears only if buckets are not drained carefully at the end; undersell (stock stranded in empty-looking buckets while another still has units) is the usual trade. A final reconciliation pass moves leftovers. This is the inventory cousin of 04.06 Hot Partitions: the hot key *is* the product.
+
+### Shed load before the inventory layer
+
+The best inventory lock is the request that never arrives. Admission control at the edge — queue pages, lottery tokens, per-user rate limits (14.13 Rate Limiter Placement And Keys) — turns a thundering herd into a paced stream the reservation system can finish. 02.13 Load Shedding belongs in the same design conversation as the Lua script; they solve different layers of the same spike.
+
+<Callout type="gotcha">
+Authorizing payment before holding inventory is how you charge people for items you cannot ship. Holding inventory across an unbounded payment wait is how you strand stock while real buyers see "sold out." The safe order is: atomic hold with TTL → payment → finalize or release. If payment is async, the hold TTL must cover the async window or you will finalize against an expired reservation.
+</Callout>
+
+## Oversell, undersell, and what you can promise
+
+| Failure | Cause | Typical mitigation |
+| --- | --- | --- |
+| Oversell | Non-atomic check-then-act; reservation not enforced at finalize | Conditional decrement; finalize only with valid unexpired hold |
+| Undersell | Holds expire slowly; bucketed stock stranded; double-release bugs | Aggressive TTL; reconciliation; idempotent release keyed by checkout id |
+| Payment success, no stock | Hold expired or never taken | Do not capture payment without a live hold; void/refund path mandatory |
+| Stampede retries | Client retries on 503 amplify load | Idempotency keys on checkout; 02.09 Retries Timeouts And Idempotency |
+
+Exact inventory for a flash sale usually means **at-most N successful finalizations**, not "the `available` counter is always globally consistent across every replica within 0 ms." If you use a cache in front of stock for display, treat display stock as advisory — the reservation attempt is authoritative. Showing "3 left" on a CDN-cached page while the true counter is 0 is an expected race; selling the 101st unit is not.
+
+## When flash-sale machinery is overkill
+
+Everyday catalog stock with low contention does not need bucketed counters and edge lotteries. A conditional `UPDATE` in the primary database inside a short transaction is enough. Reach for the full flash-sale kit when marketing has promised scarcity *and* a synchronized start time — that combination is what creates the herd.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Invest in flash-sale locking when"
+  againstTitle="Keep ordinary inventory updates when"
+  forItems={[
+    "A known start instant will concentrate far more concurrent checkouts than everyday peak on one SKU",
+    "Overselling is unacceptable (physical stock, regulated goods) and refunds are not an acceptable safety net",
+    "You can enforce hold-then-pay with a short atomic reservation and a hard TTL",
+    "Edge admission control or waiting rooms can shed excess demand before it hits the counter",
+    "You are willing to operate reclaim workers, idempotent release, and a post-sale reconciliation path",
+  ]}
+  againstItems={[
+    "Contention on a SKU is rare and a single conditional UPDATE already meets latency and correctness",
+    "Slight oversell with automatic refund is an accepted business policy for digital goods",
+    "Stock levels are high enough that exhaustion during a traffic spike is not the real risk — checkout capacity is",
+    "The team cannot safely run Redis/Lua or bucketed counters under failure (partial decrement, split brain on reclaim)",
+    "There is no synchronized 'sale start' — demand is elevated but not herd-shaped",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Lead with the race, not the brand name of a lock: "Two checkouts cannot both read stock and decrement — I need an atomic reserve that returns success or sold-out in one step, then payment runs against that hold with a TTL." Draw hold → pay → finalize/release as three boxes and say what happens when payment is slow.
 
-<KeyTakeaways items={["", "", ""]} />
+Be ready for "what if Redis loses the counter" and "what if the expire worker double-increments." Answer with a source of truth (DB audit of reservations and orders), idempotent release keys, and a reconciliation job — not with "we pick a strong lock product." Naming oversell versus undersell as dual risks, and which one the business prefers under uncertainty, shows you have designed sales that already went wrong once.
+
+<KeyTakeaways
+  items={[
+    "A flash sale is correlated contention on a scarce counter — ordinary read-then-write inventory paths oversell or serialize into a latency collapse",
+    "Separate atomic hold from payment: conditional decrement (or equivalent) first, then charge against a TTL-bounded reservation",
+    "Never hold a database transaction open across the payment provider call; keep the critical section to the stock mutation only",
+    "Abandoned checkouts must return stock via expiry — and release must be idempotent so reclaim cannot inflate availability",
+    "When one key cannot absorb the herd, shard stock into buckets and reconcile leftovers; pair inventory logic with edge load shedding",
+    "Display stock can be stale; the reservation attempt is authoritative — oversell is the unforgivable failure mode",
+  ]}
+/>

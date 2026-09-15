@@ -1,0 +1,139 @@
+---
+title: "Pastebin"
+number: "01.06"
+summary: "Text ingest with anonymous read-by-ID where object size splits metadata in SQL from body in blob storage."
+status: published
+free: true
+difficulty: core
+estMinutes: 16
+tags: [object-storage, pastebin, read-heavy]
+updated: "2026-09-15"
+---
+
+## Why interviewers ask for Pastebin
+
+It is the smallest full-stack classic: create text, fetch by ID, optional expiry. The skills tested are object vs metadata storage, read-heavy ratio math, and ID generation — without fan-out, feeds, or geo indexes. A strong answer finishes with time left for deep dives; a weak one treats megabyte pastes like kilobyte rows and melts the database.
+
+## Clarify: size, privacy, and lifetime
+
+**Functional:**
+
+- Paste content — plain text only, or syntax highlighting rendered server-side? (Usually plain storage, client renders.)
+- Max paste size — 100 KB? 10 MB?
+- Custom URL or auto-generated ID?
+- Public vs unlisted vs private (auth)?
+- Expiry — never, 10 minutes, 1 day, custom?
+- Edit or delete after create?
+
+**Non-functional:**
+
+- Create latency — under 500 ms including upload?
+- View latency — under 200 ms p99?
+- Durability — once created, paste survives until expiry
+- Abuse — rate limit creation by IP?
+
+**Out of scope:** user accounts, social features, search across all pastes, encryption at rest (unless asked).
+
+Spoken script:
+
+> "Anonymous create and read by ID, auto-generated keys, 10 MB max, optional expiry, metadata in SQL and body in object storage — no auth or search."
+
+## Capacity: small writes, large reads
+
+Assumptions.
+
+| Assumption | Value |
+| --- | --- |
+| New pastes per day | 1M |
+| Read:write ratio | 20:1 |
+| Average paste size | 10 KB (some up to 10 MB cap) |
+| Peak factor | 3× |
+| Retention average | 30 days active; expired deleted |
+
+**Write rate:** 1M / 86,400 ≈ **12 pastes/s** average, **~35/s peak** — negligible.
+
+**Read rate:** 12 × 20 ≈ **240/s** average, **~720/s peak** — cache-friendly; no CDN required at this scale but the pattern supports it.
+
+**Storage (30-day window):** 1M/day × 30 = 30M pastes. If average 10 KB, **~300 GB** in object store plus tiny metadata rows. If 10% are 1 MB, adjust upward — **~500 GB** ballpark.
+
+**Metadata DB:** 30M rows × ~200 bytes metadata ≈ **6 GB** — single Postgres instance.
+
+## High-level design: metadata SQL, body S3
+
+| Component | Role |
+| --- | --- |
+| API servers | POST /pastes, GET /pastes/{id} |
+| SQL DB | paste_id, created_at, expiry_at, size, storage_key, content_type |
+| Object store (S3) | Blob keyed by paste_id or storage_key |
+| Redis (optional) | Cache hot paste bodies or metadata |
+| Cron / lifecycle job | Delete expired objects and rows |
+
+<Steps>
+<Step title="Create — POST /pastes">
+
+Validate size ≤ 10 MB. Generate paste_id (01.05-style short base62 or UUID). Upload body to object store `pastes/{id}`. Insert metadata row with expiry. Return URL `pastebin.com/{id}`. If object upload succeeds but DB insert fails, delete orphan object (or reconcile job).
+
+</Step>
+<Step title="Read — GET /pastes/{id}">
+
+Load metadata from SQL (or cache). If expired, 404. Fetch object from store; stream to client with `Content-Type: text/plain`. Cache small pastes (&lt; 64 KB) in Redis with TTL = min(time-to-expiry, 1 h).
+
+</Step>
+<Step title="Expiry">
+
+Lifecycle rule on bucket + nightly job deleting rows where `expiry_at < now()`. Object store delete is idempotent.
+
+</Step>
+</Steps>
+
+## Deep dive: where the bytes live and hot reads
+
+### Never put megabyte blobs in SQL
+
+Row bloat kills buffer pool efficiency and replication. Pattern: SQL holds what you filter on (id, expiry, size); S3 holds bytes. Read path is two hops — acceptable at hundreds of QPS; at thousands, cache the body in Redis or CDN for public pastes.
+
+### ID choice
+
+Short base62 (7–8 chars) for shareable URLs — collision check on insert. UUID for simplicity — longer URL, no coordination. For interview scale, either works; say collision handling for random short IDs.
+
+### Rate limiting creation
+
+12/s average does not require heavy limits; still mention IP-based limiter (01.02 Rate Limiter) to stop spam bots uploading 10 MB repeatedly — protects object storage bill.
+
+## Tradeoffs
+
+<Tradeoff
+  forTitle="Object store for paste body when"
+  againstTitle="Inline in SQL when"
+  forItems={[
+    "Pastes can reach megabytes — S3 cost and throughput scale linearly",
+    "DB replicas should not replay multi-MB WAL entries on every read replica",
+    "Lifecycle expiry maps cleanly to bucket policies plus row delete",
+    "CDN can front public paste URLs if reads grow",
+    "Metadata queries stay fast on a small hot set of rows",
+  ]}
+  againstItems={[
+    "Hard cap 64 KB and low volume — one Postgres TEXT column simplifies ops",
+    "Strong transactional create must be atomic with metadata — single-row insert",
+    "Latency budget cannot tolerate S3 round trip on read — rare at paste sizes under 32 KB",
+    "No ops team for object store — MVP prototype",
+    "All pastes private and count is under 1M total — fits one disk",
+  ]}
+/>
+
+## In an interview
+
+Open with size split: "Metadata in SQL, body in object storage — pastes can be up to 10 MB." This is a five-minute clarify, five-minute capacity, ten-minute diagram problem if you do not over-scope.
+
+Follow-ups: orphan objects on failed DB write (compensating delete), serving expired paste (check expiry before fetch), and custom URLs (unique index). Volunteer: "The mistake is storing large TEXT in Postgres — reads evict useful pages from cache and replication lag spikes."
+
+<KeyTakeaways
+  items={[
+    "Pastebin is create-light, read-heavier — 1M pastes/day at 20:1 is ~720 reads/s peak, not a CDN-scale problem unless ratio grows",
+    "Store paste bytes in object storage; SQL holds id, expiry, size, and pointer — never multi-MB rows in the primary",
+    "Generate short IDs with collision check or use UUID; mention expiry on both metadata and object lifecycle",
+    "Optional Redis for small hot pastes; stream large pastes from object store",
+    "Rate-limit creates by IP to control storage abuse even when average traffic is low",
+    "At 30-day retention and 10 KB average, plan ~300–500 GB object storage and a single metadata database",
+  ]}
+/>

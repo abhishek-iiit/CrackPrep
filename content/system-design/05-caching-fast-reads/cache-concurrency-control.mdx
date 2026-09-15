@@ -1,32 +1,100 @@
 ---
 title: "Cache Concurrency Control"
 number: "05.05"
-summary: "Cache Concurrency Control — notes in progress."
-status: draft
+summary: "When many requests miss the same key at once, naive refill turns one miss into a database stampede — concurrency control decides who recomputes and who waits."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 14
+tags: [caching, stampede, concurrency, cache-aside]
+updated: "2026-09-15"
 ---
 
-## The problem
+## One miss is fine; a thousand simultaneous misses are not
 
-What breaks without this, and the situation that forces the decision.
+A cache miss on a cold key is the expected cost of caching: one request pays for a database read (or a compute), fills the cache, and the next thousand ride free. The pathology is when those thousand arrive before the first fill completes. Every one of them also misses, every one of them also queries the database, and the key that was supposed to protect the database becomes the reason it melts. That pattern is a **cache stampede** — also called thundering herd — and it shows up on cold start, on TTL expiry of a hot key, on invalidation of a popular key, and on failover when a shard's worth of keys vanish together.
 
-## How it works
+05.04 TTL Expiration And Cache Reapers covers jitter so expiries do not align. This lesson is about what happens at the moment of the miss: who is allowed to recompute, how writers coordinate with readers, and which write patterns make stampedes more or less likely.
 
-The mechanism, step by step.
+## Cache-aside, write-through, write-behind
 
-## Tradeoffs
+How the application treats the cache relative to the database shapes the concurrency story.
+
+**Cache-aside (lazy loading).** The application reads the cache; on miss it reads the database, then writes the cache. Simple, and the default for most read-heavy designs. The stampede lives here: `N` concurrent misses each do the full load path unless you coalesce them.
+
+**Write-through.** The application writes the database and the cache in the same request path (cache updated with the new value, or invalidated). Readers are less likely to see a gap after a write, but every write pays cache latency, and a failed cache write after a successful database write needs a policy (retry, invalidate, accept brief inconsistency).
+
+**Write-behind (write-back).** The application writes the cache (or a queue) first and flushes to the database asynchronously. Absorbs write spikes; risks data loss if the cache dies before the flush, and complicates read-your-writes across instances. Rare as a general application pattern; more common inside databases and specialized stores.
+
+| Pattern | Read miss behavior | Write path | Stampede exposure |
+| --- | --- | --- | --- |
+| Cache-aside | App loads DB, then fills cache | App writes DB, usually invalidates or updates cache | High on hot-key miss unless coalesced |
+| Write-through | Rare if writes keep cache warm | App writes DB and cache together | Lower for keys that are written often; cold keys still stampede |
+| Write-behind | Hits serve from cache | App writes cache; DB lags | Different failure mode — durability, not just stampede |
+
+For interview designs, cache-aside plus explicit invalidation on write is the usual shape. Name it; then name how you stop concurrent misses from amplifying.
+
+## Coalescing the refill
+
+<Steps>
+  <Step title="Detect a miss on a hot key">
+    Many requests for `product:9` arrive; the cache returns miss for all of them within the same few milliseconds.
+  </Step>
+  <Step title="Elect a single filler">
+    Only one caller is allowed to load from the database. Options: an in-process singleflight (group by key, one shared future), a short-lived distributed lock on `lock:product:9`, or a "filling" sentinel value that other callers treat as wait-or-serve-stale.
+  </Step>
+  <Step title="Others wait or serve stale">
+    Waiters block briefly on the in-flight fill, or — better for UX under load — serve a still-in-memory soft-expired value while the refresh runs. Hard-failing every waiter into the database defeats the point.
+  </Step>
+  <Step title="Publish once">
+    The winner writes the fresh value (and TTL) once. Waiters wake, read the cache, and proceed without each hitting the database.
+  </Step>
+</Steps>
+
+In-process singleflight works inside one application instance — libraries like Go's `singleflight` or equivalent request coalescing. It does not coordinate across fifty instances; for that you need a lock in the distributed cache itself, or accept up to one refill per instance (fifty database reads, not five thousand). For many workloads, one-per-instance is an acceptable ceiling if the query is cheap; for an expensive aggregation, pay for a distributed lock or precompute.
+
+Probabilistic early expiration is the other half: as a key approaches its TTL, each read has an increasing chance to trigger a background refresh before the hard miss. Combined with jitter, the deadline stops being a cliff.
+
+<Callout type="gotcha">
+Caching `null` or "not found" without a short TTL is a classic concurrency footgun of a different kind: a race where a create happens while a negative miss is in flight can hide the new row until something expires. Negative caching needs both a short TTL and the same coalescing discipline — a storm of lookups for a hot missing id can stampede just like a hot present one. 04.13 Bloom Filters can filter many of those lookups before they reach the cache or the database.
+</Callout>
+
+## Stale reads versus locked reads
+
+Under stampede pressure you almost always prefer serving slightly stale data over serializing every reader behind a lock. A lock that every request must acquire becomes the new bottleneck, and a lock holder that dies leaves waiters stuck until the lease expires — 06.08 Distributed Locks And Leases and 06.09 Redis Redlock And Fencing Tokens cover how easy that is to get wrong. Use locks to limit *refill* concurrency, not to make every read mutually exclusive.
+
+Dogpile prevention features in cache libraries (lease tokens, stale-if-error, stale-while-revalidate at the HTTP layer) are the same idea with different names: admit that freshness is a spectrum, and spend concurrency control on the refresh, not on blocking the world.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Invest in stampede control when"
+  againstTitle="Keep the miss path simple when"
+  forItems={[
+    "A hot key's miss triggers an expensive query or fan-out that cannot be multiplied by concurrent clients",
+    "TTLs or invalidations regularly drop popular keys, not just cold ones",
+    "Cold starts and deploys empty large fractions of the cache together",
+    "The database is provisioned for hit-path miss rates, not for synchronized full-key refill",
+    "You can serve soft-stale values safely for the duration of a refresh",
+  ]}
+  againstItems={[
+    "Misses are rare, cheap, and spread across a huge keyspace with no hot keys",
+    "The cache is a minor optimization and the database already absorbs full read traffic comfortably",
+    "Adding distributed locks would create a worse availability story than occasional duplicate refills",
+    "In-process coalescing is enough because a single instance owns the traffic for that key range",
+    "Correctness forbids serving stale data and you would rather shed load than show an old value — use load shedding, not a stampede lock, as the primary tool",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Describe cache-aside in one sentence, then immediately name the stampede: "without coalescing, expiry of a hot key becomes N database reads." Offer singleflight per process plus jittered TTLs as the baseline; escalate to a refill lock or stale-while-revalidate if the query is expensive. Expect "what about writes" — invalidate (or update) on write, accept a brief race, and do not claim strong consistency from a cache-aside design. Naming the failure mode before being asked is the signal; drawing Redis without a miss-concurrency story is the anti-signal.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "A stampede is many concurrent misses on the same key each recomputing — the cache amplifies load instead of absorbing it",
+    "Cache-aside is the common pattern; write-through and write-behind change when the cache is updated and what you risk on failure",
+    "Coalesce refills with in-process singleflight, and optionally a distributed lock, so one (or few) callers hit the database",
+    "Prefer serving soft-stale data during refresh over making every reader wait on a lock",
+    "Jittered TTLs and probabilistic early refresh reduce how often the cliff happens; coalescing handles it when it does",
+    "Negative cached misses stampede and hide creates unless TTLs are short and refill is coordinated",
+  ]}
+/>

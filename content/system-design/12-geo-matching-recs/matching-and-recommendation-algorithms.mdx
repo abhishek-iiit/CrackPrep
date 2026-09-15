@@ -1,32 +1,137 @@
 ---
 title: "Matching And Recommendation Algorithms"
 number: "12.08"
-summary: "Matching And Recommendation Algorithms — notes in progress."
-status: draft
+summary: "Recall then rank — how geo, filters, and models turn a huge corpus into a small ordered list, and which algorithm class fits which product constraint."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: deep
+estMinutes: 18
+tags: [matching, recommendations, ranking]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Matching is not one model
 
-What breaks without this, and the situation that forces the decision.
+"Design a recommendation system" and "match riders to drivers" get the same whiteboard treatment too often: a neural net appears before the API does. Real matching systems are pipelines. A **recall** stage pulls hundreds or thousands of plausible candidates from millions of entities. A **ranking** (or assignment) stage orders or pairs them under product constraints. **Business rules and seen filters** sit between and after. The algorithm conversation only makes sense once you know which stage you are in and what "correct" means — maximise clicks, minimise ETA, fair distribution, or mutual consent.
 
-## How it works
+This lesson is the map of those stages and the algorithm families that usually fill them. It is not a deep dive into any one model.
 
-The mechanism, step by step.
+## Start from the matching shape
 
-## Tradeoffs
+| Product shape | Two-sided? | Objective (examples) | Hard constraints |
+| --- | --- | --- | --- |
+| Content feed / "nearby places" | No | Engagement, relevance, distance | Geo radius, open-now, seen |
+| Dating / social discover | Soft mutual | Mutual interest, retention | Distance, age, blocks, seen |
+| Rideshare / delivery dispatch | Yes | ETA, acceptance rate, fairness | Capacity, geo, SLAs |
+| Ads / marketplace | Soft | Revenue + relevance | Budget, frequency cap, policy |
+
+Two-sided assignment (one driver cannot take two riders) is a different problem from ranking a feed (many users can see the same restaurant). If the interviewer says "matching", clarify which shape you are in before naming collaborative filtering.
+
+## Stage 1 — Recall: get a shortlist without scoring the world
+
+Recall must be cheap and high-recall enough that the ranker still has good options. Common generators, often **combined**:
+
+- **Geographic recall** — cell / Redis GEO / radius candidates (12.01–12.04). Mandatory when distance is a hard filter.
+- **Inverted-index / attribute recall** — "cuisine=ramen AND open=true", skill tags, inventory facets. Same machinery as search (09.x).
+- **Graph recall** — friends-of-friends, co-purchase, "people also viewed". Multi-hop must be bounded.
+- **Embedding ANN recall** — approximate nearest neighbours in vector space (09.13 Vector Search And Hybrid Retrieval). Strong for semantic similarity; weak alone for hard geo/business constraints unless you filter after.
+- **Popular / trending / editorial** — safety nets so cold users and empty geo cells still return something.
+
+Union the generators, dedupe, apply hard filters (blocks, eligibility), then cap at `N` (often 100–1000) before ranking. If recall is wrong, no ranker saves you; if recall is huge, ranking latency and cost explode.
+
+## Stage 2 — Rank or assign
+
+### Pointwise ranking
+
+Score each candidate independently: logistic regression, gradient-boosted trees, or a neural net on features (distance, rating, CTR prediction, ETA). Sort by score. Simple to serve, easy to explain, and the default for feeds and nearby lists.
+
+### Pairwise / listwise learning-to-rank
+
+Optimise relative order (A before B) or whole-list metrics. Useful when the product metric is NDCG-like and you have interaction logs. Heavier to train and serve; usually not the first interview answer unless the prompt emphasises ranking quality research.
+
+### Two-sided assignment
+
+For dispatch: given riders and drivers, produce pairs under capacity constraints. Exact methods (Hungarian, min-cost flow) work at small batch sizes; production systems often use **batched greedy** (match highest-score feasible pair, repeat) or auction-style heuristics every few seconds on a geo-local batch. Global optimality is rarely the SLO — stable ETA and low cancel rate are.
+
+### Mutual matching
+
+Dating-style: score may incorporate predicted reciprocal interest (`P(A→B) × P(B→A)` or a learned mutual model). Retrieve asymmetrically (A sees B) but gate messaging on mutual action — product rules, not just sort order.
+
+## Features that actually move geo matching
+
+Order-of-magnitude: in nearby and mobility products, **distance / ETA**, **availability**, and **historical acceptance or CTR** usually dominate exotic profile embeddings. Embeddings help when catalog text or images carry intent ("quiet coworking" vs "late night noodles") that structured facets miss. Do not lead with deep learning if a linear combination of distance and rating already explains the metric — say that out loud.
+
+Seen filtering (12.07) belongs in the pipeline as a hard or soft constraint: hard drop for blocks and prior matches; soft demotion or Bloom-backed drop for impressions.
+
+## Online serving skeleton
+
+<Steps>
+  <Step title="Parse context">
+    User id, location, time, device, explicit filters. Snapshot fence membership if zones affect eligibility (12.05).
+  </Step>
+  <Step title="Run recall generators in parallel">
+    Bound each by timeout and count. Merge and dedupe into a candidate set.
+  </Step>
+  <Step title="Apply hard filters">
+    Eligibility, geo radius exact pass, blocks, exact seen/matched sets.
+  </Step>
+  <Step title="Score and order">
+    Pointwise model or rules; for dispatch, run assignment on the local batch instead of a per-user sort.
+  </Step>
+  <Step title="Diversify and policy-check">
+    Optional re-rank to avoid near-duplicate venues, enforce category quotas, apply safety policy.
+  </Step>
+  <Step title="Page, log, update seen">
+    Return top k; log impressions/assignments for training; update seen structures under the serve-vs-impression policy you chose.
+  </Step>
+</Steps>
+
+## Cold start and empty states
+
+New users and sparse geo cells need fallbacks: broaden radius, relax filters, lean on popularity recall, or show editorial collections. Matching systems fail loudly when they return empty without a planned degradation — especially dispatch at the edge of service areas.
+
+Training loops need impression and outcome logs with stable candidate feature snapshots; otherwise you cannot learn from what the ranker never showed (selection bias). Mention bias as a known limit even if you do not solve it on the whiteboard.
+
+## What you measure (or you are flying blind)
+
+Feeds and nearby lists usually track CTR, dwell, hide/report rate, and repeat-seen rate (12.07). Two-sided marketplaces add **fill rate**, time-to-assign, cancel rate after assign, and Gini-like fairness across providers — optimising only rider ETA can starve drivers on the periphery. Pick one primary metric for the interview and name two guardrails you will not regress.
+
+Offline evaluation (held-out interactions, NDCG on logged candidates) is necessary but insufficient: logged data only contains candidates you already showed. Online A/B with a clear kill switch is the real gate for ranker changes. If the prompt is a forty-five minute design, say you would ship rules plus logging first, then replace the scorer behind the same recall API — that sequencing is the design judgment.
+
+<Callout type="tip">
+In interviews, draw recall → filter → rank/assign → log as boxes before naming algorithms. Then fill one box: "geo recall via geohash neighbours, rank by ETA prediction, greedy batch assign every 2 seconds." That lands better than "we will use deep learning for matching."
+</Callout>
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Invest in multi-stage recall + learned rank / assign when"
+  againstTitle="Ship rules and single-source recall when"
+  forItems={[
+    "Corpus is large and one generator (only geo, only popularity) systematically misses relevant candidates",
+    "You have enough interaction logs to train and monitor a scorer against a clear metric",
+    "Two-sided constraints require assignment, not just sorting a feed",
+    "Small ranking quality gains pay for themselves in marketplace liquidity or retention",
+    "You can operate timeouts, fallbacks, and feature logging in production",
+  ]}
+  againstItems={[
+    "Catalog is small enough that a geo query plus sort-by-distance/rating meets the product bar",
+    "No reliable labels yet — a learned ranker will amplify noise and selection bias",
+    "Latency budget cannot fit model inference even after aggressive candidate caps",
+    "Regulatory or safety rules dominate and must remain deterministic and auditable",
+    "The team cannot staff ongoing ranking ops; a simpler system that runs beats a clever one that drifts",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Clarify one-sided vs two-sided and the objective metric. Propose geo (or attribute) recall first, then a pointwise ranker or greedy assignment. Add seen/block filters explicitly. Name failure modes: empty recall, over-filtering by Bloom seen (12.07), and slow rankers that force you to cut candidates and hurt quality. Leave room to deepen one component if the interviewer pushes — do not volunteer every model family.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Matching systems are recall then rank (or assign), with hard filters and logging — not a single algorithm",
+    "One-sided feeds and two-sided dispatch share vocabulary but not solvers; assignment under capacity is not sort-by-score",
+    "Combine geo, attribute, graph, and ANN recall; cap candidates before any expensive scorer",
+    "Distance, availability, and historical acceptance/CTR usually dominate early geo products; add embeddings when facets are not enough",
+    "Seen and block filtering are pipeline stages with exact vs Bloom tradeoffs (12.07), not UI afterthoughts",
+    "Plan empty-state degradation and impression logging up front, or the system cannot learn or fail safely",
+  ]}
+/>

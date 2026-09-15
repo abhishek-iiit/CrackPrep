@@ -1,32 +1,105 @@
 ---
 title: "Log-Structured Storage"
 number: "07.07"
-summary: "Log-Structured Storage — notes in progress."
-status: draft
+summary: "Append every change to a sequential log, leave old versions in place, and move reconciliation into the background — the write-path inversion behind Bitcask and LSM trees."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 15
+tags: [storage, log-structured, append-only, wal]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The disk's favourite operation is "write the next byte after the last one"
 
-What breaks without this, and the situation that forces the decision.
+07.01 Storage Engine Design Constraints put numbers on a physical fact every engine has to live with: sequential writes are what disks and flash are good at; scattered in-place updates are what they are bad at. A B-tree (03.04) pays that bad cost on purpose — each key has a home page, and a random key stream becomes a random page-write stream, with write-ahead logging on top so durability does not depend on the page write alone (03.08 Database WAL And Recovery).
 
-## How it works
+Log-structured storage inverts the bet. Instead of putting each key where it "belongs," put every change at the current end of a log. The write path becomes one sequential append. Old values for the same key are not overwritten; they stay in the log as history until a background process reclaims them. The foreground path gets cheap and predictable. The background path inherits the work of figuring out which version of each key is still live.
 
-The mechanism, step by step.
+That idea is older than any particular product name. Bitcask (07.08) is one complete answer built on it. LSM trees (07.09) are another. This lesson is the shared substrate: what "log-structured" commits you to before you pick an index shape.
 
-## Tradeoffs
+## The write path collapses to an append
+
+<Steps>
+  <Step title="Serialize the change as a record">
+    Key, value or tombstone, and enough metadata to order it later — a timestamp or sequence number. 07.04 Custom Binary File Format is the usual on-disk framing: length prefixes and a checksum so a torn append can be detected on replay.
+  </Step>
+  <Step title="Append to the active log segment">
+    Write at the current end. No tree descent, no page to locate, no read-before-write to discover where the key already lives. On a device, this is the sequential path 07.01 called nearly free relative to random I/O.
+  </Step>
+  <Step title="Make durability explicit">
+    An append that only reached the OS page cache is not durable. An `fsync` (or group commit of many records behind one fsync) is what turns "written" into "survives power loss." Group commit is why a single log can absorb tens of thousands of durable writes a second as a ballpark — the limit is fsyncs per second times batch size, not writes per second.
+  </Step>
+  <Step title="Update whatever index the design uses">
+    Bitcask updates an in-memory keydir to the new offset. An LSM engine inserts into a memtable. A byte-range object design (07.05) records a new (object, offset, length). The log is the source of truth for recovery; the index is the accelerator for reads.
+  </Step>
+  <Step title="Acknowledge">
+    Once the log append is durable on the engine's terms and the index reflects the write, the caller can be told success. No data file was edited in place.
+  </Step>
+</Steps>
+
+Deletes are writes. A tombstone record goes on the log like any other; the index stops serving the old value. Physical removal waits for compaction or merge — the same deferred-reclamation contract as 07.06 Immutable Versioned Data Files.
+
+## The read path is the part you have to invent
+
+Appending solved the write. It did not solve the read. Knowing that the current value for a key sits *somewhere* in a growing log is useless unless you can find it without scanning from the end every time.
+
+Three families of answer show up in this module:
+
+| Index strategy | What a point read costs | What you give up |
+| --- | --- | --- |
+| Exact in-memory map (Bitcask keydir) | One seek / one Range GET to a known offset | Index RAM scales with key cardinality; no cheap range scans |
+| Sorted immutable files + sparse index + Bloom (LSM) | Probe filters, then at most one block per level | Compaction machinery; read cost tied to how many runs exist |
+| Scan the log newest-first | Correct and unusable at size | Nothing — this is the baseline you refuse |
+
+Log-structured storage is the append. The product name is usually the index. When someone says "we use an LSM," they mean log-structured writes *plus* a particular on-disk index and compaction policy. When they say "Bitcask," they mean log-structured writes *plus* a fully resident exact hash index.
+
+## Recovery is replay, not "fix the pages"
+
+Because the log is append-only and checksummed, crash recovery has a clean story: open the segments, read records until a checksum fails or the file ends, rebuild the in-memory index (or memtable) from what validated. A torn record at the end is discarded; nothing half-applied sits in the middle of a B-tree page. 03.08 Database WAL And Recovery is the same durability idea in a page-oriented engine — the WAL is the sequential truth and pages catch up later. In a fully log-structured engine the "pages" are often just frozen segments of the same log idea (SSTables), and replay rebuilds the mutable tip.
+
+Startup cost tracks how much log you must scan before the index is warm. Hint files (Bitcask) and manifests plus WALs shorter than a full dataset (LSM) exist to keep that scan bounded. If you ignore recovery time while designing the write path, you discover it the first time a node restarts into a multi-hour rebuild.
+
+<Callout type="warn">
+Log-structured does not mean "infinite disk is fine." Every superseded value and every tombstone occupies space until merge or compaction runs. If the background job falls behind the write rate, you do not get a polite error first — you get climbing disk usage and climbing read latency as more history must be searched. Provisioning a log-structured engine means provisioning reclaim bandwidth, not only ingest bandwidth. 07.12 Compaction And Amplification is that bill itemised.
+</Callout>
+
+## Group commit, segments, and why the log rotates
+
+A single ever-growing file is awkward: deletion of old data cannot shrink it easily, crash recovery may have to scan too much, and filesystem limits get weird at multi-terabyte single files. Engines almost always **segment** the log — roll a new active file when the current one hits a size bound — and treat completed segments as immutable (07.06). Merge or compaction reads whole segments, writes live keys into new ones, and deletes segments that no longer contribute any live record.
+
+Group commit sits on the active segment: many threads append into a buffer; one fsync publishes a batch. That amortises the durability RTT. It also creates a latency trade — a lone writer may wait for batch mates — which is usually the right trade at high write rates and the wrong one if you need single-digit-millisecond durability for isolated writes on a quiet system.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Choose log-structured storage when"
+  againstTitle="Prefer in-place / B-tree style when"
+  forItems={[
+    "Write throughput and write-latency predictability matter more than minimal read amplification — the foreground path is a sequential append",
+    "Keys arrive in random order and you refuse to turn that into random page writes on the device",
+    "Crash recovery should discard a torn tail rather than repair half-updated pages",
+    "You can run background merge or compaction and will provision device bandwidth for it",
+    "The workload is write-heavy or write-once-read-rarely — events, metrics, logs, audit trails",
+  ]}
+  againstItems={[
+    "Short range scans over a hot key space are the dominant access pattern — a B-tree's linked leaves beat merging several log-derived runs",
+    "You need tight, workload-independent read latency and cannot tolerate candidate counts that grow when reclaim lags",
+    "Operational simplicity forbids a background reclamation process whose debt becomes a write stall",
+    "Updates hit a tiny hot set repeatedly and keeping every historical version until compaction would thrash space",
+    "You already have a page-oriented transactional store that fits and the write rate does not justify a second engine family",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Lead with the inversion: "I am going to make every write a sequential append to a log and leave old versions in place, then reclaim in the background — so the disk only ever sees the access pattern it is good at." Immediately name the open question: how reads find the newest value without scanning. That forks cleanly into Bitcask (exact memory index) versus LSM (sorted files, Bloom filters, compaction). Name the failure mode before being asked: reclaim falling behind, presenting as disk growth and read/write latency spikes rather than as a crisp error code.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Log-structured storage makes every change a sequential append; old versions stay in the log until background reclaim removes them",
+    "The write path becomes an append plus an index update — durability is the fsync or group commit on the log, not an in-place page write",
+    "Deletes are tombstone records; physical space returns only when merge or compaction rewrites live data into new segments",
+    "The design choice that remains is the read index: exact in-memory map, or sorted immutable files with filters — Bitcask and LSM are two answers to the same append",
+    "Recovery is replay of checksummed records into the index; a torn tail is discarded rather than surgically repaired",
+    "You must provision reclaim bandwidth — when compaction or merge lags, the symptom is latency and disk fill, not a clean 'log full' failure at the first missed beat",
+  ]}
+/>

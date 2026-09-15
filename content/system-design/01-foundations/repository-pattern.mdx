@@ -1,32 +1,83 @@
 ---
 title: "Repository Pattern"
 number: "01.10"
-summary: "Repository Pattern — notes in progress."
-status: draft
+summary: "An interface between business logic and persistence that buys unit-testability first, swappable storage second — and can decay into a leaky ORM facade."
+status: published
 free: true
 difficulty: core
 estMinutes: 12
+tags: [architecture, persistence, testing]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Business logic that imports a SQL driver is business logic you cannot test alone
 
-What breaks without this, and the situation that forces the decision.
+Put a query directly inside a service method — a `SELECT` against pending orders for a user sitting next to the discount calculation that uses its result — and the discount calculation cannot be tested without a live database. Every unit test becomes an integration test: spin up a database, seed rows, tear it down, repeat for every case. Multiply that by a test suite with thousands of cases and the suite's runtime becomes the bottleneck on how fast anyone gets feedback on a change.
 
-## How it works
+The repository pattern draws a boundary at exactly that seam. Business logic talks to an interface — `OrderRepository.findPendingByUser(userId)` — and something else, the concrete repository implementation, is the only code that knows it is talking to Postgres, or DynamoDB, or a REST API wrapping a legacy system. The business logic imports the interface, not the driver.
 
-The mechanism, step by step.
+```text
+interface OrderRepository {
+  findPendingByUser(userId): Order[]
+  save(order): void
+}
 
-## Tradeoffs
+class PostgresOrderRepository implements OrderRepository { ... }   // real
+class InMemoryOrderRepository implements OrderRepository { ... }   // test double
+```
+
+A unit test for the discount calculation can hand it an `InMemoryOrderRepository` seeded with three orders in a map, no database involved, running in microseconds instead of milliseconds against a real connection. That is the pattern's actual payoff, and it is worth being precise about it: the payoff is testability first. "Swap the database later" is the pitch most often given for the pattern, and it is real but overstated — more on that below.
+
+## What the interface has to get right
+
+The interface is a contract, and like any contract it has to match what callers actually need without leaking how the current implementation gets there:
+
+- **Methods should read like domain operations, not like SQL translated into function names.** `findPendingByUser` describes what the business needs; a name built from a chain of field-equals-value clauses describes a `WHERE` clause with the SQL filed off. The second version has already leaked the query builder into the interface.
+- **Return domain objects, not database rows.** A repository that returns a raw row forces every caller to know the column names and their types, which is exactly the coupling the pattern exists to remove.
+- **Writes that must be atomic together need a unit of work, not two repository calls.** If saving an order and decrementing inventory must succeed or fail together, calling one repository's save and then another repository's decrement gives you two separate commits with a window between them where one can succeed and the other fail. A unit of work — a single object that tracks changes across repositories and commits them in one transaction — is the piece that actually restores atomicity; the repository pattern alone does not provide it.
+
+<Callout type="gotcha">
+The interface tends to leak in the direction of whatever the concrete implementation makes easy, not what the domain needs. A method that fetches a user's orders and, for each one, calls a line-item repository by order id looks clean at the call site and hides an N+1 query: one query for the orders, then one more per order for its line items. The repository pattern makes this easier to hide, not harder to cause — the abstraction has no opinion about how many queries its implementation issues, so N+1 problems still have to be caught by reading what the concrete class actually does, not by trusting the interface.
+</Callout>
+
+## What it costs, and what it doesn't buy
+
+The pitch "swap Postgres for DynamoDB without touching business logic" survives contact with reality only partway. The method signatures can stay the same. What does not transparently carry over: a relational store gives you ad-hoc joins and transactions across arbitrary rows for free, and a key-value or document store generally does not — a repository method that did a three-table join under a relational engine has to become several calls and an in-memory join under a key-value store, or a denormalized read model has to exist specifically to answer that query. The interface hides the syntax difference. It cannot hide a difference in what the underlying store is actually capable of doing efficiently, and pretending otherwise produces a repository implementation that quietly does the join in application code, one row at a time, which is often slower than what it replaced.
+
+The other cost is boilerplate for cases that do not need it. A small CRUD service with one database it has no plan to ever change gets an interface, an implementation, and a test double for logic that could have called the ORM directly with no loss of testability, if the test suite was always going to run against a real test database anyway. The pattern earns its cost when there is real logic to isolate from persistence, or a genuine multi-backend requirement — not by default on every table.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Introduce a repository layer when"
+  againstTitle="Skip it when"
+  forItems={[
+    "There is real business logic that should be unit-testable without spinning up a database for every test",
+    "More than one storage backend is a genuine, near-term requirement, not a hypothetical one",
+    "Multiple call sites need the same query logic and you want one place to change it rather than several",
+    "You want to enforce that persistence details (ORM, table names, query shape) stay out of the domain layer as a matter of team discipline",
+    "The domain model is complex enough that mapping between database rows and domain objects is itself worth isolating",
+  ]}
+  againstItems={[
+    "The application is small CRUD with one datastore and no credible plan to change it",
+    "The team already tests against a real database in every suite, so the interface buys no test-speed benefit",
+    "The extra indirection would only wrap a thin, one-line ORM call with no logic worth isolating",
+    "The team is not disciplined about keeping query specifics out of the interface, so it would decay into a thin, leaky pass-through anyway",
+    "Cross-backend portability is not real — the query patterns already depend on features specific to one store, like full-text search or geospatial indexes",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+This comes up less as a scale question and more as a "how would you structure the code" follow-up once the data model is settled. A concrete answer names the actual boundary: "The order service depends on an `OrderRepository` interface, not on the ORM directly, so the discount logic can be unit-tested against an in-memory fake. Writes to orders and inventory that need to be atomic go through a single unit of work rather than two separate repository calls." That sentence shows you know the pattern buys testability, and that it does not by itself buy transactional safety across repositories — a distinction interviewers often probe for specifically.
 
-<KeyTakeaways items={["", "", ""]} />
+If asked about swapping databases, give the honest version: the interface hides syntax, not capability — moving from a relational store to a key-value store changes what queries are cheap, and the repository implementation has to change shape, not just its internals, to keep serving the same interface efficiently.
+
+<KeyTakeaways
+  items={[
+    "The repository pattern's real payoff is unit-testing business logic against an in-memory fake, without a live database in the loop",
+    "A well-designed repository interface reads like domain operations; one whose method names mirror SQL clauses has already leaked the query layer",
+    "Atomic writes across more than one repository need a unit of work — the pattern alone does not give you a shared transaction",
+    "The interface hides syntax differences between datastores, not capability differences — a join that was free in a relational store is not free after a switch to a key-value store",
+    "N+1 queries hide behind clean-looking repository methods just as easily as behind raw queries; the abstraction has no opinion about how many round trips its implementation makes",
+    "The pattern costs real boilerplate and only pays for itself when there is logic worth isolating or a genuine multi-backend need, not on every table by default",
+  ]}
+/>

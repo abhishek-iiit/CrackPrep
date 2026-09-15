@@ -1,32 +1,90 @@
 ---
 title: "Reservoir Sampling"
 number: "10.10"
-summary: "Reservoir Sampling — notes in progress."
-status: draft
+summary: "Keep a uniformly random sample of fixed size from a stream of unknown length so each item seen so far has equal probability of being in the sample."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 15
+tags: [sampling, reservoir, streaming, randomness]
+updated: "2026-09-15"
 ---
 
-## The problem
+## You cannot store the stream, but you still need unbiased examples
 
-What breaks without this, and the situation that forces the decision.
+Debugging a pipeline, training a lightweight model, estimating a distribution shape, or exporting "random recent events" for human inspection — all want a sample of items, not a sketch of a single statistic. If the stream length `n` is known in advance, sampling is easy: pick `k` distinct indices. If `n` is unknown or unbounded — a live event firehose — you cannot assign indices up front, and "keep the first k" biases toward the beginning while "keep the last k" biases toward the end.
 
-## How it works
+Reservoir sampling maintains a set of `k` items such that, after `n` items have been observed (`n ≥ k`), each of those `n` items is in the reservoir with equal probability `k/n`. The reservoir size stays `k` forever; only membership churns. That uniformity is the whole contract — and it is what distinguishes a reservoir from "log 1% with a static hash," which is also useful but answers a different question (a deterministic subset of keyspace, not a uniform sample of events).
 
-The mechanism, step by step.
+## Algorithm R: the classic fixed reservoir
 
-## Tradeoffs
+<Steps>
+  <Step title="Fill the reservoir with the first k items">
+    The first `k` events go straight into an array of size `k`. After this step, the sample is exact: it is the entire prefix.
+  </Step>
+  <Step title="For each subsequent item i = k+1, k+2, …, decide whether it enters">
+    When the `i`-th item arrives, include it in the reservoir with probability `k/i`. If you decide not to include it, discard it and leave the reservoir unchanged.
+  </Step>
+  <Step title="If it enters, evict a uniformly random occupant">
+    Choose an index from `0..k-1` uniformly and replace that slot with the new item. Exactly one previous sample leaves.
+  </Step>
+</Steps>
+
+<Formula label="Inclusion probability at step i">P(item i enters reservoir) = k / i  (for i > k)</Formula>
+
+Why this yields uniformity: by induction, after `n` items every item has probability `k/n` of being present. The base case is immediate for `n = k`. When item `n+1` arrives, each old item survives with probability that balances the chance it was already in and the chance it was not evicted — the algebra works out to `k/(n+1)` for every item including the newcomer. You do not need to rehash the whole history; one coin flip and maybe one eviction suffice per event.
+
+<Callout type="tip">
+Generating a fresh random number every step works but is slower than necessary at huge `n`. Vitter's Algorithm Z and related methods skip forward by sampling the gap until the next admission, reducing RNG calls. For interview depth, Algorithm R is enough; for a multi-million-events-per-second sampler, use a library implementation of a skipping variant.
+</Callout>
+
+## What it is good for, and what it is not
+
+| Need | Reservoir sample | Prefer instead |
+| --- | --- | --- |
+| Unbiased example events for inspection | Yes | — |
+| Approximate mean of a numeric field | Yes (average the sample) | Running sum/count if that is all you need |
+| Distinct cardinality | Poor use | HyperLogLog — 10.04 |
+| Per-key frequencies / heavy hitters | Poor use | Count-Min Sketch, top-K — 10.08, 10.09 |
+| Quantile of a metric distribution | Possible on the sample | t-digest — 10.11 — usually tighter for the same memory |
+| Membership "have we seen id X" | No | Bloom filter — 04.13 |
+
+Weighted streams (some events should be more likely to appear) need weighted reservoir variants; Algorithm R is for equal weight per item. Sampling keys uniformly is also different from sampling events uniformly — if one user sends 10,000 events, a uniform event sample will over-represent that user. For user-level uniformity, sample on user id (for example, hash user id into a fixed percentage) or maintain per-stratum reservoirs.
+
+### Merging reservoirs
+
+Two reservoirs of size `k` from streams of length `n1` and `n2` are not fairly merged by concatenation. A correct merge must weight by stream length so items from the longer stream are not underrepresented — treat it as sampling `k` items from the combined `2k` candidates with weights proportional to how much probability mass each reservoir represents. In practice, many pipelines avoid merging by keeping one reservoir per time bucket (10.06) or by doing all sampling in a single reduce stage. 10.05 Mergeable Sketches For Analytics is about structures with cleaner algebra; reservoirs are sampling, not summarization with associative max/sum.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Reach for reservoir sampling when"
+  againstTitle="Use another tool when"
+  forItems={[
+    "You need a fixed-size set of actual items, not a numeric summary statistic",
+    "Stream length is unknown or unbounded and each item should be equally likely in the sample",
+    "Downstream work needs real payloads — debug dumps, manual labeling, subsampled training",
+    "Memory must stay O(k) regardless of how long the stream runs",
+    "A uniform event sample is the right semantics (not uniform users, not deterministic key hashing)",
+  ]}
+  againstItems={[
+    "You only need cardinality, frequency, or quantiles — specialized sketches waste less information per byte",
+    "You need a deterministic 1% of user ids for sticky experiments — hash-based sampling is simpler and stable",
+    "Items have unequal importance and you lack a weighted reservoir variant",
+    "You must merge many parallel samples often and cannot carefully reweight by stream length",
+    "Exact recent-window contents matter more than uniform history — a ring buffer of the last k events may be what you actually want",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+State the invariant: "I will keep k items such that after n events each event is in the sample with probability k/n — fill the first k, then admit item i with probability k/i and evict a random slot." Contrast with "first k" and "last k" bias, and with hash-modulo sampling when they want sticky cohorts. If asked about distributed collection, explain that naive concatenation biases by shard volume and that per-bucket reservoirs or a single sampled reduce are safer than ad-hoc merges.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Reservoir sampling maintains a fixed-size sample where each item seen so far has equal probability k/n of being included after n items",
+    "Algorithm R fills the first k slots, then admits item i with probability k/i and replaces a uniformly chosen resident",
+    "The output is real items — useful for inspection and subsampling — not a compressed statistic like HLL or CMS",
+    "Uniform over events is not uniform over users; choose the sampling unit explicitly",
+    "Merging reservoirs requires reweighting by stream length; concatenation favors whichever side saw more traffic",
+    "Prefer specialized sketches when you need cardinality, frequencies, or quantiles rather than example payloads",
+  ]}
+/>

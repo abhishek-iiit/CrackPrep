@@ -1,32 +1,95 @@
 ---
 title: "File-Backed Dictionary Storage Engine"
 number: "07.03"
-summary: "File-Backed Dictionary Storage Engine — notes in progress."
-status: draft
+summary: "Why a hash map needs a durable, append-only log behind it to survive a restart, and what a plain in-memory index still leaves unsolved."
+status: published
 free: true
 difficulty: core
 estMinutes: 12
+tags: [storage-engines, key-value, append-log, indexing]
+updated: "2026-09-15"
 ---
 
-## The problem
+## An in-memory dictionary is a storage engine until the process exits
 
-What breaks without this, and the situation that forces the decision.
+A hash map is, functionally, a complete key-value storage engine: O(1) average-case get and put, no schema, no query planner, nothing to configure. It is also worthless the moment the process restarts, crashes, or gets rescheduled onto a different machine, because everything it held lived in memory and memory does not survive any of those events. The gap between "a dictionary" and "a storage engine" is entirely the gap 07.01 Storage Engine Design Constraints described: memory is fast and volatile, disk is slower and durable, and a real engine has to sit on the disk side of that line while still behaving, as much as possible, like the memory side.
 
-## How it works
+The obvious fix — periodically dump the whole dictionary to a file — has two problems. The dump itself costs an amount of I/O proportional to the entire dataset, not to what changed, so it gets more expensive as the dataset grows even though the actual amount of new data since the last dump might be tiny. And anything written after the last dump is gone if the process dies before the next one, which means the acceptable window of data loss is exactly as long as the interval between dumps — a number nobody wants to say out loud in an incident review.
 
-The mechanism, step by step.
+The fix that actually works is to persist every write as it happens, but not by finding the key's old location on disk and overwriting it — that is exactly the random write 07.01 said to avoid. Instead: append each write to the end of a file, the cheapest operation a disk performs, and keep the in-memory hash map not as the data itself but as an index into the file — key maps to where in the file its current value lives.
 
-## Tradeoffs
+## The shape: an append log plus an in-memory index
+
+Two structures, doing two different jobs. The **data file** is append-only: every write, in the order it happened, serialized as a record and tacked onto the end. Nothing in it is ever edited after it is written. The **index** is an in-memory hash map from key to a location in that file — for now, think of "location" loosely as an offset; 07.05 Byte-Range Indexed Object Storage makes it precise as an exact offset and length once 07.04 Custom Binary File Format gives records a shape a reader can parse unambiguously.
+
+<Steps>
+  <Step title="Serialize the write">
+    Turn the key and value into a record — for now, any encoding a reader can parse back deterministically. 07.04 Custom Binary File Format replaces whatever ad hoc encoding starts here with something that survives arbitrary byte content in the value.
+  </Step>
+  <Step title="Append the record to the data file">
+    Write it at the current end of the file. This is a sequential write regardless of what key it is for or what order keys arrive in — the random-key-stream problem 07.01 warned about never reaches the disk, because nothing about this operation depends on the key.
+  </Step>
+  <Step title="Update the in-memory index">
+    Point the key at the new record's location, overwriting whatever the key pointed to before. The old record is still physically sitting in the file — nothing was deleted — it is simply no longer reachable through the index.
+  </Step>
+  <Step title="Acknowledge, on your durability terms">
+    Whether you fsync the append before telling the caller "done" or let the OS page cache buffer it is the exact synchronous-versus-buffered decision from 07.01 — nothing about the file-backed design changes that choice, it only gives you somewhere durable to eventually land the write.
+  </Step>
+</Steps>
+
+<Steps>
+  <Step title="Look up the key in the index">
+    A miss here means the key does not exist, full stop — no disk was touched to find that out.
+  </Step>
+  <Step title="Seek to the recorded location">
+    A hit gives you exactly where in the file the current value lives, so the read is one seek and one read, not a scan of the file.
+  </Step>
+  <Step title="Deserialize and return">
+    Parse the record back into a key and value and hand the value back.
+  </Step>
+</Steps>
+
+A delete cannot simply remove the key from the index and stop there. If it did, the index and the file would disagree the moment the index has to be rebuilt from the file — which happens on every restart, since the index itself is in memory and does not survive a crash any better than the plain dictionary did. Replaying the file from the start would see the old write and resurrect a key that was supposed to be gone. So a delete has to be written to the log too, as a record that means "this key is gone" rather than "here is a new value" — 07.06 Immutable Versioned Data Files gives that record a proper name and a proper place in the read path; for now it is enough to know that deletes are appended, not merely forgotten.
+
+<Callout type="gotcha">
+A crash mid-append can leave a torn record at the very end of the file — a write that started but never finished, with a truncated key, a truncated value, or both. Replaying the file to rebuild the index has to detect that and stop, discarding the partial record, rather than parsing it as if it were complete and either crashing the reader or silently indexing garbage. Detecting a torn write reliably needs more structure than "read until end of file" — 07.04 Custom Binary File Format is where that structure gets built.
+</Callout>
+
+## What this design has not solved yet
+
+The file only grows. Every write to an existing key appends a fresh record and leaves the previous one sitting in the file as dead weight the index no longer points to. A key updated once a second for a year has contributed roughly 31 million records to the file, all but the last one useless, and the file's size is now a function of write count, not of how many distinct keys exist or how large their values are.
+
+Restart cost grows with it. Rebuilding the in-memory index means replaying the entire file from byte zero, in order, applying every write and every delete — an O(file size) startup cost that gets slower as the file grows, with no way to shortcut it from this design alone. A file-backed dictionary that has been running happily for months can, on this design, take minutes to restart.
+
+Neither problem is a flaw so much as an open obligation. 07.07 Log-Structured Storage names the mechanism — splitting the log into segments and compacting the old ones — that a production engine needs to close it.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Reach for a file-backed dictionary engine when"
+  againstTitle="Reach for something else when"
+  forItems={[
+    "The access pattern is pure key-to-value, with no need for range scans over keys or secondary lookups by value",
+    "You want durability and crash recovery without the operational weight of a full database engine",
+    "Values are opaque blobs the application already knows how to interpret — the engine does not need to understand their structure",
+    "Write volume is moderate enough that unbounded file growth and an eventual restart-replay cost are acceptable, at least until 07.07 Log-Structured Storage's segmenting is added",
+  ]}
+  againstItems={[
+    "The dataset needs range scans or ordered iteration over keys — a hash index has no notion of key order",
+    "The key population is too large for every key to have an entry in an in-memory hash map, since the index is exactly as big as the key set, never smaller",
+    "Multiple ways of looking up the same data are needed — a secondary index — which this design has no place to put",
+    "Restart time or unbounded disk growth are already a problem, which means the design needs 07.07 Log-Structured Storage's segmenting and compaction, not a bigger version of this",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Introduce it as a hash map with a durable log behind it, not as a database: "point lookups by key, backed by an append-only file so a restart does not lose data, with the fast path staying entirely in memory except for the append itself." Two follow-ups come next almost every time: what happens to a deleted key (it gets its own record in the log, not a silent removal), and what happens to the file as it grows forever (nothing, in this version — naming that as the open problem before being asked to fix it is the stronger answer than waiting to be caught).
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "A plain in-memory hash map is a complete key-value engine except for the one property that matters most operationally: it does not survive a restart",
+    "Appending every write to a file and keeping the hash map as an index into that file — not as the data — gives durability while keeping the hot path an in-memory operation plus one sequential disk append",
+    "A delete has to be written to the log as its own record, because removing only the index entry would let a restart's replay resurrect the old value",
+    "A torn write at the tail of the file, from a crash mid-append, has to be detected and discarded during replay rather than parsed as if it were complete",
+    "The design's two open costs are unbounded file growth and a restart cost that scales with total historical writes, not live data — both are addressed by segmenting the log, which 07.07 Log-Structured Storage covers next",
+  ]}
+/>

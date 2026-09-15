@@ -1,0 +1,136 @@
+---
+title: "Largest BST Subtree"
+number: "03.46"
+summary: "Post-order carries four facts per node — is BST, min, max, size — so a parent validates both children in O(1) merge time."
+status: published
+free: true
+difficulty: deep
+estMinutes: 18
+tags: [binary-tree, bst, dfs]
+updated: "2026-09-15"
+---
+
+## Validating every subtree from scratch is O(n²)
+
+Given a binary tree, find the number of nodes in the largest subtree that is a valid BST. The whole tree may not be a BST — only some subtree is.
+
+Brute force: for each node, check whether its subtree is a BST (02.18 bounds or inorder) and track max size. That is O(n²) on a skewed tree — n up to 10⁴ makes it tight.
+
+The fix is **post-order aggregation**. Each recursive call returns a compact summary of its subtree:
+
+- `isBST` — whether the subtree is a valid BST
+- `min`, `max` — value range if valid
+- `size` — node count if valid, else 0 (or size of best BST inside, depending on formulation)
+
+At node `root`, merge left and right summaries. The combined subtree is a BST iff both children are BSTs **and** `left.max < root.val < right.min` (strict). If valid, `size = 1 + left.size + right.size`; else propagate `max(left.size, right.size)` upward while marking `isBST = false`.
+
+## Post-order merge at each node
+
+<Steps>
+<Step title="Base case — null">
+  Return `{ isBST: true, min: Infinity, max: -Infinity, size: 0 }` — empty subtree is vacuously valid.
+</Step>
+<Step title="Recurse left and right">
+  Collect both summaries before inspecting root.
+</Step>
+<Step title="Check BST merge condition">
+  If left.isBST && right.isBST && left.max < root.val && root.val < right.min, subtree is BST.
+</Step>
+<Step title="Track global max size">
+  Update answer with valid subtree size; if invalid, return size as max of children's best sizes.
+</Step>
+</Steps>
+
+<Callout type="gotcha">
+  Using `<=` instead of strict `<` misclassifies trees with duplicate values — LeetCode expects strict BST unless stated otherwise, matching 02.18.
+</Callout>
+
+## Solution
+
+```ts
+class TreeNode {
+  val: number;
+  left: TreeNode | null;
+  right: TreeNode | null;
+  constructor(val?: number, left?: TreeNode | null, right?: TreeNode | null) {
+    this.val = val ?? 0;
+    this.left = left ?? null;
+    this.right = right ?? null;
+  }
+}
+
+type Info = { isBST: boolean; min: number; max: number; size: number };
+
+function largestBSTSubtree(root: TreeNode | null): number {
+  let best = 0;
+
+  function dfs(node: TreeNode | null): Info {
+    if (node === null) {
+      return { isBST: true, min: Infinity, max: -Infinity, size: 0 };
+    }
+
+    const left = dfs(node.left);
+    const right = dfs(node.right);
+
+    if (
+      left.isBST &&
+      right.isBST &&
+      left.max < node.val &&
+      node.val < right.min
+    ) {
+      const size = left.size + right.size + 1;
+      best = Math.max(best, size);
+      return {
+        isBST: true,
+        min: Math.min(left.min, node.val),
+        max: Math.max(right.max, node.val),
+        size,
+      };
+    }
+
+    best = Math.max(best, left.size, right.size);
+    return { isBST: false, min: 0, max: 0, size: 0 };
+  }
+
+  dfs(root);
+  return best;
+}
+```
+
+Time **O(n)** — each node visited once. Space **O(h)** recursion stack.
+
+<Tradeoff
+  forTitle="Post-order four-tuple when"
+  againstTitle="Per-node validation when"
+  forItems={[
+    "You need the largest valid subtree, not just boolean validation of the whole tree",
+    "n up to 10⁴ — O(n²) re-validation per node is too slow",
+    "02.18 bounds check extends naturally to returning min/max alongside validity",
+    "Same merge pattern applies to 'largest subtree matching property X' variants",
+    "Single DFS pass also yields global max without separate tracking structure",
+  ]}
+  againstItems={[
+    "Question is only 'is entire tree a BST?' — 02.18 bounds or inorder suffices",
+    "You must return the actual subtree root node — store argmax pointer during DFS",
+    "Tree is guaranteed BST — answer is n without traversal",
+    "n ≤ 100 and clarity matters — per-node check is easier to explain first",
+    "Non-strict BST with duplicates allowed — comparison operators change, not structure",
+  ]}
+/>
+
+## In an interview
+
+Draw a tree where the root violates BST but a large child subtree is valid — motivates searching all subtrees, then compressing with post-order.
+
+State merge rule: "Both children must be BST and root must sit strictly between their ranges."
+
+Bug: returning `{ isBST: false, size: left.size + right.size + 1 }` on failure — invalid subtrees must not report inflated size. Follow-ups: return the root of largest BST subtree; count all BST subtrees.
+
+<KeyTakeaways items={[
+  "Largest BST subtree: post-order returns isBST, min, max, and size for each subtree.",
+  "Merge rule: left.isBST && right.isBST && left.max < root.val < right.min.",
+  "On failure, propagate max(left.size, right.size) to global best — do not count the invalid root.",
+  "O(n) time, O(h) space — one pass beats O(n²) re-validation per node.",
+  "02.18 Validate BST is the boolean-only version of the same bounds logic.",
+  "Null children return min=Infinity, max=-Infinity so empty sides never break comparisons.",
+]} />

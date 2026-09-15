@@ -1,7 +1,18 @@
-import type { Lesson, Module } from "@/lib/content";
+import type { Course, Lesson, Module } from "@/lib/content";
 import { SITE_URL } from "@/lib/site";
 
-export function CourseJsonLd({ lesson, module: mod }: { lesson: Lesson; module: Module }) {
+export function CourseJsonLd({
+  lesson,
+  module: mod,
+  course,
+}: {
+  lesson: Lesson;
+  module: Module;
+  course?: Pick<Course, "title" | "slug">;
+}) {
+  const courseTitle = course?.title ?? "System design in depth";
+  const coursePath = course?.slug ? `/${course.slug}` : "/system-design";
+
   const data = {
     "@context": "https://schema.org",
     "@type": "LearningResource",
@@ -13,20 +24,17 @@ export function CourseJsonLd({ lesson, module: mod }: { lesson: Lesson; module: 
     timeRequired: `PT${lesson.estMinutes}M`,
     isPartOf: {
       "@type": "Course",
-      name: "System design in depth",
-      url: `${SITE_URL}/system-design`,
+      name: courseTitle,
+      url: `${SITE_URL}${coursePath}`,
       hasPart: { "@type": "CourseInstance", name: mod.title },
     },
   };
 
-  return (
-    <script
-      type="application/ld+json"
-      // Content is our own frontmatter, but `</script>` inside a lesson title
-      // or summary would still close this tag early and drop the rest of the
-      // page's markup into it. Escaping `<` keeps the JSON valid (JSON parsers
-      // read \u003c as `<`) and makes that impossible.
-      dangerouslySetInnerHTML={{ __html: JSON.stringify(data).replace(/</g, "\\u003c") }}
-    />
-  );
+  // React 19 expects inline script bodies as `children`, not
+  // `dangerouslySetInnerHTML`. Content is our own frontmatter, but a
+  // literal `</script>` in a title/summary would still close this tag
+  // early — escaping `<` keeps the JSON valid (\u003c) and closes that hole.
+  const json = JSON.stringify(data).replace(/</g, "\\u003c");
+
+  return <script type="application/ld+json">{json}</script>;
 }

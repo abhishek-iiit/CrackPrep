@@ -1,0 +1,101 @@
+---
+title: "Task Scheduler"
+number: "02.27"
+summary: "Greedy scheduling with cooldown n means the most frequent task sets the frame length — fill gaps with other work."
+status: published
+free: true
+difficulty: core
+estMinutes: 16
+tags: [greedy, heap, counting]
+updated: "2026-09-15"
+---
+
+## Same task cannot run back-to-back — idle slots appear
+
+Given task labels `A`–`Z` and cooldown n, identical tasks must be separated by at least n other tasks (or idle slots). Return the minimum number of intervals to finish all tasks. n can be 0–100; task list up to 10⁴.
+
+Simulating slot by slot with a queue works but invites off-by-one errors around when a task re-enters the ready pool. The structural insight: the **most frequent task** dictates the minimum timeline — everything else fills the mandatory gaps or leaves idle time at the end.
+
+Example: `tasks = [A,A,A,B,B,B], n = 2`. One optimal schedule is `A B _ A B _ A B` — length 8. Three A's force two gaps between each pair when n = 2.
+
+## Count frequencies, then frame math
+
+Count each task's frequency. Let `maxFreq` be the highest count and `maxCount` the number of task types tied at that frequency.
+
+Build `(maxFreq - 1)` full blocks of length `(n + 1)` — one slot for the dominant task plus n cooldown slots per block. Add `maxCount` for the final row of most-frequent tasks.
+
+```
+intervals = (maxFreq - 1) * (n + 1) + maxCount
+answer = max(intervals, tasks.length)
+```
+
+The `max` with `tasks.length` handles the case where so many distinct tasks fill every gap — no idle slots needed, schedule length is just task count.
+
+<Steps>
+<Step title="Count task frequencies">
+  Hash map or 26-length array for uppercase letters.
+</Step>
+<Step title="Find maxFreq and maxCount">
+  How many tasks hit the peak frequency.
+</Step>
+<Step title="Apply frame formula">
+  Compute idle-inclusive length; take max with tasks.length.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function leastInterval(tasks: string[], n: number): number {
+  const freq = new Array(26).fill(0);
+  for (const t of tasks) freq[t.charCodeAt(0) - 65]++;
+
+  const maxFreq = Math.max(...freq);
+  const maxCount = freq.filter(f => f === maxFreq).length;
+
+  const frames = (maxFreq - 1) * (n + 1) + maxCount;
+  return Math.max(frames, tasks.length);
+}
+```
+
+Time **O(m)** for m tasks (count + scan 26 buckets). Space **O(1)**.
+
+Heap simulation alternative: max-heap of remaining counts, cooldown queue of `[task, readyTime]`. Each tick pop highest, decrement, requeue after n slots. Same answer, **O(m log 26)** — useful when interviewer wants explicit scheduling.
+
+<Tradeoff
+  forTitle="Formula when"
+  againstTitle="Heap simulation when"
+  forItems={[
+    "You need only the minimum interval count, not the actual schedule order",
+    "Alphabet is fixed size (26) — counting is O(1) space",
+    "n and frequencies are the only inputs — frame math is O(m) one pass",
+    "Interview time is tight — formula is 5 lines after counting",
+    "Follow-up confirms 'any valid order' — structure depends only on max frequency",
+  ]}
+  againstItems={[
+    "Interviewer asks to print the schedule, not just the length",
+    "Tasks have different durations or priorities — formula breaks down",
+    "Cooldown is per-task-type with varying n — simulation generalizes",
+    "You need to prove correctness step by step — simulation is easier to trace",
+    "Multiple CPU cores — greedy formula assumes single processor",
+  ]}
+/>
+
+## In an interview
+
+Walk through `A×3, B×3, n=2`: three A blocks need 2 gaps each → frame `(3-1)*(2+1) + 2 = 8`. Then show a case with no idle: `A,B,C,D, n=2` → length 4 because fillers exist.
+
+Derive the formula aloud: the bottleneck task creates `(maxFreq-1)` waiting periods of width `n+1`, then the last row fits `maxCount` tied max-frequency tasks side by side.
+
+Proactive bug: forgetting `Math.max(frames, tasks.length)` — when many distinct tasks exist, you never need idle time but the frame formula overcounts gaps. Another: off-by-one on cooldown meaning — n slots **between** same task means block width is `n+1`, not n.
+
+Follow-ups: return actual order, tasks with different cooling times, parallel workers.
+
+<KeyTakeaways items={[
+  "The highest-frequency task determines minimum timeline; other tasks fill cooldown gaps or go idle.",
+  "Frame length: (maxFreq - 1) * (n + 1) + maxCount accounts for tied peak-frequency types on the last row.",
+  "Answer is max(frames, tasks.length) — enough distinct work eliminates idle time entirely.",
+  "Counting 26 letter frequencies is O(m) time, O(1) space.",
+  "Heap simulation validates the formula and produces explicit order when required.",
+  "Greedy insight: always schedule the most remaining frequent task when multiple are ready — cooldown defers repeats.",
+]} />

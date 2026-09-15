@@ -1,0 +1,95 @@
+---
+title: "Two Sum"
+number: "01.01"
+summary: "Every pair check is O(n²); a hash map turns the missing partner into one lookup per element."
+status: published
+free: true
+difficulty: intro
+estMinutes: 9
+tags: [hash-map, array]
+updated: "2026-09-15"
+---
+
+## Two indices, one pass budget
+
+Given an integer array and a target, return the indices of two distinct elements that sum to the target. Exactly one solution exists, and you may not reuse the same element twice.
+
+The brute force is the nested loop: for each index `i`, scan every `j > i` and check whether `nums[i] + nums[j] === target`. On an array of length 10⁴ that is on the order of 10⁸ comparisons — fine for a toy input, TLE on the judge. The constraint n ≤ 10⁴ is the hint that linear time is expected.
+
+The reframe: at index `i` you are not searching for *any* partner — you are searching for one specific value, `target - nums[i]`. That is a lookup, not a scan.
+
+## One map, one forward pass
+
+Maintain a hash map from **value → index seen so far**. Walk left to right. At each position, compute the complement. If the complement is already in the map, return `[map.get(complement), i]`. Otherwise store the current value and index, then continue.
+
+The invariant: every key in the map appeared at an index strictly before the current one. You never pair an element with itself because you check the map *before* inserting the current value.
+
+<Steps>
+<Step title="Initialize an empty map">
+  No values have been seen yet.
+</Step>
+<Step title="For each index i, compute complement = target - nums[i]">
+  If `map.has(complement)`, return `[map.get(complement)!, i]`.
+</Step>
+<Step title="Otherwise record nums[i] → i and advance">
+  Future indices can now find this value as their complement.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function twoSum(nums: number[], target: number): number[] {
+  const seen = new Map<number, number>();
+
+  for (let i = 0; i < nums.length; i++) {
+    const complement = target - nums[i];
+    if (seen.has(complement)) {
+      return [seen.get(complement)!, i];
+    }
+    seen.set(nums[i], i);
+  }
+
+  return []; // problem guarantees one solution
+}
+```
+
+Time **O(n)** — one pass, O(1) expected map operations. Space **O(n)** for the map in the worst case (no match until the end).
+
+<Tradeoff
+  forTitle="Hash map when"
+  againstTitle="Nested loops when"
+  forItems={[
+    "n is in the thousands or beyond and O(n²) will TLE on the judge",
+    "You need indices back, not just whether a pair exists",
+    "Values fit in memory as map keys — the standard integer array case",
+    "One pass is enough; order of output indices does not need sorting",
+    "Duplicate values are allowed; the map stores the latest index, which is fine because a valid pair must use distinct indices",
+  ]}
+  againstItems={[
+    "n is tiny (under a few hundred) and clarity beats micro-optimization",
+    "Memory is extremely tight and you cannot allocate O(n) auxiliary space",
+    "The array is already sorted and the follow-up asks for two pointers instead",
+    "You only need to detect existence, not return positions",
+    "Interviewer explicitly asks for the O(n²) baseline before optimizing",
+  ]}
+/>
+
+## In an interview
+
+Restate the problem with a concrete example: `nums = [2, 7, 11, 15], target = 9` → `[0, 1]`. Confirm constraints: one guaranteed solution, same element cannot be used twice, return indices not values.
+
+Say out loud that brute force is O(n²) and that the target minus current value turns the inner loop into a hash lookup. Mention the self-pair bug before coding: check the map before inserting the current element.
+
+Follow-ups to expect: sorted input (two pointers), return all pairs, or 01.09 3Sum (sort + two pointers on the reduced subproblem). The bug interviewers watch for is using the same index twice when `nums[i] === complement` and duplicates exist.
+
+<KeyTakeaways
+  items={[
+    "Two Sum is the canonical hash-map complement lookup: at each element, ask whether target minus that element was seen already",
+    "Check the map before inserting the current value so you never pair an element with itself",
+    "Brute force is O(n²); the map reduces the inner search to O(1) expected time per step",
+    "Space O(n) buys linear time — the usual trade for unsorted array pair problems",
+    "Sorted follow-ups drop the map for two pointers; unsorted follow-ups often keep it",
+    "Duplicate values are handled naturally because distinct indices matter, not distinct values",
+  ]}
+/>

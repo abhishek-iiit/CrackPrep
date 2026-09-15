@@ -1,32 +1,109 @@
 ---
 title: "Redis GEO Spatial Hot Path"
 number: "12.04"
-summary: "Redis GEO Spatial Hot Path — notes in progress."
-status: draft
+summary: "Use Redis GEO as an in-memory radius index for high-churn locations — and keep a durable store behind it so eviction and restarts do not invent a new source of truth."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 14
+tags: [redis, geospatial, caching]
+updated: "2026-09-15"
 ---
 
-## The problem
+## When the write rate is the nearby problem
 
-What breaks without this, and the situation that forces the decision.
+A static restaurant catalog can live in Postgres with a geohash column. A fleet of drivers, couriers, or scooters that publish a location every few seconds cannot: you are looking at thousands of geo writes per second, each one invalidating whatever disk-backed spatial index you just warmed, and reads that need "who is within 1 km of this pin *right now*" in single-digit milliseconds.
 
-## How it works
+Redis GEO is built for that hot path. It stores members in a sorted set under the hood, with geohash-derived scores, and exposes radius and bounding-box queries as first-class commands. It is not a GIS. It is a specialised in-memory index for points that move.
 
-The mechanism, step by step.
+## What Redis GEO actually gives you
 
-## Tradeoffs
+Members are identified by a string (driver id, vehicle id). Each member has a longitude and latitude. The core commands that matter in system design:
+
+- **`GEOADD`** — upsert a member's coordinates into a geo key (one key often per city or shard).
+- **`GEOSEARCH` / `GEORADIUS`** — return members within a radius of a point, optionally with distance, coordinates, and a count limit.
+- **`GEODIST`** — distance between two members.
+- **`GEOHASH` / `GEOPOS`** — inspect encoding and coordinates.
+
+Under the hood the structure is a **sorted set** whose score encodes a 52-bit geohash-like interleaved coordinate. Radius search walks that ordering to collect candidates, then filters — the same candidate-then-exact pattern as 12.01 and 12.02, implemented inside the server. You do not maintain neighbour cells yourself for the common radius query; Redis does the covering.
+
+Limits that shape the design:
+
+- Points only — no polygons, no linestrings. Geofencing still belongs elsewhere (12.05).
+- One Redis key's geo set must fit memory; city-level keys are the usual shard unit.
+- Memory is the budget. Millions of members per key are possible but every member is resident — plan RSS, not just QPS.
+- Persistence is optional and secondary. AOF/RDB can keep you from empty-cache stampedes, but the product source of truth for "is this driver still employed" is not Redis.
+
+## A hot-path architecture that survives Monday morning
+
+<Steps>
+  <Step title="Client or ingest service writes location">
+    Authenticated device sends `(lat, lon, timestamp)`. Ingest validates, rate-limits, and decides the Redis key — typically `geo:drivers:{city}` or a consistent-hash shard — then `GEOADD`s the member. Optionally set a per-member heartbeat key with TTL for liveness.
+  </Step>
+  <Step title="Serve nearby from Redis">
+    Dispatch or consumer APIs call `GEOSEARCH` with radius and `COUNT`. Apply business filters in the app layer (vehicle type, capacity) using a side hash or a parallel cache of attributes. Do not stuff large JSON blobs into the geo member name.
+  </Step>
+  <Step title="Async durability and identity">
+    Stream location updates to a log or write periodically to a durable store for analytics, dispute resolution, and rebuild. Identity, credentials, and compliance state live in the primary database — Redis holds last known position and perhaps a slim status field.
+  </Step>
+  <Step title="Liveness via TTL or explicit status">
+    A driver who lost connectivity should disappear from dispatch. Pattern: heartbeat key expires in 30–60 s, or a `status=offline` attribute checked after GEOSEARCH. Without this, Redis happily returns ghosts at their last coordinates forever.
+  </Step>
+  <Step title="Rebuild playbook">
+    On cold start or shard loss, replay recent positions from the log or fall back to "no drivers" with a clear degraded mode. Never block the write path on the durable store if the product priority is dispatch availability.
+  </Step>
+</Steps>
+
+## Sharding and hot cities
+
+Put all of a metro area in one key until memory or CPU says otherwise. When you split, split by **geography** (city, H3 parent, geohash prefix), not by driver id alone — a radius query must know which keys to hit. Cross-boundary queries near city edges need a neighbour-key fan-out, the same conceptual problem as cell edges.
+
+Dense downtown cells create CPU hot spots on one Redis shard during rush hour. Mitigations: smaller geo keys (sub-city tiles), read replicas for `GEOSEARCH`, and moving heavy attribute filtering out of Redis Lua and into the application after a bounded `COUNT`.
+
+## What not to use it for
+
+| Workload | Redis GEO? | Prefer |
+| --- | --- | --- |
+| Live fleet radius / matching | Yes — primary hot path | — |
+| Restaurant catalog search with rich facets | Poor fit | Search index + geohash / PostGIS |
+| Delivery zone polygons | No | Geofence service (12.05) |
+| Historical "where was the driver yesterday" | No | Time-series / warehouse from the log |
+| Authoritative billing location | No | Durable store with audit |
+
+<Callout type="warn">
+`GEOADD` overwrites coordinates but does not, by itself, mean the member is still eligible for work. Pair geo membership with an explicit liveness and eligibility check. The production incident pattern is familiar: Redis returns twenty nearby drivers, dispatch assigns one, and only then the app learns eleven of them have been offline for ten minutes — or still listed after logout — because nobody expired them.
+</Callout>
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Put nearby on Redis GEO when"
+  againstTitle="Keep geo queries on the primary/search store when"
+  forItems={[
+    "Location update rate is high — thousands per second — and disk-backed spatial indexes cannot absorb the write churn",
+    "Read latency must stay in the low milliseconds for dispatch or live maps",
+    "The working set is points with light metadata, not rich documents",
+    "You can shard by region and bound memory per key",
+    "Eventual consistency of positions (seconds) is acceptable relative to the ping interval",
+  ]}
+  againstItems={[
+    "Entities rarely move and the catalog is mostly static — a geohash column or PostGIS is simpler and durable by default",
+    "Queries need complex polygons, joins, or heavy secondary filters inside the geo engine",
+    "You cannot operate a rebuild/liveness story and would silently serve stale members after partitions",
+    "Memory cost of keeping every point resident exceeds the latency benefit",
+    "Strong transactional coupling between location and durable business state is required on every write",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Frame Redis GEO as the **serving index for moving points**, not as the database. Walk `GEOADD` on ping, `GEOSEARCH` on dispatch, TTL for liveness, async log for durability. Mention city-level keys and edge fan-out. If asked about failure, say: lose Redis and you degrade to slower durable lookup or pause matching — you do not invent positions. Tie back to 12.01 for the candidate/exact pattern and 12.08 for how matching consumes the nearby set.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Redis GEO is an in-memory geohash-backed sorted set optimised for high-churn point radius queries — not a general GIS",
+    "Use it as the hot path for live fleets; keep identity and audit in a durable store and rebuild Redis from a stream",
+    "Liveness is a separate concern from GEOADD — TTL heartbeats or status filters prevent ghost results",
+    "Shard geo keys by region so a radius query hits a known small set of keys; watch hot downtown shards",
+    "Points only: polygons, history, and rich faceted search belong elsewhere",
+    "Memory and eviction policy are part of the capacity plan — every member you want searchable must be resident",
+  ]}
+/>

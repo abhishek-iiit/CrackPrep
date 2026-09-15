@@ -1,0 +1,163 @@
+---
+title: "Distributed Cache"
+number: "01.03"
+summary: "A read-through copy of data elsewhere where eviction, invalidation, and partition placement decide whether the cache helps or lies."
+status: published
+free: true
+difficulty: deep
+estMinutes: 20
+tags: [caching, redis, consistency]
+updated: "2026-09-15"
+---
+
+## Why interviewers ask for a distributed cache
+
+Caching is the standard fix when the read path outruns the database — but "add Redis" is not a design. The prompt tests whether you know *where* the cache sits relative to the application, what happens on a miss, how entries leave, and what callers see when the cache and the database disagree. It is the infrastructure counterpart to the application-level caching in a URL shortener or news feed, abstracted so the conversation stays on eviction, sharding, and consistency rather than product features.
+
+## Clarify: cache-aside for whom, consistency how strict
+
+**Functional:**
+
+- What is being cached — database rows, computed aggregates, session objects, static assets?
+- Read path pattern — cache-aside (app manages), read-through (cache fetches), write-through (cache writes DB)?
+- Write path — write-around (invalidate only), write-through, write-back (async flush)?
+- TTL vs explicit invalidation — or both?
+- Single cache cluster or tiered (local L1 + remote L2)?
+
+**Non-functional:**
+
+- Hit ratio target — 90%? 99%?
+- Staleness tolerance — can reads return data seconds or minutes old?
+- Eviction when full — LRU, LFU, TTL-only?
+- Availability — cache miss must degrade to DB, not error
+- Memory budget — how many GB per node, how many nodes?
+
+**Out of scope:** building the database behind it, CDN for static assets, full text search index.
+
+Spoken script:
+
+> "I'll design a distributed Redis cache-aside layer in front of a SQL primary, LRU eviction, TTL per key type, explicit invalidation on write, and tolerate seconds of staleness on reads."
+
+### Cache-aside vs read-through vs write-through
+
+| Pattern | App complexity | Consistency | Typical use |
+| --- | --- | --- | --- |
+| Cache-aside | App loads on miss, invalidates on write | Eventual; invalidation bugs → stale | General purpose — most interviews |
+| Read-through | Cache loads on miss | Same, but loading logic centralized | Shared cache library |
+| Write-through | Every write hits cache + DB | Stronger if synchronous | Session stores, low write rate |
+| Write-back | Write to cache, async flush to DB | Risk of loss on crash | Write-heavy buffering |
+
+Pick cache-aside unless the prompt specifies write-heavy ingest — then discuss write-back with the durability cost named aloud.
+
+## Capacity: working set vs full dataset
+
+Assumptions.
+
+| Assumption | Value |
+| --- | --- |
+| Total dataset in DB | 2 TB |
+| Hot working set (80/20) | 200 GB — 10% of keys serve 90% of reads |
+| Peak read QPS | 100,000/s |
+| Target hit ratio | 95% |
+| Average cached value size | 2 KB |
+| p99 miss latency budget | 50 ms (includes DB round trip) |
+
+**Cache memory for working set:** 200 GB / 2 KB ≈ **100M keys** in the hot set — fits a Redis cluster of ~10 nodes at 32 GB each with overhead (metadata, fragmentation reserve ~30%).
+
+**Load on DB at 95% hit:** 100k × 0.05 = **5,000 reads/s** — manageable with replicas. At 80% hit it is 20k/s — the difference is why hit ratio matters more than raw QPS.
+
+**Network:** 100k reads/s × 2 KB = **200 MB/s** egress from cache cluster — plan NIC and sharding so no single node carries more than ~20 MB/s.
+
+## High-level design: client-side consistent hashing to shard nodes
+
+| Component | Role |
+| --- | --- |
+| Cache client library | Hash key → shard; connection pool; circuit breaker on miss storm |
+| Redis shard (N nodes) | Stores key → value + TTL; LRU at maxmemory |
+| Primary DB + replicas | Source of truth on miss |
+| Invalidation bus (optional) | Pub/sub or message queue for cross-region invalidation |
+
+<Steps>
+<Step title="Read — cache-aside">
+
+App computes key `entity:{type}:{id}`. GET from Redis shard. On hit, deserialize and return. On miss, query DB (replica OK if staleness allowed), populate cache with SET + EX TTL, return. Use singleflight or request coalescing on hot misses so one DB query serves a thousand concurrent misses for the same key.
+
+</Step>
+<Step title="Write — invalidate, don't update">
+
+On DB commit success, DELETE cache key (or publish invalidation). Do not SET the new value in cache-aside — concurrent readers might write a stale value after your SET (race with a slow read of old DB state). Delete is safer; next read repopulates.
+
+</Step>
+<Step title="Eviction under memory pressure">
+
+Redis `maxmemory-policy allkeys-lru`. Monitor evicted_keys/sec — sustained high eviction means working set exceeds RAM and hit ratio will collapse. Scale out shards or increase memory before tuning TTLs.
+
+</Step>
+</Steps>
+
+## Deep dive: sharding, stampedes, and consistency
+
+### Consistent hashing and resharding
+
+Hash the cache key to a ring; each Redis node owns a range. Adding a node moves only ~1/N of keys — unlike modulo hashing, which reshuffles almost everything. Virtual nodes (150–200 per physical node) smooth uneven key distribution. Client library must handle MOVED/ASK redirects if using Redis Cluster natively.
+
+### Cache stampede / thundering herd
+
+A hot key expires; 10,000 requests miss simultaneously and hammer the DB. Mitigations:
+
+- **Jitter on TTL** — expire keys at random offset within ±10% so they don't all die at once
+- **Probabilistic early refresh** — before expiry, one request in N refreshes in background
+- **Lock on miss** — first miss acquires `SETNX lock:{key}`; others wait or serve slightly stale
+
+Name one in the interview; jitter is the easiest to explain in thirty seconds.
+
+### When cache and DB disagree
+
+Stale reads after a write mean invalidation failed or was async. Mitigations by strictness:
+
+- **Delete on write** — good default; failure mode is stale until TTL
+- **Version in key** — `entity:user:123:v47`; write bumps version in DB, old cache entries become unreachable
+- **Short TTL on contentious keys** — accept staleness window bounded by TTL
+- **Read-your-writes** — route author's reads to primary or include a cookie that bypasses cache for 1 s after write
+
+<Callout type="warn">
+Updating the cache on write (write-in) in cache-aside without versioning invites a classic race: Thread A writes old value to cache after Thread B committed a new value to DB. Prefer DELETE over SET on invalidation unless you use versioned keys.
+</Callout>
+
+## Tradeoffs
+
+<Tradeoff
+  forTitle="Large centralized Redis cluster when"
+  againstTitle="Local in-process L1 + shared L2 when"
+  forItems={[
+    "Many app instances need the same hot keys — a local cache duplicates memory and diverges on invalidation",
+    "Working set exceeds what one machine's RAM can hold — horizontal sharding is required",
+    "Invalidation must propagate in under a second across all pods",
+    "Hit ratio drives DB load — centralizing the hot set maximizes reuse",
+    "Ops already runs Redis — one system to monitor and back up",
+  ]}
+  againstItems={[
+    "Sub-millisecond latency required and each instance can hold its own hot subset",
+    "Values are large and duplicated across nodes — L1 holds parsed objects, L2 holds serialized blobs",
+    "Stale reads for a few seconds per instance are acceptable and invalidation traffic is high",
+    "Working set fits in a few GB per pod — total cluster memory would be N × working set wasted",
+    "Network partition to Redis should not block reads — local L1 serves degraded stale data",
+  ]}
+/>
+
+## In an interview
+
+Introduce by the cost you avoid: "The DB handles 5k/s today but the product needs 100k/s reads — I'll put a 200 GB working set in Redis and accept eventual consistency on reads." Draw app → Redis shard → DB replica on miss, with DELETE on write path.
+
+Follow-ups: what happens when a shard dies (redistribute keys, miss storm to DB — mention circuit breaker), hot key on one shard (replicate hot key to multiple hash slots or local L1), and serializing large objects (compress, or cache IDs not blobs). Volunteer: "The failure mode I watch for is invalidation silently failing — reads look fine but serve yesterday's data until TTL; I'd metric cache age and invalidation error rate."
+
+<KeyTakeaways
+  items={[
+    "Clarify cache-aside vs write-through up front — the write path and consistency story change completely",
+    "Size the cache to the working set (often 10–20% of keys), not the full dataset; hit ratio directly sets DB load",
+    "On write, DELETE cache keys after DB commit — SET-on-write in cache-aside races with concurrent readers",
+    "Shard with consistent hashing; add jitter to TTLs and singleflight on miss to prevent stampedes",
+    "A 95% hit ratio at 100k reads/s leaves 5k DB reads/s — run that multiplication before claiming the DB is safe",
+    "Stale cache is the normal failure mode, not cache down — cache down falls through to DB; stale serves wrong answers silently",
+  ]}
+/>

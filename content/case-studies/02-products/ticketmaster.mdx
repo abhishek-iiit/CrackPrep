@@ -1,0 +1,186 @@
+---
+title: "Ticketmaster"
+number: "02.09"
+summary: "Seat inventory under flash demand — atomic holds, TTL reservations, and checkout paths that cannot oversell."
+status: published
+free: true
+difficulty: deep
+estMinutes: 21
+tags: [inventory, locking, flash-sale, tickets]
+updated: "2026-09-15"
+---
+
+## On-sale is a flash sale with a seat map
+
+Ticketmaster prompts are not generic e-commerce. They are **scarce inventory + synchronized start time + seat identity**: 20,000 seats, 2M people refreshing at 10:00:00, and exactly zero tolerance for selling seat 14-A twice. The ordinary path — read availability, add to cart, pay, decrement — races under that load. Two checkouts both see "available," both proceed, and you have a reconciliation nightmare and angry customers at the door.
+
+Interviewers use this to test reservation semantics, idempotent checkout, and load shedding before the database — the same primitives as 03.04 Flash Sale, applied to numbered seats instead of SKU counters.
+
+## Clarify: seats, holds, and what "available" means
+
+**Functional:**
+
+- Browse events; view seat map with real-time-ish availability.
+- Select specific seats (or best-available); hold while user completes checkout.
+- Purchase completes with payment; user receives ticket with seat assignment.
+- Release held seats on timeout or payment failure.
+
+**Non-functional:**
+
+- **No overselling** — hard requirement for assigned seating.
+- Checkout hold duration — ask or assume 10–15 minutes.
+- On-sale spike — "500k concurrent users at start" is a reasonable assumption to state.
+
+**Questions to ask:**
+
+"Assigned seats only, or general admission pools?" GA simplifies to a counter; assigned seating needs per-seat state.
+
+"Is payment synchronous in checkout, or authorize now capture later?" Affects how long holds must live.
+
+"Do we need a waiting room / queue before the seat map?" Often yes at real scale — confirm if they want edge admission control in scope.
+
+**Boundary:**
+
+*"I'll design event catalog, seat map, hold-reserve-checkout, and payment handoff. Out of scope: secondary resale marketplace, dynamic pricing ML, and venue access control scanning at the door."*
+
+## Capacity: spike over averages
+
+| Assumption | Value | Notes |
+| --- | --- | --- |
+| Major on-sale concurrent users | 500k | Edge + queue planning |
+| Seats per event | 20k | Scarce inventory |
+| Hold TTL | 12 min | Reclaim abandoned carts |
+| Checkout attempts per second at peak | 50k | After waiting room admission |
+| Successful purchases at peak | ~200/s | Bounded by seats ÷ sale window |
+| Seat map poll interval | 2 s (while browsing) | Read load on map service |
+
+**Writes that matter:** successful holds (atomic seat state → held), releases (TTL expiry), finalizes (held → sold). Peak hold attempts may be 50k/s; successful holds capped by remaining inventory — most requests fail fast with "sold out."
+
+**Reads:** seat map status — can be cached briefly but **authoritative hold must hit source of truth**. Showing stale "available" on a CDN-cached map is acceptable for display; selling the seat twice is not.
+
+## High-level design: catalog, inventory, hold, pay, finalize
+
+| Component | Role |
+| --- | --- |
+| Event catalog | Venues, events, pricing tiers, on-sale times |
+| Seat inventory service | Source of truth for seat states: available, held, sold |
+| Seat map API | Aggregated view for UI; advisory cache + authoritative hold path |
+| Hold service | Atomic transition available → held with checkout_id + expires_at |
+| Checkout service | Orchestrates hold validation, payment, finalize or release |
+| Payment gateway (external) | Auth/capture; idempotent by checkout id |
+| Waiting room / queue (edge) | Admission tokens during on-sale; sheds herd |
+| Expiry worker | Reclaims expired holds; idempotent release |
+
+<Steps>
+  <Step title="On-sale: waiting room admits paced traffic">
+    At T+0, users land on queue page. Edge issues admission tokens at a rate inventory can absorb (e.g. 10k/min). Without this, 500k simultaneous seat-map polls crush the inventory layer before anyone buys.
+  </Step>
+  <Step title="Browse: cached map, authoritative hold">
+    Seat map reads from cache or read replica for green/yellow/red display. Selecting seats calls hold API against primary — never hold based on cached state alone.
+  </Step>
+  <Step title="Hold: atomic per-seat or batch conditional update">
+    `UPDATE seats SET status='held', checkout_id=$1, expires_at=$2 WHERE event_id=$E AND seat_id IN (...) AND status='available'`. All seats in cart must succeed or roll back — partial holds leave inconsistent carts.
+  </Step>
+  <Step title="Pay: against hold, not against hope">
+    Payment runs only if hold is valid and unexpired. Idempotency key = checkout_id — retries after timeout must not double-charge or double-hold. Slow 3-D Secure must fit inside hold TTL or TTL extends for in-flight payment.
+  </Step>
+  <Step title="Finalize or release">
+    Payment success → `held → sold`, emit ticket. Failure or timeout → idempotent release back to available. Expiry worker sweeps orphaned holds.
+  </Step>
+</Steps>
+
+## Deep dive: inventory locking under flash demand
+
+### The race you must draw first
+
+```text
+Client A: READ seat 14-A available
+Client B: READ seat 14-A available
+Client A: PAY ...
+Client B: PAY ...
+Both finalize → double sell
+```
+
+Fix: **hold-then-pay**. Payment never runs without a live reservation row tied to this checkout. Finalize checks `status=held AND checkout_id=$mine AND expires_at > now()` in one conditional update.
+
+For **GA (general admission)** inventory, the primitive collapses to a counter — same as 03.04 Flash Sale:
+
+```sql
+UPDATE inventory SET available = available - 1
+WHERE event_id = $1 AND available >= 1
+RETURNING available;
+```
+
+Zero rows → sold out in one round trip. Assigned seating uses the same conditional pattern on `(event_id, seat_id)` rows instead of one counter.
+
+### TTL holds and idempotent release
+
+A hold without expiry strands inventory while users abandon carts. Typical TTL: 10–15 minutes. Store `expires_at` on the hold row or in Redis with key per checkout.
+
+Expiry path:
+
+1. Worker finds `held WHERE expires_at < now()`.
+2. `UPDATE ... SET status='available' WHERE seat_id=$s AND status='held' AND checkout_id=$c` — conditional so double-release does not corrupt state.
+3. Release keyed by checkout_id is idempotent — running twice is safe.
+
+<Callout type="warn">
+Never hold a database transaction open across the payment HTTP call. The hold is a short atomic UPDATE; payment is external and slow. If you lock the seat row until payment returns, throughput = one checkout at a time per seat row — p99 becomes payment latency × queue depth.
+</Callout>
+
+### Hot event sharding — when one row melts
+
+A single counter for 20k GA tickets concentrates all contention on one key. Mitigations from 03.04 Flash Sale:
+
+- **Bucketed counters** — split 20k into 100 buckets of 200; route each hold attempt to a random bucket with conditional decrement. Reconcile stray units post-sale.
+- **Partition by section** — assigned seating naturally shards by section; hot sections (floor) still need atomic per-seat rows, not one lock for the whole section.
+
+Display stock on the marketing page can be approximate; **the hold API is authoritative**.
+
+### Load shedding layers
+
+| Layer | What it protects |
+| --- | --- |
+| Waiting room | Inventory DB from 500k simultaneous polls |
+| Rate limit per user | Bots grabbing entire sections |
+| Fast fail sold-out | Do not enqueue 40k failing holds into payment |
+| Idempotent checkout | Retries on 503 do not double-charge or double-hold |
+
+03.04 Flash Sale is the same architecture with SKUs instead of seat ids — cross-reference if you need the full oversell/undersell table.
+
+<Tradeoff
+  forTitle="Per-seat holds + waiting room when"
+  againstTitle="Simple cart + DB lock when"
+  forItems={[
+    "On-sale start concentrates far more concurrent buyers than everyday peak on one event",
+    "Overselling a specific seat is unacceptable — refunds do not fix angry venue entry",
+    "You can enforce hold → pay → finalize with TTL and idempotent release",
+    "Assigned seating requires seat-level state, not one aggregate counter",
+    "Edge queue or lottery can pace admissions before inventory sees the herd",
+  ]}
+  againstItems={[
+    "Events are small GA pools with low contention — conditional UPDATE on one counter suffices",
+    "Product accepts waitlist/backorder instead of strict seat identity at purchase time",
+    "No synchronized on-sale instant — demand is spread over hours",
+    "Team cannot operate expiry workers and reconciliation — keep holds in one SQL transaction (only viable at low QPS)",
+    "Display-only inventory without payment integration — then read replicas alone may be enough",
+  ]}
+/>
+
+## In an interview
+
+Lead with the race, not the brand: *"Two users cannot both think seat 14-A is free — I need an atomic hold that flips available to held with a checkout id and TTL, then payment runs against that hold, then finalize or release."* Draw hold → pay → finalize as three boxes before seat map UI.
+
+Spend clarification on assigned vs GA and waiting room. Capacity: 20k seats, 500k concurrent, most hold attempts fail — size for **attempt rate** and **payment finalize rate**, not 500k successful DB writes/s.
+
+Follow-ups: expired hold + successful payment (do not capture without valid hold; refund path), partial cart hold failure (all-or-nothing seat batch), bot abuse (rate limits + proof-of-work at queue). Volunteer oversell vs undersell: business prefers undersell (empty seat) to oversell; TTL too short causes undersell.
+
+<KeyTakeaways
+  items={[
+    "Ticketmaster is flash-demand inventory with seat identity — the core primitive is hold-then-pay, not read-cart-pay-decrement",
+    "Atomic conditional UPDATE (or equivalent) reserves a seat in one step; zero rows returned means sold out without a separate read",
+    "Never span payment latency inside a DB lock — hold is a short write; payment is external; finalize re-checks hold validity",
+    "TTL holds with idempotent expiry workers reclaim abandoned carts; hold TTL must cover slow payment flows",
+    "Waiting room / edge admission sheds the herd before seat inventory — same pattern as 03.04 Flash Sale",
+    "Cached seat maps are for display; authoritative holds always hit source of truth — stale green seats are OK, double sell is not",
+  ]}
+/>

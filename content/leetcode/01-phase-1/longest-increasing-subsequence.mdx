@@ -1,0 +1,121 @@
+---
+title: "Longest Increasing Subsequence"
+number: "01.18"
+summary: "Patience sorting builds piles whose tops form an array you binary-search — O(n log n) LIS without the O(n²) table."
+status: published
+free: true
+difficulty: deep
+estMinutes: 18
+tags: [dp, binary-search, greedy]
+updated: "2026-09-15"
+---
+
+## Subsequence, not substring — order preserved, gaps allowed
+
+Given an integer array, return the length of the longest **strictly increasing subsequence**. `[10, 9, 2, 5, 3, 7, 101, 18]` → length **4** (e.g. `[2, 3, 7, 101]`).
+
+Brute force: enumerate all 2ⁿ subsequences, check each — impossible at n = 2500. **O(n²) DP** works: `dp[i]` = LIS length ending at index `i`; for each `j < i` with `nums[j] < nums[i]`, relax `dp[i] = max(dp[i], dp[j] + 1)`. That is **O(n²)** — acceptable on small n, tight at 2500².
+
+The **O(n log n)** method is the interview target: maintain an array `tails` where `tails[k]` is the smallest possible tail value of an increasing subsequence of length `k+1`. Process each number; binary-search where it belongs in `tails`; replace or extend. Length of `tails` at the end is the answer.
+
+## Patience sorting intuition
+
+Imagine a row of piles. Each new card goes on the leftmost pile whose top is ≥ the card (replace that top); if no pile qualifies, start a new pile. For strictly increasing subsequence, replace the first pile with top ≥ x with x — keeps piles sorted by top, and the number of piles equals LIS length.
+
+For `nums = [10, 9, 2, 5, 3, 7, 101, 18]`:
+
+| num | tails after |
+|-----|-------------|
+| 10 | [10] |
+| 9 | [9] |
+| 2 | [2] |
+| 5 | [2, 5] |
+| 3 | [2, 3] |
+| 7 | [2, 3, 7] |
+| 101 | [2, 3, 7, 101] |
+| 18 | [2, 3, 7, 18] |
+
+Four piles → LIS length 4. Replacing 101 with 18 does not shorten a length-4 subsequence — it keeps a smaller tail so future numbers can extend.
+
+<Steps>
+<Step title="Initialize empty tails array">Will stay sorted ascending.</Step>
+<Step title="For each num in nums">Binary search leftmost index in tails where tails[i] ≥ num.</Step>
+<Step title="If index == tails.length">Append num — LIS grew by one.</Step>
+<Step title="Else">Replace tails[index] with num — same length, better (smaller) tail.</Step>
+<Step title="Return tails.length">Not the subsequence itself unless you add parent tracking.</Step>
+</Steps>
+
+## Solution
+
+```ts
+function lengthOfLIS(nums: number[]): number {
+  const tails: number[] = [];
+
+  for (const num of nums) {
+    let lo = 0;
+    let hi = tails.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (tails[mid] < num) lo = mid + 1;
+      else hi = mid;
+    }
+    if (lo === tails.length) tails.push(num);
+    else tails[lo] = num;
+  }
+
+  return tails.length;
+}
+```
+
+Time **O(n log n)**. Space **O(n)** for `tails`.
+
+### O(n²) fallback (when n is small or you need ending-at-i)
+
+```ts
+// dp[i] = LIS length ending at i — O(n²), easier to reconstruct
+let best = 0;
+const dp = new Array(nums.length).fill(1);
+for (let i = 0; i < nums.length; i++) {
+  for (let j = 0; j < i; j++) {
+    if (nums[j] < nums[i]) dp[i] = Math.max(dp[i], dp[j] + 1);
+  }
+  best = Math.max(best, dp[i]);
+}
+return best;
+```
+
+## O(n log n) tails versus O(n²) ending DP
+
+<Tradeoff
+  forTitle="Patience sorting + binary search when"
+  againstTitle="O(n²) ending-at-i DP when"
+  forItems={[
+    "n up to 2500 or 10⁵ — n² is too slow, n log n is required",
+    "Only the length is needed, not the actual subsequence",
+    "You want to connect LIS to binary search on answer / greedy structure",
+    "Follow-up is 03.38 Russian Doll Envelopes (sort + LIS on second dimension)",
+  ]}
+  againstItems={[
+    "n ≤ 500 — O(n²) is fine and reconstructing the path from dp[i] is straightforward",
+    "Interviewer asks for the actual LIS elements — parent pointers on O(n²) dp are simpler",
+    "You cannot explain why tails stays sorted — fall back to O(n²) with a correct story beats a wrong O(n log n)",
+    "Strict vs non-decreasing LIS — same code with ≥ instead of > in comparisons; clarify which the problem wants",
+  ]}
+/>
+
+## In an interview
+
+Restate: longest strictly increasing subsequence, not contiguous. Give O(n²) dp[i] ending at i first — shows you understand subproblem structure. Then optimize: "I only need the smallest tail for each length" → tails array + binary search.
+
+Follow-ups: print the subsequence (backtrack from O(n²) or parent array on tails), count LIS, longest decreasing, envelopes nesting.
+
+Bug to name: using `>` vs `≥` wrong for strict increasing — duplicates break strict LIS if you use `>` in the wrong place in binary search (search for leftmost `≥ num`).
+
+<KeyTakeaways items={[
+  "O(n²): dp[i] = max(dp[j]+1) for j < i with nums[j] < nums[i] — LIS ending at each index.",
+  "O(n log n): tails[k] = minimum tail of length-(k+1) IS; binary-search placement for each num.",
+  "Replacing a tail does not shrink LIS length — it leaves room for longer extensions later.",
+  "Return tails.length; reconstructing the sequence needs extra bookkeeping.",
+  "03.38 Russian Doll Envelopes sorts by width then runs LIS on heights — classic two-step reduction.",
+  "Binary search finds leftmost index with tails[i] ≥ num — lower_bound pattern.",
+]} />

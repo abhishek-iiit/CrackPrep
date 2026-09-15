@@ -1,32 +1,126 @@
 ---
 title: "LSM Read Path Bloom And Sparse Index"
 number: "07.11"
-summary: "LSM Read Path Bloom And Sparse Index — notes in progress."
-status: draft
+summary: "How per-file Bloom filters and per-block sparse indexes split the job of 'is it here' from 'where inside the file' — and why neither replaces the other."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: deep
+estMinutes: 18
+tags: [storage, lsm, bloom-filter, sparse-index, read-path]
+updated: "2026-09-15"
 ---
 
-## The problem
+## A key can hide in any of several files, and most lookups are looking for nothing
 
-What breaks without this, and the situation that forces the decision.
+In an LSM engine the newest version of a key might sit in the memtable, a frozen memtable, any L0 SSTable, or one file per deeper level (07.09 LSM Tree Storage Engine). A naive reader that opens every candidate and binary-searches its data pays an I/O per file — including for keys that were never written, which in write-heavy systems are often most point lookups.
 
-## How it works
+Two small structures ride along inside each SSTable to cut that cost. A **Bloom filter** answers membership cheaply in memory: definitely not in this file, or maybe. A **sparse index** answers position: given that the key might be present, which one data block could hold it. They look related and they are not interchangeable. Confusing them is how you get designs that "have Bloom filters" and still scan blocks, or indexes that still thrash disk on absent keys.
 
-The mechanism, step by step.
+04.13 Bloom Filters has the sizing math. This lesson is how those filters and the sparse index sit on the actual read path.
 
-## Tradeoffs
+## The read path, with both structures in place
+
+<Steps>
+  <Step title="Search the memtable (and any frozen memtables)">
+    Newest data first. A hit — value or tombstone — ends the lookup. No SSTable involvement.
+  </Step>
+  <Step title="Build the candidate file list from the manifest">
+    L0: every file whose min/max key range includes the target (ranges overlap, so this can be many). L1+: at most one file per level, because runs do not overlap.
+  </Step>
+  <Step title="Probe each candidate's Bloom filter in memory">
+    "Definitely not" → skip the file; zero data I/O. "Maybe" → continue. False positives cost a wasted index/block read at rate `p`; false negatives cannot happen if the filter was built correctly over the file's keys.
+  </Step>
+  <Step title="Binary search the sparse index">
+    The sparse index maps the first key of each data block to a file offset. Search finds the single block whose key range could contain the target — or proves the key falls between blocks and is absent even after a filter maybe.
+  </Step>
+  <Step title="Read that one data block and search inside it">
+    Usually one disk (or page-cache) read. Find the key, or determine it is missing inside the block. Honor sequence numbers if multiple versions exist in older files still being searched.
+  </Step>
+  <Step title="Stop at the first newest-to-oldest hit">
+    Continue to older candidates only if every newer file said no. A tombstone is a hit that returns not found.
+  </Step>
+</Steps>
+
+Range scans skip the Bloom filter entirely — there is no single key to probe — and merge iterators across runs. That is why scan-heavy workloads feel LSM pain even when point reads look fine.
+
+## Sparse index: position without per-key RAM
+
+Bitcask's keydir stores every key's exact offset (07.08). An SSTable sparse index stores one entry per **block**, not per key. If a data block holds roughly a few hundred to a few thousand keys — depending on key/value size and block size, often 4–32 KiB blocks in practice — the index is orders of magnitude smaller than an exact map.
+
+```text
+Sparse index (in memory or in a cached index block)
+
+  key_at_start_of_block_0  →  offset_0
+  key_at_start_of_block_1  →  offset_1
+  ...
+  key_at_start_of_block_N  →  offset_N
+```
+
+Binary search finds the greatest start key ≤ target; that block is the only data block that can contain the target (for a sorted file). You still may read the block and discover the key is absent — the sparse index does not prove membership. It proves *where to look* if membership is possible.
+
+Block size is the trade inside the sparse index itself. Larger blocks → fewer index entries → less memory, better compression per block, but every hit reads more bytes. Smaller blocks → tighter reads, fatter indexes.
+
+## Bloom filter: membership without position
+
+The filter does not tell you an offset. It cannot. Its job is to avoid the sparse-index-and-block work when the key is not in the file at all — the common case for absent keys across many L0 candidates.
+
+At ~10 bits per key for ~1% false positive rate (04.13), a million keys cost about 1.2 MB of filter. That is small enough to keep many per-file filters resident. Engines often pin filters and index blocks in a dedicated cache separate from data blocks, because wasting a data-block cache slot on a filter miss is the wrong eviction story.
+
+| Question | Bloom filter | Sparse index |
+| --- | --- | --- |
+| Is this key definitely absent from the file? | Yes — that is its purpose | No — you may still need a block read to be sure |
+| Where in the file should I read? | Never | Exactly one candidate block |
+| Helps range scans? | No | Only indirectly (block boundaries); scans still merge runs |
+| Memory scales with | Keys in the file (`m/n` bits each) | Number of blocks (≈ file size / block size) |
+| Needs the file to be immutable? | Practically yes — no deletes from a plain Bloom | Yes — block boundaries are fixed at write time |
+
+Production knobs that matter: bits per key (memory vs wasted I/O), whether the deepest level keeps filters at all (it holds most keys; if most lookups are expected hits there, filters buy less), and whether filters are cached hotter than data.
+
+<Callout type="note">
+A "maybe" from the filter followed by "not in the sparse index's block" is normal — that is a false positive doing exactly the extra work you budgeted at rate `p`. A "maybe" followed by finding a *different* key's bytes without careful block search logic is an implementation bug, not a probabilistic structure quirk. Keep the responsibilities straight when debugging read amplification: filter false positives look like extra block reads on absent keys; sparse-index mistakes look like wrong answers.
+</Callout>
+
+## Why L0 is where filters earn the most
+
+Below L0, leveled compaction keeps non-overlapping runs, so candidate count per level is already one. Filters still avoid a block read when that one file does not hold the key. At L0, flushes land overlapping files, and a hashed key space can make almost every L0 file a range candidate. Without filters, absent-key lookups scale with L0 file count. With filters, they scale with false-positive-weighted maybes. That is why L0 file count is both a compaction backpressure signal and a read-latency signal — 07.12 Compaction And Amplification is the write-side twin of this pressure.
+
+Size-tiered layouts leave multiple overlapping runs even below L0, so the filter's value stays high deeper in the tree. Leveled layouts push more of the filter's value to L0 and to negative lookups against the huge last level.
+
+## What still costs I/O after both are tuned
+
+- **Hits** still read one data block per level that actually contains a version you must inspect (and you stop early when a newer level hits).
+- **False positives** still read a block.
+- **Range scans** ignore filters and merge many blocks across runs.
+- **Cold index/filter blocks** add I/O if you under-provision the metadata cache — a surprising production failure mode where "we have Bloom filters" is true but they are not resident.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Invest memory in filters + sparse indexes when"
+  againstTitle="Spend less on read metadata when"
+  forItems={[
+    "Point lookups for absent keys are common and candidate file counts are non-trivial — especially under L0 pressure",
+    "Dataset >> memory, so an exact Bitcask-style keydir is off the table and you need approximate membership plus block positioning",
+    "You can measure filter false-positive rate and metadata cache hit rate as first-class SLIs next to data-block cache",
+    "Read amplification from opening files 'just in case' shows up in profiles as the dominant cost for misses",
+  ]}
+  againstItems={[
+    "The working set is almost all hits in deep levels and negative lookups are rare — deepest-level filters may not pay rent",
+    "Memory must go to the memtable or block cache instead, and missing-key I/O is acceptable under your latency SLO",
+    "The workload is scan-dominated; filters will not help the path that actually hurts",
+    "File counts stay tiny by design (small data, aggressive compaction) so brute-force candidate checks are already cheap",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Separate the two sentences out loud: "Bloom filter tells me this SSTable can be skipped; sparse index tells me which block to read if it cannot." Then walk newest-to-oldest: memtable, L0 with filters on every overlapping file, then one file per level. Quote the ballpark sizing — about 10 bits per key for 1% FPR — and name the failure mode: L0 pileup making even filtered reads expensive as maybe-count grows, which is compaction debt presenting on the read path. Mention that scans get no help from Bloom filters so you do not pretend point-read tuning fixed analytics queries.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "On the LSM read path, Bloom filters eliminate most absent-key file touches; sparse indexes turn a remaining maybe into a single data-block read",
+    "A Bloom filter never returns an offset — membership only — and never helps range scans",
+    "A sparse index stores one entry per block, not per key, so it stays small enough to cache when an exact keydir would not",
+    "False positives cost extra block reads at rate p; false negatives are not allowed, which is why plain filters need immutable files",
+    "L0 overlapping files are where filters buy the most; leveled deeper levels already have one candidate file but still benefit on negatives",
+    "Under-provisioning filter/index cache leaves you with 'filters configured' but still paying I/O to load the metadata that should have stayed hot",
+  ]}
+/>

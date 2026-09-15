@@ -1,32 +1,80 @@
 ---
 title: "API Design Contracts"
 number: "02.01"
-summary: "API Design Contracts — notes in progress."
-status: draft
+summary: "A contract is the promise an API keeps across a version boundary neither side deploys atomically — and what breaks when nobody writes it down."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 11
+tags: [api, contracts, versioning, compatibility]
+updated: "2026-09-15"
 ---
 
-## The problem
+## A function call is not a contract, and an API pretends it is one
 
-What breaks without this, and the situation that forces the decision.
+A function call inside one process is not a contract. Change its signature and the compiler finds every call site in the same commit, so you ship the change and its callers together. Cross a process boundary and that guarantee disappears. The client and the server of an API deploy on separate schedules, sometimes separated by months — a mobile app can sit on a phone for a year and a half without updating, a partner's nightly batch job calls whatever shape you shipped last spring, another team's service migrates to your new field when their sprint gets to it, not when yours does. An API contract is the thing that makes that survivable: an explicit, written commitment about request shape, response shape, error format, and behavior that both sides can rely on without redeploying together.
 
-## How it works
+Nothing about HTTP or JSON enforces this on its own. You can change a response field's type, repurpose a field for a new meaning, or start returning `null` where you used to return an empty array, and the server will happily keep serving 200s the whole time. The break shows up somewhere you can't see it — a client parsing a field that's now the wrong type, silently dropping data or throwing an exception three services downstream of the one you touched. That's the specific failure a contract exists to prevent, and it's why "the API works" and "the contract is intact" are different claims: the first is testable by calling the endpoint, the second requires knowing what every consumer currently assumes.
 
-The mechanism, step by step.
+## What actually belongs in a contract
 
-## Tradeoffs
+Four things, not just the URL and the JSON shape:
+
+- **The request and response schema** — field names, types, which fields are required versus optional, and what a missing field defaults to.
+- **The error shape** — not just which HTTP status codes are possible, but a machine-readable error code and message format a client can branch on without string-matching your prose.
+- **Idempotency guarantees** — whether calling an endpoint twice with the same input is safe, and how a client proves it's a retry rather than a new request. 02.09 Retries Timeouts And Idempotency covers the mechanism; the contract's job is just to state which endpoints promise it.
+- **Pagination and ordering** — the shape of a paged list response, whether ordering is guaranteed stable across pages, and what happens if the underlying data changes mid-page.
+
+Miss any of these and the omission gets filled in by assumption — every client author guesses, and they don't all guess the same way.
+
+## Backward compatible versus breaking
+
+The rule that keeps a contract alive across time is narrow: additive change is safe, and almost everything else is not.
+
+Adding a new optional field to a response is safe — old clients ignore it. Adding a new optional field to a request is safe too, as long as the server defines a default for when it's absent. Everything else is a breaking change, even when it looks small: removing a field a client might be reading, renaming a field, changing a field's type (a string id becoming a number breaks a client that concatenates it into a string), narrowing what was previously accepted (an optional field becomes required), or changing what a status code means on an existing endpoint.
+
+<Callout type="gotcha">
+The one that gets missed most often: adding a *required* field to a request breaks every existing client immediately, even though "adding a field" sounds additive by default. Only optional-with-a-default additions are backward compatible on the request side — a required addition is a breaking change wearing an additive disguise.
+</Callout>
+
+## When additive evolution isn't enough: versioning
+
+Additive changes carry a contract a long way, but eventually a change is genuinely incompatible — a field has to change type, or a whole resource needs a redesign. At that point you need a version boundary, and there are two common places to put it.
+
+**In the URL or header** (`/v2/orders`, or an `Accept-Version` header) is coarse-grained and easy for clients to reason about, but it means running two versions of the same logic in production simultaneously until every client migrates off the old one — which routinely takes longer than anyone plans for. **Per-field, without a version number** — deprecating a field while still populating it, adding its replacement alongside it, and giving clients a migration window before removal — is finer-grained and avoids maintaining parallel major versions, but it only works with discipline: every deprecated field needs an actual removal date, or it never gets removed.
+
+Neither is free. A URL version fans out your endpoint count and your test surface; field-level deprecation means carrying redundant data in every response until the last client migrates off it. 03.12 Schema Evolution covers the same problem one layer down, at the database schema, and the reasoning is identical: additive first, breaking only behind an explicit boundary, and never delete what a consumer might still be reading.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Version explicitly (URL or header) when"
+  againstTitle="Evolve additively without a version bump when"
+  forItems={[
+    "The change is a genuine breaking change — a field's type, meaning, or requiredness — not just an addition",
+    "Consumers are external or numerous enough that you cannot coordinate a synchronized migration with them directly",
+    "You need old and new behavior running side by side for an extended deprecation window",
+    "The API is public and consumers expect a documented, stable version they can pin against",
+  ]}
+  againstItems={[
+    "The change is additive — a new optional field or a new endpoint — and old clients are unaffected by construction",
+    "Consumers are internal services you can coordinate with directly, so a field deprecation window is enough",
+    "Maintaining two parallel major versions in production would cost more than the migration risk it avoids",
+    "The contract already has a deprecation and default-value convention that clients respect",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Bring the contract up before anyone asks about versioning, at the point you draw the API surface: "this is a public endpoint, so I'll treat the response shape as a contract — additive changes only, and any breaking change goes behind a `/v2` path with both versions live during migration." Expect the follow-up about clients that never migrate off v1, and have an answer that isn't "we delete it" — a sunset date communicated in advance, usage metrics on the old version, and a stated plan for what breaks if a laggard is still calling it past that date.
 
-<KeyTakeaways items={["", "", ""]} />
+Naming idempotency and pagination as part of the contract, not as afterthoughts, is what separates "I designed an endpoint" from "I designed an API" in an interviewer's notes.
+
+<KeyTakeaways
+  items={[
+    "An API contract exists because caller and callee deploy independently — a broken contract fails silently downstream instead of at compile time",
+    "Only additive changes are backward compatible by default: new optional fields on either side of the exchange, never a new required field on a request",
+    "A contract covers more than the schema — error format, idempotency guarantees, and pagination behavior all need to be specified, not assumed",
+    "A version boundary, in the URL or a header, is for genuine breaking changes, and it costs you two live versions in production until every client migrates",
+    "Field-level deprecation avoids parallel major versions but only works with a real removal date, or deprecated fields never actually go away",
+    "State idempotency and versioning policy explicitly in an interview — it signals you're designing for consumers you don't control, not just for the happy path",
+  ]}
+/>

@@ -11,9 +11,9 @@ export type CourseRecord = {
 };
 
 /**
- * PLACEHOLDERS: every entry with status "planned" is a stand-in so the
- * "Choose where to start" section has visual weight. Rename or delete them
- * freely — this file is the only place the roadmap is expressed.
+ * Course registry. status "planned" keeps a card on the Paths page without
+ * loading content. Live courses must also be registered in
+ * lib/content/source.ts COURSE_MODULES and have routes under app/<slug>/.
  */
 export const courses: CourseRecord[] = [
   {
@@ -26,30 +26,30 @@ export const courses: CourseRecord[] = [
     colorKey: "mint",
   },
   {
-    slug: "ai-research",
-    title: "AI research",
-    eyebrow: "Research path",
-    blurb: "Maths foundations through to landmark papers, read in order.",
-    bullets: ["Maths foundations to LLMs", "Landmark papers, sequenced", "GPU and tooling practice"],
-    status: "planned",
+    slug: "leetcode",
+    title: "LeetCode roadmap",
+    eyebrow: "Interview path",
+    blurb: "A curated 150 problems in three phases — fundamentals, patterns, then harder variants.",
+    bullets: ["Phase 1: foundations (50)", "Phase 2: core patterns (50)", "Phase 3: advanced (50)"],
+    status: "live",
     colorKey: "cobalt",
   },
   {
-    slug: "ml-maths",
-    title: "Advanced ML maths",
-    eyebrow: "Foundations path",
-    blurb: "The linear algebra, probability and optimisation the papers assume you know.",
-    bullets: ["Sets and logic to inference", "Linear algebra and calculus", "Worked derivations"],
-    status: "planned",
-    colorKey: "cream",
+    slug: "design-patterns",
+    title: "Design patterns",
+    eyebrow: "Code craft path",
+    blurb: "The Gang of Four patterns as decision tools — when each earns its complexity.",
+    bullets: ["Creational patterns", "Structural patterns", "Behavioral patterns"],
+    status: "live",
+    colorKey: "violet",
   },
   {
-    slug: "inference-engineering",
-    title: "Inference engineering",
-    eyebrow: "Production path",
-    blurb: "Serving models under latency and cost budgets that actually bind.",
-    bullets: ["Latency and cost budgets", "KV cache and batching maths", "Quantisation tradeoffs"],
-    status: "planned",
-    colorKey: "ink",
+    slug: "case-studies",
+    title: "Design X case studies",
+    eyebrow: "Case study path",
+    blurb: "The most-asked Design X prompts as of 2026 — what to clarify, estimate, draw, and say out loud.",
+    bullets: ["Classics like URL shortener", "Products like Drive and YouTube", "Platform designs including RAG"],
+    status: "live",
+    colorKey: "amber",
   },
 ];

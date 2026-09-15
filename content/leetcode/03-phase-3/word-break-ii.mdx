@@ -1,0 +1,115 @@
+---
+title: "Word Break II"
+number: "03.05"
+summary: "01.20 Word Break proves feasibility in O(n²) — this follow-up enumerates every segmentation with backtracking plus memo."
+status: published
+free: true
+difficulty: deep
+estMinutes: 18
+tags: [backtracking, dynamic-programming, string]
+updated: "2026-09-15"
+---
+
+## Feasibility is cheap — listing every split is not
+
+Given a string and a dictionary, return **every** sentence formed by inserting spaces so each word is in the dictionary. `"catsanddog"` with `["cat","cats","and","sand","dog"]` yields `["cats and dog", "cat sand dog"]`.
+
+01.20 Word Break asks only whether segmentation is possible — a boolean DP in O(n² × word lookups). Word Break II asks for **all** valid segmentations. Pure backtracking without memo revisits the same suffix exponentially: `"aaaa...aaa"` with `"a"` and `"aa"` in the dict fans out combinatorially.
+
+The productive split: use DP (or memoized DFS) to know which suffixes are breakable, then backtrack only along viable cuts.
+
+## Memoized DFS on start index
+
+From index `start`, try every `end` where `s.slice(start, end)` is in the dictionary. If the suffix `s.slice(end)` is breakable (memo or precomputed DP), recurse and append `"word + rest"` combinations.
+
+Precompute `wordSet` as a Set for O(1) lookups. Optionally run bottom-up `dp[i] = canBreak(s[i:])` first so dead branches never enter recursion.
+
+<Steps>
+<Step title="Put dictionary in a Set">
+  O(1) average membership tests for each candidate word.
+</Step>
+<Step title="Memo breakable(i)">
+  `breakable(i)` is true if `s[i:]` can be segmented. Base: `i === n` is true. Try splits; if any word in dict and `breakable(end)` succeeds, cache true.
+</Step>
+<Step title="Enumerate sentences">
+  From `start`, collect words that lead to breakable suffixes. Recurse on `end`; prepend current word to each suffix sentence. Single-word suffix becomes `[word]` directly.
+</Step>
+</Steps>
+
+<Callout type="warn">
+Building every sentence can still be exponential in output size — no algorithm avoids that when the answer itself is huge. Memo prunes **impossible** suffixes, not duplicate valid paths.
+</Callout>
+
+## Solution
+
+```ts
+function wordBreak(s: string, wordDict: string[]): string[] {
+  const words = new Set(wordDict);
+  const n = s.length;
+  const memo = new Map<number, string[][]>();
+
+  function sentences(start: number): string[][] {
+    if (start === n) return [[]];
+    if (memo.has(start)) return memo.get(start)!;
+
+    const result: string[][] = [];
+    for (let end = start + 1; end <= n; end++) {
+      const word = s.slice(start, end);
+      if (!words.has(word)) continue;
+
+      for (const rest of sentences(end)) {
+        if (rest.length === 0) {
+          result.push([word]);
+        } else {
+          result.push([word, ...rest]);
+        }
+      }
+    }
+
+    memo.set(start, result);
+    return result;
+  }
+
+  return sentences(0).map((parts) => parts.join(" "));
+}
+```
+
+Time **O(n² × 2^n)** worst case when output explodes — plus O(n²) for trying split points. Space **O(n²)** memo plus output. On typical inputs with strong dictionary constraints, far less.
+
+<Tradeoff
+  forTitle="Memoized backtracking when"
+  againstTitle="Boolean DP only when"
+  forItems={[
+    "Interviewer wants all segmentations, not just yes/no",
+    "You already solved 01.20 Word Break and can extend it in one pass",
+    "Dictionary words are short and n ≤ 20 — recursion depth stays manageable",
+    "Memo on start index avoids recomputing suffix sentence lists",
+    "Same skeleton handles follow-up: return one segmentation or count segmentations",
+  ]}
+  againstItems={[
+    "Question is Word Break I only — boolean dp[i] suffices, no enumeration",
+    "Output size is provably exponential — interviewer may accept listing plus explanation of lower bound",
+    "Very long s with tiny dict — BFS on indices can be easier to explain than sentence memo",
+    "Memory cap: store breakable flags only, generate sentences in a second pass without caching lists",
+    "Trie of dictionary speeds prefix cuts when words share long prefixes",
+  ]}
+/>
+
+## In an interview
+
+Restate: return all valid space-separated sentences. Example with `"catsanddog"`. Confirm dictionary duplicates do not matter (Set handles it).
+
+Start from 01.20: "I would DP feasibility first." Then: "For enumeration, DFS from each valid word cut and memoize sentences from each index."
+
+Follow-ups: Word Break I only, count segmentations (DP count), or longest word first. Bug: slicing wrong (`end` exclusive), or not handling the last word when `rest` is empty.
+
+<KeyTakeaways
+  items={[
+    "Word Break II extends 01.20 Word Break from boolean feasibility to enumerating all valid segmentations.",
+    "Memoize on start index the list of sentence word-lists for s[start:] to avoid recomputing suffixes.",
+    "Output size can be exponential — memo prunes impossible branches, not the cost of printing all answers.",
+    "Set membership for dictionary words gives O(1) average checks per candidate slice.",
+    "Join word arrays into strings at the end to keep recursion working with structured parts.",
+    "For feasibility-only, drop enumeration and keep O(n²) boolean DP.",
+  ]}
+/>

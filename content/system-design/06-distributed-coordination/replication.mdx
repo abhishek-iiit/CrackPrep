@@ -1,32 +1,83 @@
 ---
 title: "Replication"
 number: "06.03"
-summary: "Replication — notes in progress."
-status: draft
+summary: "Synchronous, asynchronous, and quorum-based replication all answer one question differently: how many copies must confirm a write before it's real."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 15
+tags: [replication, quorum, durability, availability]
+updated: "2026-09-15"
 ---
 
-## The problem
+## One copy is a liability; two copies are a policy decision
 
-What breaks without this, and the situation that forces the decision.
+A single copy of data is a single point of failure: the disk dies, the process crashes, the rack loses power, and whatever was not written somewhere else is gone. The fix — more copies — sounds simple and is not, because the moment there are two copies you must decide, for every write, how many of them have to confirm it before you tell the client the write succeeded. That one decision sets your durability guarantee, your write latency, and what happens when a replica goes dark mid-write. Everything in this lesson is a variation on that single decision.
 
-## How it works
+## Synchronous, asynchronous, and the middle ground
 
-The mechanism, step by step.
+**Synchronous replication** has the leader wait for an acknowledgment from its replica (or replicas) before acknowledging the client. A write that returns success is already durable on more than one node, so it survives the leader crashing an instant later. The cost is latency: the leader-to-replica round trip is added to every write, which is negligible when replicas share a rack — often well under a millisecond — and expensive when they sit in another region, tens to a couple hundred milliseconds depending on distance. If the replica is slow or unreachable, the write stalls or fails, depending on configuration.
 
-## Tradeoffs
+**Asynchronous replication** has the leader acknowledge the client immediately and ship the change to replicas afterward, usually by streaming the same write-ahead log entries used for local recovery (03.08 Database WAL And Recovery). Write latency stays low and independent of replica health, but there is now a replication-lag window: anything acknowledged but not yet shipped is lost if the leader dies inside that window. That window is typically milliseconds on a healthy link, and it can grow to seconds or worse when a replica falls behind — a burst of writes, a network hiccup, a replica still catching up after being offline.
+
+**Semi-synchronous replication** splits the difference: the leader waits for an acknowledgment from at least one replica (or a specified subset), not all of them, then returns to the client while the rest catch up asynchronously. This is a common production default — MySQL semi-sync, many managed Postgres setups — because it bounds the durability risk to "lost only if the leader and every replica that acknowledged it die at once," while keeping latency close to one round trip instead of the slowest replica's.
+
+## Quorums generalize the choice
+
+Leaderless, quorum-based replication makes "how many must confirm" an explicit, tunable pair of numbers instead of a fixed topology. With `N` replicas holding a value, a write requires acknowledgment from `W` of them, and a read queries `R` of them and reconciles whatever versions come back.
+
+<Formula label="Quorum overlap condition">W + R &gt; N</Formula>
+
+As long as this holds, every read is guaranteed to overlap the most recent acknowledged write in at least one of the replicas it queries — the read then reconciles differing versions, using version metadata rather than trusting wall-clock timestamps alone (06.05 Clocks And Ordering), and returns the newest one.
+
+### Worked example: N = 3
+
+With `N = 3, W = 2, R = 2`: `2 + 2 = 4 > 3`, so overlap is guaranteed. A write returns once 2 of 3 replicas ack — tolerating one slow or down replica — and a read queries 2 of 3, tolerating one down replica on the read side too. This is the common Dynamo/Cassandra `QUORUM` default.
+
+Compare `N = 3, W = 1, R = 1`: `1 + 1 = 2`, which is not greater than 3 — no overlap is guaranteed. This is effectively asynchronous replication with extra copies: writes and reads are both fast, but a read can land on the one replica that has not seen the latest write, and nothing in the protocol notices.
+
+Compare `N = 3, W = 3, R = 1`: every write waits for all three replicas, so any single replica being down blocks every write — but any one replica alone can answer a read correctly, since all three are always current. This pushes the cost entirely onto the write path to make reads cheap and always fresh.
+
+| Configuration | Write cost | Read cost | Replica failures tolerated on writes | Notes |
+| --- | --- | --- | --- | --- |
+| N=3, W=3, R=1 | Wait for all 3 | Query 1 | 0 | Fastest reads; any replica down blocks writes |
+| N=3, W=2, R=2 | Wait for 2 of 3 | Query 2 | 1 | Balanced; common Dynamo/Cassandra default |
+| N=3, W=1, R=1 | Wait for 1 | Query 1 | 2 | No overlap guarantee — effectively async |
+| N=3, W=1, R=3 | Wait for 1 | Query all 3, reconcile | 2 | Pushes reconciliation cost onto every read |
+
+<Callout type="gotcha">
+`W + R > N` guarantees overlap, not recency in a wall-clock sense — it only guarantees that a read touches at least one replica holding the latest write, alongside possibly-stale ones. The read still has to work out which version among the ones it got back is actually newest. A naive last-writer-wins by timestamp gets this wrong whenever clocks disagree (06.05 Clocks And Ordering), which is exactly why quorum systems in this family carry version vectors rather than trusting wall-clock time.
+</Callout>
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Choose synchronous or quorum-strict replication when"
+  againstTitle="Choose asynchronous or quorum-loose replication when"
+  forItems={[
+    "Losing an acknowledged write is unacceptable — financial ledgers, order placement, anything where 'the client was told it succeeded' has to stay true forever",
+    "You can absorb the added latency of waiting for at least one remote acknowledgment on every write, because correctness matters more than shaving milliseconds",
+    "Replicas are close enough — same region, low round-trip time — that synchronous acknowledgment doesn't dominate the write path",
+    "You need read-your-own-writes without bolting on session stickiness — a high enough R makes the newest write visible immediately",
+  ]}
+  againstItems={[
+    "Write throughput and low, predictable latency matter more than the risk of losing the last few milliseconds of acknowledged writes on a leader crash",
+    "Replicas are geographically distant, and synchronous acknowledgment would tax every write with a cross-region round trip",
+    "The workload already tolerates eventual consistency elsewhere in the stack — a cache (05.01 Caching Layers) or a social feed (11.07 Feed Generation Push Pull Hybrid) — so a short replication lag adds no new failure mode",
+    "You need to keep accepting writes even when a replica or a whole region is unreachable, and quorum-strict settings would block writes instead",
+    "Losses are recoverable from an upstream source of truth, such as an event log or a client-side retry, so durability here can be probabilistic rather than absolute",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Name the number, not the word: "synchronous replication" means nothing until you say how many replicas and how long you are willing to wait for them. State the durability window in async mode explicitly — "if the leader dies before shipping this WAL segment, we lose whatever is unshipped, typically milliseconds, worse if a replica has fallen behind" — and be ready for what comes next: what happens on leader failure (06.07 Leader Election), and how the system resolves two replicas that disagree (06.02 Consistency Models, 06.05 Clocks And Ordering).
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Replication trades write latency for durability: synchronous replication waits for a remote ack before confirming a write, asynchronous confirms immediately and ships the data after, and semi-synchronous splits the difference by waiting for only a subset.",
+    "Asynchronous replication has a durability window equal to however far replicas lag behind the leader — usually milliseconds, but unbounded if a replica falls behind under load or after an outage.",
+    "Quorum replication generalizes 'how many must acknowledge' beyond a single leader: with W + R > N, every read is guaranteed to overlap the most recent acknowledged write among the replicas it queries.",
+    "A quorum read overlapping the newest write still has to identify which version is newest — that's a version-reconciliation problem, not a replication problem, and naive wall-clock timestamps get it wrong when clocks disagree.",
+    "Tuning N, W, and R tunes a specific tradeoff: high W favors durability and slows writes, high R favors read freshness and slows reads, and lowering both moves the system toward asynchronous behavior with no explicit overlap guarantee.",
+    "The replication strategy and the consistency model are the same decision seen from two angles — pick one and the other follows (06.02 Consistency Models, 06.04 CAP And PACELC).",
+  ]}
+/>

@@ -1,0 +1,103 @@
+---
+title: "Course Schedule"
+number: "01.28"
+summary: "Prerequisites form a directed graph — you can finish all courses iff a topological order exists, i.e. no cycle."
+status: published
+free: true
+difficulty: core
+estMinutes: 14
+tags: [graph, topological-sort, dfs]
+updated: "2026-09-15"
+---
+
+## Prerequisites are edges — a cycle means deadlock
+
+`numCourses` labeled `0..numCourses-1`, and pairs `[a,b]` mean take **b before a** (b is prerequisite of a). Return whether you can finish every course. `[1,0]` with 2 courses → true. `[1,0],[0,1]` → false — mutual dependency.
+
+This is not a scheduling optimization problem on the first pass. It is **cycle detection** in a directed graph. If the graph has a cycle, no ordering satisfies all prerequisites. If acyclic, a topological order exists.
+
+Building the graph wrong is the silent killer: `[a,b]` means edge **b → a** (b must come first). Reverse it and you invert every answer.
+
+## Detect cycles with DFS three-color or Kahn's BFS
+
+**DFS (three states):** `unvisited`, `visiting` (in current stack), `visited` (fully processed). From each unvisited node, follow outgoing edges. If you reach a `visiting` node, there is a back edge — cycle. Mark `visited` on retreat.
+
+**Kahn's algorithm:** Compute in-degrees, enqueue nodes with in-degree 0, peel them off and decrement neighbors. If processed count < numCourses, a cycle remains.
+
+Both are **O(V + E)**. DFS uses recursion stack; Kahn uses a queue and explicitly constructs an order (useful for **03.25 Course Schedule II**).
+
+<Steps>
+<Step title="Build adjacency list">
+For each `[a,b]`, add `b → a`. Track in-degree if using Kahn.
+</Step>
+<Step title="Run cycle detection">
+DFS with visiting set, or BFS peeling zero in-degree nodes.
+</Step>
+<Step title="Answer">
+Return false on cycle; true if all nodes processed or DFS finds no back edge.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function canFinish(numCourses: number, prerequisites: number[][]): boolean {
+  const graph: number[][] = Array.from({ length: numCourses }, () => []);
+  for (const [a, b] of prerequisites) graph[b].push(a);
+
+  const state = new Array<number>(numCourses).fill(0); // 0 unvisited, 1 visiting, 2 done
+
+  function hasCycle(course: number): boolean {
+    state[course] = 1;
+    for (const next of graph[course]) {
+      if (state[next] === 1) return true;
+      if (state[next] === 0 && hasCycle(next)) return true;
+    }
+    state[course] = 2;
+    return false;
+  }
+
+  for (let c = 0; c < numCourses; c++) {
+    if (state[c] === 0 && hasCycle(c)) return false;
+  }
+  return true;
+}
+```
+
+Time **O(V + E)**, space **O(V + E)** for graph and state.
+
+<Tradeoff
+  forTitle="Topological sort when"
+  againstTitle="Different graph tool when"
+  forItems={[
+    "Constraints are prerequisite edges — acyclicity equals feasibility",
+    "You need the actual course order next (Course Schedule II) — Kahn's emits it directly",
+    "Graph is sparse with up to 2000 nodes and 5000 edges — DFS or Kahn both fit",
+    "Three-color DFS is compact to write and teaches cycle detection clearly",
+    "Same codebase extends to parallel courses with longest path in DAG"
+  ]}
+  againstItems={[
+    "Edges are undirected — bipartite check or connected components, not topo sort",
+    "You need shortest path with weighted edges — Dijkstra or Bellman-Ford",
+    "The graph may be disconnected with hidden nodes — still topo on each component, but build the node set carefully",
+    "Online insertion of prerequisites — dynamic cycle detection needs union-find or incremental topo",
+    "Objective is minimum semesters with a cap on concurrent courses — level-order on DAG, not just yes/no"
+  ]}
+/>
+
+## In an interview
+
+Restate edge direction aloud: "b before a means b → a." Sketch the mutual `[1,0],[0,1]` cycle. Offer DFS three-color or Kahn — either is fine if explained.
+
+Follow-ups: return a valid order (**Course Schedule II**), detect which courses sit on cycles, or minimum time to finish with one course per term. Mention disconnected graphs — loop all nodes because components may not share edges.
+
+Bug to volunteer: using a single `visited` bit instead of `visiting` vs `visited` — you will miss cycles that cross components incorrectly, or mark cross edges as cycles when they are not back edges into the active stack.
+
+<KeyTakeaways items={[
+  "Course Schedule is directed cycle detection — prerequisites b→a form edges; a cycle means impossible.",
+  "DFS three-color (unvisited/visiting/visited) finds back edges; Kahn's BFS peels in-degree zero nodes.",
+  "Build edges from prerequisite to dependent: for [a,b], b must precede a, so edge b → a.",
+  "O(V+E) time and space; both approaches answer canFinish; Kahn also produces topological order.",
+  "Course Schedule II asks for one valid ordering — same graph, emit nodes as Kahn dequeue or DFS finish stack.",
+  "Disconnected graphs require starting DFS/Kahn from every unvisited course."
+]} />

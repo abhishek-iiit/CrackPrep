@@ -1,0 +1,94 @@
+---
+title: "Rotate Image"
+number: "01.48"
+summary: "Transpose then reverse each row — or rotate four corners in place — for 90° clockwise with O(1) extra space."
+status: published
+free: true
+difficulty: core
+estMinutes: 14
+tags: [matrix, in-place]
+updated: "2026-09-15"
+---
+
+## Rotate n×n square matrix 90° clockwise in place
+
+Given an `n × n` matrix, rotate it clockwise in place. `[[1,2,3],[4,5,6],[7,8,9]]` becomes `[[7,4,1],[8,5,2],[9,6,3]]`.
+
+Allocating a new matrix and copying with index formula `new[j][n-1-i] = old[i][j]` is O(n²) time and O(n²) space — fine as a first answer, wrong when the prompt says in place. The two standard O(1)-space recipes: **transpose + reverse each row**, or **cycle groups of four cells** layer by layer.
+
+## Transpose, then mirror rows
+
+Transpose swaps `matrix[i][j]` with `matrix[j][i]` for `i < j`. That reflects across the main diagonal. Reversing every row maps columns into clockwise rotation for a square matrix.
+
+<Steps>
+<Step title="Transpose">
+  Nested loops with `j` starting at `i + 1` avoid double-swapping.
+</Step>
+<Step title="Reverse each row">
+  Two pointers `l` and `r` on row `i`; swap until they meet.
+</Step>
+</Steps>
+
+Alternatively, for each `i` in `[0, n/2)` and `j` in `[i, n/2)`, rotate the four positions `(i,j)`, `(j,n-1-i)`, `(n-1-i,n-1-j)`, `(n-1-j,i)` — same result, fewer high-level steps to remember if you already think in layers from 01.47 Spiral Matrix.
+
+## Solution
+
+```ts
+function rotate(matrix: number[][]): void {
+  const n = matrix.length;
+
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      [matrix[i][j], matrix[j][i]] = [matrix[j][i], matrix[i][j]];
+    }
+  }
+
+  for (let i = 0; i < n; i++) {
+    let l = 0;
+    let r = n - 1;
+    while (l < r) {
+      [matrix[i][l], matrix[i][r]] = [matrix[i][r], matrix[i][l]];
+      l++;
+      r--;
+    }
+  }
+}
+```
+
+Time **O(n²)**, space **O(1)**.
+
+<Callout type="gotcha">
+Counter-clockwise 90° is reverse each column (or transpose then reverse columns) — not the same as reversing rows. Mixing direction and mirror axis is the most common wrong answer after coding transpose.
+</Callout>
+
+<Tradeoff
+  forTitle="Transpose + reverse rows when"
+  againstTitle="Four-way cycle in one loop when"
+  forItems={[
+    "You want two simple passes you can write without index arithmetic errors",
+    "n is odd or even — no special cases beyond j starting at i+1",
+    "Easier to explain aloud: reflect diagonal, then flip horizontally",
+    "Same transpose trick extends to other matrix tricks (symmetry checks)",
+  ]}
+  againstItems={[
+    "Problem asks to rotate only an annular layer, not the full matrix",
+    "You must minimize cache misses and one fused loop is measurably better (micro-optimization)",
+    "Rectangular non-square rotation — transpose+reverse row does not apply; use new buffer",
+    "You already implemented layer rotation for 01.47 and reuse that code path",
+  ]}
+/>
+
+## In an interview
+
+Confirm: square matrix, in place, 90° clockwise. Walk 2×2 example on paper. State transpose + reverse before coding; mention four-way swap as equivalent.
+
+Self-flag: transposing with `j` from 0 (double swap), reversing columns instead of rows for clockwise rotation. Follow-ups: rotate 180° (reverse rows then columns, or two clockwise 90°); non-square matrix (must allocate new dimensions).
+
+<KeyTakeaways items={[
+  "Clockwise 90° on a square matrix equals transpose then reverse each row.",
+  "Transpose only swaps pairs with j > i to avoid swapping the same pair twice.",
+  "Four-cell cyclic swap rotates one element per layer iteration with O(1) extra space.",
+  "Counter-clockwise rotation uses transpose plus column reversal, not row reversal.",
+  "Allocating a new matrix with index mapping is O(n²) space — acceptable only if in-place is not required.",
+  "Layer and index discipline matches other matrix walks like 01.47 Spiral Matrix.",
+]} />

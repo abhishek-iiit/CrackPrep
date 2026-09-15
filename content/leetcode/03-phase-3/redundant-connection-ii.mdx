@@ -1,0 +1,127 @@
+---
+title: "Redundant Connection II"
+number: "03.17"
+summary: "A directed tree plus one bad edge — find the extra in-edge, then the last edge on the cycle Union-Find finds."
+status: published
+free: true
+difficulty: deep
+estMinutes: 20
+tags: [union-find, graph]
+updated: "2026-09-15"
+---
+
+## Directed — one node has two parents
+
+A rooted tree on `n` nodes should have `n - 1` edges, each node except the root has **in-degree 1**. You are given `n` directed edges — exactly one extra. Return the edge that can be removed so the result is a valid rooted tree.
+
+Two failure modes:
+
+1. **Two incoming edges** to the same node — one of them is wrong.
+2. **No node with two parents**, but a **cycle** exists (every node has in-degree 1, yet `n` edges).
+
+Example: `[[1,2],[1,3],[2,3]]` — node 3 has parents 1 and 2; removing `[2,3]` fixes it. Another: `[[1,2],[2,3],[3,4],[4,1],[1,5]]` — all in-degrees are 1, but the 4-cycle means one back edge must go.
+
+03.16 Union-Find alone misses direction. Here you combine **in-degree scan** with **cycle detection on a candidate subgraph**.
+
+## Case analysis, then Union-Find on the rest
+
+<Steps>
+<Step title="Find the conflict node">
+Track `indeg[v]` and `candidates`: edges `[u,v]` where `indeg[v]` was already 1 when this edge arrived. Zero candidates → cycle-only case. One candidate edge → maybe the answer. Two candidates → one of the two incoming edges to the same child is bad.
+</Step>
+<Step title="Try removing the second candidate first">
+In the two-parent case, test Union-Find on all edges **except** `candidates[1]`. If no cycle remains, return `candidates[1]`; else return `candidates[0]`.
+</Step>
+<Step title="Cycle-only case">
+No node with two parents — run 03.16 logic on all edges in order; last edge that closes a directed cycle... **Wait**: directed cycles need careful UF on undirected skeleton OR skip one edge and test reachability. Standard approach: ignore direction for cycle check — treat edges as undirected in UF; the redundant directed edge is the last one in order where `find(u) === find(v)`.
+</Step>
+</Steps>
+
+For the cycle-only case, process edges in order with Union-Find **as if undirected** — the last edge where endpoints already connected is the answer (same as 03.16).
+
+For two candidates `[e1, e2]` to node `c`: remove `e2` from the list, UF the rest — if a cycle still exists among remaining edges (detected while processing), answer is `e1`; otherwise `e2`.
+
+## Solution
+
+```ts
+function findRedundantDirectedConnection(edges: number[][]): number[] {
+  const n = edges.length;
+  const indeg = new Array(n + 1).fill(0);
+  let conflict: number[] | null = null;
+  let candidate1: number[] | null = null;
+  let candidate2: number[] | null = null;
+
+  for (const [u, v] of edges) {
+    if (indeg[v] === 1) {
+      if (!candidate1) candidate1 = [u, v];
+      else candidate2 = [u, v];
+    }
+    indeg[v]++;
+  }
+
+  function findRedundant(edgesToUse: number[][]): number[] {
+    const parent = Array.from({ length: n + 1 }, (_, i) => i);
+    function find(x: number): number {
+      if (parent[x] !== x) parent[x] = find(parent[x]);
+      return parent[x];
+    }
+    let redundant: number[] = [];
+    for (const [u, v] of edgesToUse) {
+      const pu = find(u), pv = find(v);
+      if (pu === pv) redundant = [u, v];
+      else parent[pv] = pu;
+    }
+    return redundant;
+  }
+
+  if (!candidate2) {
+    return findRedundant(edges);
+  }
+
+  const withoutSecond = edges.filter((e) => e !== candidate2);
+  const redundant = findRedundant(withoutSecond);
+  return redundant.length ? redundant : candidate2!;
+}
+```
+
+Time **O(n × α(n))**. Space **O(n)**.
+
+<Callout type="gotcha">
+When two edges point to the same node, the wrong edge might be the **first** or **second** in input order — you must try dropping the second candidate and see if a cycle remains among the rest. Dropping the wrong one without checking fails cases where the first edge sits on a cycle.
+</Callout>
+
+<Tradeoff
+  forTitle="Case split + Union-Find when"
+  againstTitle="Full graph search when"
+  forItems={[
+    "Exactly one redundant edge in a directed tree + one extra — problem guarantees structure",
+    "You need O(n) after identifying the two-parent vs cycle-only branch",
+    "03.16 code reuses cleanly for the cycle check on filtered edges",
+    "Interview expects structured reasoning, not brute force",
+    "n up to 1000 — linear UF is comfortable"
+  ]}
+  againstItems={[
+    "Graph has multiple arbitrary errors — no case split; general feedback arc set",
+    "You need full topological sort — Kahn's algorithm detects cycles with leftover edges",
+    "Edge weights matter — this problem is unweighted structure only",
+    "Dynamic edge deletions online — offline case analysis does not apply",
+    "Very small n — try removing each edge and BFS for valid tree; acceptable if stated"
+  ]}
+/>
+
+## In an interview
+
+Restate: directed edges, one extra, return one edge to remove so graph becomes rooted tree. Contrast with 03.16 undirected version.
+
+Outline cases before code: node with two parents (two candidate edges) vs pure cycle (no double parent). For two parents, UF all edges minus second candidate — if cycle found, first candidate is bad; else second. For pure cycle, last UF collision in order.
+
+Expect: draw both examples, explain why undirected UF on directed edges works for cycle-only case, what a valid rooted tree means. Bug to name first: always returning `candidate2` without testing whether a cycle remains when it is removed.
+
+<KeyTakeaways items={[
+  "Redundant Connection II splits into: (A) two edges share the same child, or (B) no double parent but a directed cycle exists.",
+  "Case A: let candidate1 and candidate2 be the two incoming edges to the conflict node; remove candidate2 and UF — if a cycle remains, return candidate1, else candidate2.",
+  "Case B: no node with in-degree 2 — run 03.16 Union-Find on edges in order (undirected collision test).",
+  "A valid rooted tree has n−1 edges, exactly one root with in-degree 0, all others in-degree 1, and no cycles.",
+  "Direction matters for identifying double-parent nodes; cycle detection reuses undirected UF on the edge list.",
+  "Time O(n α(n)), space O(n) — case analysis is O(n), UF dominates."
+]} />

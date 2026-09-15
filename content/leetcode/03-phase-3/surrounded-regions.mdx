@@ -1,0 +1,115 @@
+---
+title: "Surrounded Regions"
+number: "03.18"
+summary: "Only border-connected O's survive — reverse the question and DFS from the boundary instead of each interior cell."
+status: published
+free: true
+difficulty: core
+estMinutes: 13
+tags: [dfs, bfs, matrix]
+updated: "2026-09-15"
+---
+
+## Flip surrounded O's — interior DFS wastes work
+
+An `m × n` board contains `'X'` and `'O'`. Capture all `'O'` regions **completely surrounded** by `'X'` by flipping them to `'X'`. A region on the **border** that touches the edge is not surrounded.
+
+```
+X X X X       X X X X
+X O O X  →    X X X X
+X X O X       X X X X
+X O X X       X X X X
+```
+
+The naive approach: for each `'O'`, DFS its component and check if any cell hits the border — if not, flip. That revisits cells and risks O(mn) components each doing O(mn) work in pathological boards.
+
+Reverse the target: **mark `'O'` cells that cannot be captured** — those connected to the border — then flip every unmarked `'O'`.
+
+## Flood fill from the boundary
+
+Run DFS/BFS from every `'O'` on the top, bottom, left, and right edges. Temporarily mark reachable cells as `'T'` (safe). After the flood, scan the board: `'T'` → `'O'`, everything else `'O'` → `'X'`, leave `'X'` alone.
+
+The invariant: an `'O'` is safe iff there exists a path of `'O'`s to the border. Interior-only components never get marked.
+
+<Steps>
+<Step title="Border scan">
+For each edge cell equal to `'O'`, start DFS and mark connected `'O'` as `'T'`.
+</Step>
+<Step title="Flip interior">
+For all cells: `'T'` → `'O'`; `'O'` → `'X'`.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function solve(board: string[][]): void {
+  if (!board.length || !board[0].length) return;
+  const m = board.length, n = board[0].length;
+  const dirs = [0, 1, 0, -1, 0];
+
+  function dfs(r: number, c: number): void {
+    if (r < 0 || r >= m || c < 0 || c >= n || board[r][c] !== "O") return;
+    board[r][c] = "T";
+    for (let d = 0; d < 4; d++) dfs(r + dirs[d], c + dirs[d + 1]);
+  }
+
+  for (let r = 0; r < m; r++) {
+    if (board[r][0] === "O") dfs(r, 0);
+    if (board[r][n - 1] === "O") dfs(r, n - 1);
+  }
+  for (let c = 0; c < n; c++) {
+    if (board[0][c] === "O") dfs(0, c);
+    if (board[m - 1][c] === "O") dfs(m - 1, c);
+  }
+
+  for (let r = 0; r < m; r++) {
+    for (let c = 0; c < n; c++) {
+      if (board[r][c] === "O") board[r][c] = "X";
+      else if (board[r][c] === "T") board[r][c] = "O";
+    }
+  }
+}
+```
+
+Time **O(m × n)** — each cell visited constant times. Space **O(m × n)** worst-case recursion depth for a snake of `'O'` on the border; BFS queue same bound.
+
+<Callout type="gotcha">
+Mutating in place requires a temporary marker — flipping `'O'` → `'X'` during border DFS would break connectivity before the flood finishes. `'T'` (or a `visited` set) avoids that.
+</Callout>
+
+<Tradeoff
+  forTitle="Border flood + flip when"
+  againstTitle="Per-component check when"
+  forItems={[
+    "You must capture all surrounded regions in one pass — O(mn) total",
+    "The board is moderate size and in-place mutation is required",
+    "Same reverse-thinking as 01.29 Pacific Atlantic Water Flow (start from edges)",
+    "DFS from four edges is easy to explain in 30 seconds",
+    "Follow-up is 03.19 Walls and Gates — multi-source BFS from boundaries"
+  ]}
+  againstItems={[
+    "You need the list of captured cells, not flip in place — collect during interior DFS",
+    "Board is huge and recursion depth risks stack overflow — BFS with explicit queue",
+    "Multiple queries on the same board — preprocess border-reachable once, answer many",
+    "01.30 Number of Islands counts components — simpler if you only need a count",
+    "Cells have weights — this capture rule is binary X/O only"
+  ]}
+/>
+
+## In an interview
+
+Restate: flip surrounded `'O'` to `'X'`, border-connected `'O'` stays. Walk the 4×4 example.
+
+Say you will mark border-connected `'O'` first, then flip the rest — not DFS from every interior cell. Mention temporary marker `'T'`.
+
+Expect: Union-Find on grid cells, BFS vs DFS, 01.29 Pacific Atlantic (reverse from oceans). Bug to name first: flipping interior `'O'` during the border DFS because you used `'X'` as the visited state without a third symbol.
+
+<KeyTakeaways items={[
+  "Surrounded Regions flips O's not connected to the border — find safe cells first, flip the remainder.",
+  "DFS/BFS from all border O's marks the non-capturable component in O(mn).",
+  "Use a temporary marker (T) during flood fill; in-place O→X during search breaks connectivity.",
+  "Reverse thinking — 'what survives?' instead of 'what gets captured?' — avoids repeated component scans.",
+  "Same edge-first pattern as Pacific Atlantic Water Flow and 03.19 Walls and Gates.",
+  "Time O(mn), space O(mn) for recursion or queue in the worst case."
+]} />

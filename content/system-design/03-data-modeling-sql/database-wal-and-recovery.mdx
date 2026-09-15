@@ -1,32 +1,92 @@
 ---
 title: "Database WAL And Recovery"
 number: "03.08"
-summary: "Database WAL And Recovery — notes in progress."
-status: draft
+summary: "Why a log record must reach disk before the page it describes, and how redo and undo logging rebuild a consistent database after a crash."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 14
+tags: [wal, recovery, durability, checkpoints]
+updated: "2026-09-15"
 ---
 
-## The problem
+## A crash mid-write leaves the database with half an answer
 
-What breaks without this, and the situation that forces the decision.
+A committed transaction has changed a handful of rows. Those rows live on disk pages, cached in memory as "dirty" — modified but not yet flushed — because flushing on every commit would mean a random disk write per transaction, and random writes are the slowest thing a database can do. So pages sit dirty in the buffer pool, batched, flushed later by a background writer. Then the machine loses power.
 
-## How it works
+Whatever was in memory is gone. Some dirty pages had made it to disk before the crash; some had not. The database restarts with no idea, page by page, which changes survived — and it made a durability promise regardless: if a client saw "commit successful," that transaction's effects must be there after restart, no matter when the crash happened relative to any page flush. Meeting that promise without fsyncing on every commit is the entire problem WAL and recovery solve.
 
-The mechanism, step by step.
+## The rule: log it before you touch the page
 
-## Tradeoffs
+The write-ahead logging rule is one sentence: before a data page is written to disk, the log record describing that change must already be durable. Nothing subtler than that, and everything else follows from it.
+
+In practice every change travels two paths. The affected data pages are modified in the buffer pool, in memory, and flushed to their real location lazily, whenever convenient. The log record — a compact description of the change, tagged with a monotonically increasing log sequence number (LSN) — is appended to a separate, append-only file, and *that* append is what gets fsynced at commit. An append to a sequential file is cheap; the random write to the row's actual page is deferred and batched. Group commit takes this further, the same way it does for an LSM engine's write path (07.09 LSM Tree Storage Engine covers that side): many transactions committing around the same moment share one fsync instead of paying for one each, which is what bounds commit latency under concurrent load.
+
+The log carries enough information to **redo** the change — reapply it forward against a page that never saw it. Most engines also make it carry enough to **undo** the change — reverse it, against a page that did see it, in case the transaction never commits. Redo exists because a page can be lost after a commit; undo exists because a transaction can abort, or be mid-flight when the crash happens, after already dirtying a page. An engine that never updates a page in place, like the LSM tree in 07.09, only needs redo — there is nothing to undo when nothing is overwritten. A relational engine built on a B-tree (03.04) that updates pages in place needs both, because rollback has to reverse a change already visible in a shared, in-place page.
+
+## Recovery: three passes over the log
+
+A crash-restart recovery reconstructs the database from the last checkpoint forward, not from the beginning of time. It runs in three passes, in this order:
+
+<Steps>
+  <Step title="Analysis: figure out what was in flight">
+    Scan the log starting from the most recent checkpoint. Rebuild two facts: which transactions were active — neither committed nor rolled back — at the moment of the crash, and which pages were dirty in the buffer pool as of what LSN. Nothing is written yet; this pass only establishes where the other two need to start.
+  </Step>
+  <Step title="Redo: replay history, including for transactions that will be undone">
+    Starting from the earliest LSN any dirty page needed, reapply every logged change forward, in order, whether or not its transaction ultimately committed. That sounds wasteful — why redo work that's about to be undone? — but it keeps the algorithm simple: it restores the database to exactly the state it was in at the instant of the crash, uncommitted transactions and all, and only the next pass cleans those up. Redo is idempotent by construction: each page tracks the LSN of the last change actually applied to it, so a change already reflected on disk is skipped rather than reapplied.
+  </Step>
+  <Step title="Undo: roll back whoever never finished">
+    Walk backward through the transactions the analysis pass flagged as still in flight, reversing their changes using the undo information the log carried for them. Undo gets logged as it happens too — as compensating records — so a *second* crash, in the middle of recovery, doesn't leave the rollback half-finished. Recovery has to be safe to interrupt at any point, including its own undo phase.
+  </Step>
+</Steps>
+
+<Callout type="gotcha">
+Redo and undo logging usually record physical changes to a page — these bytes at this offset became those bytes — rather than the original SQL statement. Logging the statement and re-executing it during recovery looks appealing but is not deterministic: `UPDATE ... WHERE balance > 100` can match a different set of rows on replay than it did the first time, depending on what else had committed by then. Physical logging, or a physical-plus-logical hybrid, sidesteps that by recording exactly what changed rather than what was asked for.
+</Callout>
+
+## Checkpoints bound how far back recovery has to look
+
+Without a checkpoint, the analysis pass would scan the log back to the moment the database was created, and redo would replay all of it. A checkpoint periodically records, into the log itself, which pages are currently dirty and which transactions are currently active — a snapshot recovery can start from instead of the beginning. After a checkpoint, recovery only needs the log written since.
+
+That turns checkpoint frequency into an availability lever, not just a performance one. A checkpoint every few minutes bounds recovery to a few minutes of log replay. One deferred for six hours, because checkpointing competes with foreground I/O and someone turned the frequency down, means a crash six hours later replays six hours of log before the database accepts a query — and that scales with write volume, not wall-clock time, so a busy day makes it worse. Recovery time objective is mostly a function of checkpoint interval, worth knowing before an incident rather than during one.
+
+<Callout type="warn">
+A torn page is a narrower but sharper version of the same problem: storage devices guarantee atomicity only for their own sector size, which is often smaller than a database page. A crash mid-write to an 8 KB page can leave half the old content and half the new — matching neither the before- nor after-image the log expects, and not always caught by a simple checksum. Some engines guard against this with a doublewrite buffer: the page is written once to a scratch area first, fsynced, then written to its real location, so a torn write during the real write can be repaired from the scratch copy. It costs a second write for every page flush, paid specifically to keep redo's core assumption — that a logged page is either fully old or fully new — actually true.
+</Callout>
+
+The same log that makes crash recovery possible also makes two other things possible for free: shipping WAL records to a replica lets it replay the identical redo stream and stay a consistent copy, and archiving them lets a backup taken at some point in the past be replayed forward to any later moment — point-in-time recovery. 14.07 Database Backups And Restore and 14.09 Disaster Recovery cover both uses; the mechanism underneath is the same log, aimed at a different failure.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Rely on WAL-based redo/undo recovery when"
+  againstTitle="A simpler log suffices when"
+  forItems={[
+    "Pages are updated in place, so a torn or lost write needs history to reconstruct rather than just an append to replay",
+    "Commit latency has to stay low without an fsync per dirty page — one sequential log append plus group commit gets there",
+    "Transactions abort routinely and need a real, cheap rollback rather than a version simply being ignored later",
+    "The same log stream is worth reusing for replication and point-in-time restore, not just crash safety",
+    "Recovery time has to be boundable and provisionable, which checkpoint interval gives you directly",
+  ]}
+  againstItems={[
+    "Nothing is ever updated in place — an LSM engine's WAL only needs redo, and rebuilding the memtable from it is the entire recovery procedure",
+    "The dataset is disposable or fully rebuildable from an upstream source, so durability at the storage layer buys little",
+    "Write volume is low enough that a periodic snapshot-and-reload, losing at most the last interval, is genuinely acceptable",
+    "The system is append-only and immutable at the file level already, where 'redo' is just resuming a read from where you left off",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Introduce it from the durability promise, not the acronym: "A commit has to survive a crash without fsyncing every page, so the log record goes to disk first and the data page catches up later — that's write-ahead logging." Expect the follow-up about how recovery actually runs, and answer it as three passes: figure out what was in flight, replay everything forward including transactions about to be undone, then roll those back. If asked why redo replays doomed transactions at all, the honest answer is that restoring the exact crash-time state first and cleaning it up second is simpler than trying to redo selectively.
 
-<KeyTakeaways items={["", "", ""]} />
+Name checkpoint interval before you're asked about recovery time. It is the one knob that turns "the database is back in five seconds" into "the database is back in twenty minutes," and knowing that trade exists is most of what separates having read about WAL from having tuned one.
+
+<KeyTakeaways
+  items={[
+    "The write-ahead rule is one sentence: a log record must be durable before the data page it describes is written, which keeps commits fast without page-level fsyncs",
+    "Redo logging replays committed and uncommitted changes alike to rebuild the exact crash-time state; undo logging then rolls back whatever never committed",
+    "Recovery runs as analysis, then redo, then undo, in that order, and undo is itself logged so a second crash mid-recovery is still safe",
+    "Checkpoints bound recovery time to the log written since the last one — a deferred checkpoint silently turns into a longer outage the next time the database crashes",
+    "A torn page write, smaller than the guaranteed atomic write unit of the device, is a specific corruption mode some engines guard against with a doublewrite buffer",
+    "The same redo log stream underlies replication and point-in-time restore — 14.07 Database Backups And Restore and 14.09 Disaster Recovery reuse the mechanism this lesson builds",
+  ]}
+/>

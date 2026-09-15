@@ -1,0 +1,137 @@
+---
+title: "Find Median from Data Stream"
+number: "02.25"
+summary: "Sorting on every insert is O(n log n); two heaps partition the stream so median is always at the tops."
+status: published
+free: true
+difficulty: deep
+estMinutes: 18
+tags: [heap, design, streaming]
+updated: "2026-09-15"
+---
+
+## The median moves on every insert — resorting is too slow
+
+Design a structure with `addNum(num)` and `findMedian()` returning the middle value (or average of two middles when count is even). Up to 10⁵ numbers arrive one at a time; each insert and each median query must be efficient.
+
+Keeping a sorted array and inserting with binary search is O(n) per add — 10⁵ inserts becomes O(n²). Sorting from scratch after every add is O(n log n) per call — worse. The median depends only on **how many values sit below and above the middle**, not on fully ordering the entire stream. You need a dynamic partition, not a full sort.
+
+## Two heaps split the stream
+
+Maintain:
+
+- **low** — a max-heap of the smaller half (root = largest of the lower half).
+- **high** — a min-heap of the larger half (root = smallest of the upper half).
+
+Invariants:
+
+1. `low.size()` is equal to `high.size()` or exactly one greater.
+2. Every element in `low` ≤ every element in `high` (compare against roots when balancing).
+
+After insert, rebalance: if `low` has more than one extra element, pop max from `low` push to `high`; if `high` is bigger, pop min from `high` push to `low`.
+
+Median: if sizes equal, average the two roots; else root of `low` (the larger lower half owns the extra element).
+
+<Steps>
+<Step title="addNum — push then rebalance">
+  Add to low first (convention), then fix size and order invariants.
+</Step>
+<Step title="Rebalance size">
+  low may exceed high by at most 1; never let high outgrow low.
+</Step>
+<Step title="findMedian — O(1) at roots">
+  Even count: (low.max + high.min) / 2. Odd: low.max.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+class MedianFinder {
+  private low: number[] = [];  // max-heap via negation
+  private high: number[] = []; // min-heap
+
+  addNum(num: number): void {
+    this.heapPush(this.low, -num); // max-heap
+    this.heapPush(this.high, -this.heapPop(this.low)!);
+
+    if (this.low.length < this.high.length) {
+      this.heapPush(this.low, -this.heapPop(this.high)!);
+    }
+  }
+
+  findMedian(): number {
+    if (this.low.length > this.high.length) return -this.low[0];
+    return (-this.low[0] + this.high[0]) / 2;
+  }
+
+  private heapPush(h: number[], v: number): void {
+    h.push(v);
+    for (let i = h.length - 1; i > 0; ) {
+      const p = (i - 1) >> 1;
+      if (h[p] <= h[i]) break;
+      [h[p], h[i]] = [h[i], h[p]];
+      i = p;
+    }
+  }
+
+  private heapPop(h: number[]): number | undefined {
+    if (h.length === 0) return undefined;
+    const top = h[0];
+    h[0] = h.pop()!;
+    for (let i = 0; ; ) {
+      let s = i, l = 2 * i + 1, r = l + 1;
+      if (l < h.length && h[l] < h[s]) s = l;
+      if (r < h.length && h[r] < h[s]) s = r;
+      if (s === i) break;
+      [h[i], h[s]] = [h[s], h[i]];
+      i = s;
+    }
+    return top;
+  }
+}
+```
+
+`addNum` is **O(log n)**; `findMedian` is **O(1)**. Space **O(n)** for both heaps combined.
+
+<Callout type="tip">
+In TypeScript interviews, say you would use a heap library or implement push/pop once. The logic interviewers grade is the two-heap invariant and rebalance — not memorizing bubbleDown indices.
+</Callout>
+
+<Tradeoff
+  forTitle="Two-heap partition when"
+  againstTitle="Sorted structure when"
+  forItems={[
+    "Inserts arrive continuously and median queries are frequent — O(log n) insert beats O(n) array shift",
+    "You only need the median, not arbitrary order statistics at every rank",
+    "n reaches 10⁵ — quadratic or n log n per insert fails the judge",
+    "Values are unbounded integers — bucket median does not apply",
+    "Follow-up asks running median on a stream — this is the canonical answer",
+  ]}
+  againstItems={[
+    "All numbers are known upfront — sort once, index the middle",
+    "You need the pth percentile for many different p — order-statistic tree or multi-heap extensions add complexity anyway",
+    "Insert-only with no median queries — any structure works",
+    "n is tiny (≤ 100) — sorted array insert is simpler and fast enough",
+    "Interviewer allows approximate median — sketching or sampling is a different trade",
+  ]}
+/>
+
+## In an interview
+
+Example: add 1, 2 → median 1.5; add 3 → median 2. Clarify even vs odd count behavior upfront.
+
+Draw the two heaps after inserting 5, 2, 8, 1. Say the invariant before coding: max of low ≤ min of high, sizes differ by at most one. Explain rebalance as fixing two possible violations after each insert.
+
+Proactive bug: putting the larger half in the max-heap and smaller in min-heap (reversed roles) — median logic inverts. Another: forgetting to move an element from low to high after every insert — heaps drift out of partition.
+
+Follow-ups: delete a number, find kth smallest in stream, sliding window median.
+
+<KeyTakeaways items={[
+  "Split the stream: max-heap holds lower half, min-heap holds upper half; median lives at the roots.",
+  "Size invariant: low has equal or one more element than high — never let high grow larger.",
+  "After each insert, rebalance by moving the max of low to high (and back if high grew too big).",
+  "findMedian is O(1): average roots when even count, else top of low.",
+  "addNum is O(log n) — avoids resorting the entire collection on every arrival.",
+  "Same heap machinery supports 02.26 Kth Largest and 02.24 Top K Frequent at different selection points.",
+]} />

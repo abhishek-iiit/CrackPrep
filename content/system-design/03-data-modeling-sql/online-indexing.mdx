@@ -1,32 +1,89 @@
 ---
 title: "Online Indexing"
 number: "03.11"
-summary: "Online Indexing — notes in progress."
-status: draft
+summary: "Why a plain CREATE INDEX locks a live table for the whole build, and how online index builds trade a longer, slower build for zero downtime."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [indexing, migrations, locking, postgres]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Building an index takes a lock users can feel
 
-What breaks without this, and the situation that forces the decision.
+A B-tree index (03.04 B-Tree) has to be built in key order for it to come out balanced and efficient, which means a full scan of the table, a sort, and a bulk build of the tree structure. On a table with a few thousand rows that finishes before anyone notices. On a table with two hundred million rows it can run for tens of minutes.
 
-## How it works
+The naive version of `CREATE INDEX` holds an exclusive lock on the table for that entire duration — in Postgres, an `ACCESS EXCLUSIVE` lock, which blocks not just other writers but every reader too, for as long as the build takes. Run it against a live production table and the failure does not look like a database problem at all. It looks like every request touching that table timing out at once, at the exact minute someone ran a routine migration — connection pools fill with queries waiting on the lock, application-level timeouts start firing, and the on-call engineer is debugging a fleet-wide outage before realizing the root cause is a single `CREATE INDEX` statement still running in the background.
 
-The mechanism, step by step.
+The fix is not a smarter lock. It is accepting that the index build takes longer — often two to three times longer — in exchange for never taking a lock strong enough to block the table's normal traffic.
 
-## Tradeoffs
+## The trick: build twice, once for the past and once for what changed in between
+
+An online index build has to solve a problem a blocking build sidesteps entirely: the table keeps changing while the build is in progress, but the index has to end up correct for every row, including the ones inserted, updated, or deleted after the build started and before it finished.
+
+<Steps>
+  <Step title="Take a consistent snapshot and scan the table once">
+    The build reads the table as of a point-in-time snapshot and constructs the index from what it sees, using a lock weak enough that ordinary reads and writes keep flowing. Postgres's `CREATE INDEX CONCURRENTLY` uses `ShareUpdateExclusiveLock`, which blocks only other schema changes on the table, not row-level reads or writes.
+  </Step>
+  <Step title="Wait for transactions that were already open to finish">
+    Any transaction that started before the build began might still write a row the first scan already passed over, in a way the build cannot yet see. The build has to wait for those pre-existing transactions to commit or abort before it can be sure it has a complete picture to catch up from.
+  </Step>
+  <Step title="Scan again to catch what changed during the first pass">
+    A second pass picks up rows inserted, updated, or deleted while the first scan and the wait were happening, and folds them into the index. This is the step that costs the extra time — the table is scanned roughly twice instead of once.
+  </Step>
+  <Step title="Validate and flip the index live, or mark it invalid on failure">
+    If both passes complete cleanly, the index becomes visible to the query planner in one atomic step. If the build is interrupted — the session is killed, a deadlock is detected, the process crashes — it does not roll back cleanly the way a normal transaction would. It leaves behind an index marked invalid: present on disk, consuming space, but never used by the planner, and it has to be dropped and rebuilt by hand.
+  </Step>
+</Steps>
+
+MySQL's InnoDB reaches the same outcome through a different mechanism for most online DDL operations: it builds the new index structure from a sorted scan while a temporary row log records concurrent inserts, updates, and deletes made during the build, then replays that log against the new index just before making it visible. Different implementation, same shape — a bulk build plus a catch-up log, so the exclusive part of the operation shrinks to a brief final swap instead of covering the whole build.
+
+<Callout type="gotcha">
+An online index build can hang indefinitely, and it is almost never the build's own fault. It is waiting on step two — every transaction that was already open when the build started has to finish first — so a single long-running transaction elsewhere in the system, a forgotten `BEGIN` left idle in a connection, or a batch job holding a transaction open for an hour, blocks the build for exactly that long. The build looks stuck; the actual problem is somewhere else entirely, and the fix is finding and ending that other transaction, not restarting the index build.
+</Callout>
+
+## Building a unique index online has one more failure mode
+
+A unique index or constraint has to reject duplicates, and it has to do that correctly against rows written during the catch-up pass, not just the ones seen in the first scan. If a concurrent insert during the build introduces a value that would violate uniqueness, the build cannot simply skip it — it fails, leaving the same invalid, unused index behind that any other interrupted online build leaves. This is expected behavior, not a bug in the online mechanism: a plain blocking `CREATE UNIQUE INDEX` would have caught the same duplicate, just by blocking the conflicting write instead of racing it.
+
+The same two-phase idea — a fast metadata-only change plus a slower, non-blocking validation pass — shows up for constraints too. Adding a `CHECK` or foreign key constraint to a large existing table can be split into adding it `NOT VALID` (an instant, lock-light metadata change that only applies to future rows) followed by a separate `VALIDATE CONSTRAINT` pass that checks existing rows without blocking writes. 03.12 Schema Evolution covers this pattern from the migration-design side; here it is the same underlying tactic as an online index build — never hold the expensive part of the work behind the strong lock.
+
+<Callout type="tip">
+Wrap any online schema change in a short `lock_timeout`, separate from the statement's own overall timeout. If the change ends up waiting on a lock — usually because of that one long-running transaction — a short lock timeout makes it fail fast and cleanly instead of queuing behind it for the length of an incident. Failing fast is recoverable; a silent multi-hour wait usually is not, because everything downstream is also waiting.
+</Callout>
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Build the index online (CONCURRENTLY, or the equivalent LOCK=NONE mode) when"
+  againstTitle="A plain blocking build is fine when"
+  forItems={[
+    "The table serves live production traffic during the maintenance window, and any lock strong enough to block writes is unacceptable",
+    "The table is large enough that a full build would run for more than a few seconds — the exact case where a blocking lock is felt the most",
+    "You can tolerate a build that takes two to three times longer in exchange for zero downtime",
+    "You have monitoring in place for long-running transactions, since one left open elsewhere can stall the build indefinitely",
+    "You have a follow-up step ready to detect and drop an invalid index if the build fails partway through",
+  ]}
+  againstItems={[
+    "The table is small enough, or the maintenance window generous enough, that a full lock for the build duration is genuinely invisible to users",
+    "The change is happening before the table is serving any real traffic at all — a brand-new table, a pre-launch migration",
+    "The operation is not index creation at all but something that requires an exclusive lock regardless, like certain column type changes",
+    "Simplicity and atomicity matter more than availability for this particular change, and a maintenance window has been explicitly scheduled",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Bring it up the moment a migration touches a large, live table: "A plain `CREATE INDEX` takes an exclusive lock for the whole build, so on a table this size I'd use the online variant instead — it costs roughly double the build time in exchange for never blocking reads or writes." Expect to be asked what happens if it fails, and the honest answer is that it leaves an invalid index behind that has to be dropped and retried, not that it rolls back cleanly like a transaction would.
 
-<KeyTakeaways items={["", "", ""]} />
+Naming the long-running-transaction trap before being asked is the detail that reads as operational experience rather than textbook knowledge: an online index build that appears hung is usually blocked by something unrelated to indexing at all, and finding that other transaction is the actual fix.
+
+<KeyTakeaways
+  items={[
+    "A plain CREATE INDEX takes a full exclusive lock for the entire build, which on a large live table presents as every query against it timing out at once",
+    "An online build trades a longer, roughly doubled build time for a lock weak enough to let ordinary reads and writes continue throughout",
+    "The mechanism is two scans: an initial pass under a consistent snapshot, then a catch-up pass (or a replayed change log, in engines like InnoDB) for what changed during the build",
+    "An online build has no clean rollback — a failure partway through leaves an invalid index on disk that must be dropped and rebuilt manually",
+    "The build can hang indefinitely waiting on transactions that were already open when it started, and that other transaction, not the index build, is usually the real problem to fix",
+    "The same split-the-work tactic — a fast metadata change plus a slow non-blocking validation pass — applies to adding constraints, and is the pattern 03.12 Schema Evolution builds on for migrations in general",
+  ]}
+/>

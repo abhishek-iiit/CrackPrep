@@ -1,0 +1,101 @@
+---
+title: "Non-overlapping Intervals"
+number: "01.37"
+summary: "Minimize removals by keeping intervals that end earliest — sort by end, greedily pack the schedule."
+status: published
+free: true
+difficulty: core
+estMinutes: 13
+tags: [intervals, greedy, sorting]
+updated: "2026-09-15"
+---
+
+## Keep as many as possible, remove the rest
+
+Given `[[1,2],[2,3],[3,4],[1,3]]`, remove one interval so the rest are pairwise non-overlapping. Removing `[1,3]` leaves three compatible intervals — answer **1**. The naive approach tries every subset — exponential.
+
+This is interval scheduling: maximize the number of non-overlapping intervals, equivalently minimize removals. Greedy by **earliest finish time** is optimal: sort by end, take an interval if its start is at or after the last kept end, otherwise skip it (count a removal).
+
+## Greedy by end time
+
+Sort intervals by `end` ascending. Track `prevEnd`, the end of the last kept interval. For each `[start, end]`:
+
+- If `start >= prevEnd`, keep it — set `prevEnd = end`.
+- Else overlap with the last kept — increment `removals` (drop the current one).
+
+Why end time, not start? An interval that ends early leaves the most room for what follows. Counterexample mindset: choosing the shorter start-first interval can block two later intervals.
+
+<Steps>
+<Step title="Sort by end">
+Earliest-finishing intervals get first consideration.
+</Step>
+<Step title="Keep if compatible">
+`start >= prevEnd` means no overlap with the last kept interval — keep and update `prevEnd`.
+</Step>
+<Step title="Else remove">
+Overlapping current interval cannot coexist with the last kept one — drop it and count one removal.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function eraseOverlapIntervals(intervals: number[][]): number {
+  if (intervals.length === 0) return 0;
+
+  intervals.sort((a, b) => a[1] - b[1]);
+  let removals = 0;
+  let prevEnd = intervals[0][1];
+
+  for (let i = 1; i < intervals.length; i++) {
+    const [start, end] = intervals[i];
+    if (start >= prevEnd) {
+      prevEnd = end;
+    } else {
+      removals++;
+    }
+  }
+
+  return removals;
+}
+```
+
+Time **O(n log n)** for sort, **O(n)** scan. Space **O(1)** beyond sort (or O(n) if sort copies).
+
+<Callout type="gotcha">
+Sorting by start and greedily picking the earliest start is **not** optimal. `[[1,100],[2,3],[4,5]]` — start-first keeps `[1,100]` and removes two; end-first keeps `[2,3]` and `[4,5]` and removes one.
+</Callout>
+
+<Tradeoff
+  forTitle="Greedy by end time when"
+  againstTitle="DP or brute force when"
+  forItems={[
+    "Classic activity selection — maximize count of compatible intervals",
+    "Removals/minimum delete is n minus maximum kept — greedy gives maximum kept directly",
+    "Same sort-by-end idea powers 01.38 Meeting Rooms and 01.39 Meeting Rooms II variants",
+    "O(n log n) is optimal for comparison-based sort on general endpoints",
+    "Proof is a standard exchange argument — worth stating in an interview"
+  ]}
+  againstItems={[
+    "Weighted intervals — each has a profit, not unit value — need DP",
+    "You must return which intervals to remove, not just the count — track choices or rerun with labels",
+    "n is tiny (≤ 15) and bitmask DP is requested for practice",
+    "Constraints include nested interval hierarchy with different merge rules",
+    "Online insert/delete — greedy batch on static array does not apply incrementally"
+  ]}
+/>
+
+## In an interview
+
+Rephrase: minimum intervals to delete so none overlap. Note equivalence to maximum non-overlapping subset. Propose sort by end, greedy keep. Walk `[[1,2],[2,3],[3,4],[1,3]]` — end-sorted order makes the conflict with `[1,3]` obvious.
+
+Follow-ups: return the kept set, weighted job scheduling, merge then count (wrong tool). State the exchange argument in one sentence: replacing a kept interval with one that ends later cannot increase room for future intervals.
+
+<KeyTakeaways items={[
+  "Minimum removals equals n minus the size of a maximum non-overlapping subset.",
+  "Sort by end time; greedily keep an interval if its start is at or after the last kept end.",
+  "Sorting by start and picking earliest start is a common wrong greedy — end time is the correct key.",
+  "Touching intervals `[a,b]` and `[b,c]` do not overlap for the `start >= prevEnd` check.",
+  "Time O(n log n), space O(1) extra beyond sorting — same greedy spine as meeting room problems.",
+  "01.36 Merge Intervals combines overlaps; this problem chooses which overlapping interval to discard."
+]} />

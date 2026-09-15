@@ -1,0 +1,119 @@
+---
+title: "Count Complete Tree Nodes"
+number: "03.49"
+summary: "A complete tree's left and right spine heights decide whether the missing nodes are in the left or right subtree — then binary search."
+status: published
+free: true
+difficulty: deep
+estMinutes: 17
+tags: [binary-tree, binary-search]
+updated: "2026-09-15"
+---
+
+## O(n) traversal ignores the complete-tree guarantee
+
+Count nodes in a **complete** binary tree — all levels full except possibly the last, filled left to right. n can exceed 10⁹, so O(n) DFS times out even though the tree fits implicitly.
+
+A complete tree with `h` levels has between `2^h` and `2^(h+1) - 1` nodes. Naive BFS/DFS is O(n). The exploit: compare **left depth** and **right depth** measured from the root's children.
+
+- `left = getDepth(root.left)` — walk left from the left child
+- `right = getDepth(root.right)` — walk left from the right child (leftmost depth of right subtree)
+
+If `left === right`, the tree is **perfect** — return `2^(left+1) - 1`. Otherwise one side is complete and the other is a perfect tree of known size. Recurse on the incomplete side and add `1 + (2^shorter - 1)` for root plus the perfect sibling subtree.
+
+Each recursion spends O(log n) measuring depths; depth is O(log n) — total **O(log² n)**.
+
+## Spine comparison recursion
+
+<Steps>
+<Step title="Measure left and right depths from children">
+  `getDepth` walks only left edges from a node until null.
+</Step>
+<Step title="Equal depths — perfect tree">
+  Return `(1 << (left + 1)) - 1`.
+</Step>
+<Step title="left > right — gaps on the right">
+  `1 + countNodes(root.left) + ((1 << right) - 1)`.
+</Step>
+<Step title="right > left — gaps on the left">
+  `1 + countNodes(root.right) + ((1 << left) - 1)`.
+</Step>
+</Steps>
+
+Alternative: binary search the index of the last node on the final level, checking existence by walking from root with bit-guided left/right decisions — also O(log² n).
+
+## Solution
+
+```ts
+class TreeNode {
+  val: number;
+  left: TreeNode | null;
+  right: TreeNode | null;
+  constructor(val?: number, left?: TreeNode | null, right?: TreeNode | null) {
+    this.val = val ?? 0;
+    this.left = left ?? null;
+    this.right = right ?? null;
+  }
+}
+
+function getDepth(node: TreeNode | null): number {
+  let d = 0;
+  while (node) {
+    d++;
+    node = node.left;
+  }
+  return d;
+}
+
+function countNodes(root: TreeNode | null): number {
+  if (root === null) return 0;
+
+  const left = getDepth(root.left);
+  const right = getDepth(root.right);
+
+  if (left === right) return (1 << (left + 1)) - 1;
+
+  if (left > right) {
+    return 1 + countNodes(root.left) + ((1 << right) - 1);
+  }
+  return 1 + countNodes(root.right) + ((1 << left) - 1);
+}
+```
+
+Time **O(log² n)**. Space **O(log n)** recursion stack.
+
+<Tradeoff
+  forTitle="Spine-height recursion when"
+  againstTitle="Plain O(n) traversal when"
+  forItems={[
+    "Input guarantees complete tree — the structure enables O(log² n) counting",
+    "n may exceed 10⁹ — implicit tree cannot be fully traversed",
+    "Each recursion measures child depths in O(log n) without visiting every node",
+    "Follow-up ties to heap array representation — same complete-tree shape",
+    "Interview expects better than O(n) after stating the complete-tree constraint",
+  ]}
+  againstItems={[
+    "Tree is not complete — must traverse every node, O(n)",
+    "n ≤ 1000 and interviewer wants simple BFS first — O(n) is fine",
+    "Tree is stored as a heap array — answer is last nonempty index + 1",
+    "You need node values, not count — traversal required anyway",
+    "Incremental insert/delete between queries — maintain a running count",
+  ]}
+/>
+
+## In an interview
+
+State the complete-tree definition: last level filled left to right. Explain comparing left depth of `root.left` vs left depth of `root.right` — equal means perfect.
+
+Give the perfect-subtree shortcut: sibling side has exactly `2^h - 1` nodes without visiting it.
+
+Bug: applying this logic to a general binary tree — completeness is required. Follow-ups: binary search on last-level index; relate to heap indexing.
+
+<KeyTakeaways items={[
+  "Complete tree node count in O(log² n): compare getDepth(root.left) vs getDepth(root.right).",
+  "Equal depths mean a perfect tree — answer (1 << (left + 1)) - 1.",
+  "Unequal depths: recurse on the incomplete side; the sibling is a perfect tree of size 2^h - 1.",
+  "O(n) BFS/DFS works but ignores the structural guarantee — fails when n is billions.",
+  "getDepth walks only left edges — O(log n) per call at each recursion level.",
+  "Binary search on the last level index is an equivalent O(log² n) formulation.",
+]} />

@@ -1,0 +1,116 @@
+---
+title: "Sum of Subarray Minimums"
+number: "03.45"
+summary: "Each element's contribution equals its value times subarrays where it is the unique minimum — monotonic stacks find left and right spans."
+status: published
+free: true
+difficulty: deep
+estMinutes: 19
+tags: [stack, array, monotonic]
+updated: "2026-09-15"
+---
+
+## Enumerating subarrays is O(n²); counting where each element wins is O(n)
+
+Given an array of positive integers, sum the minimum of every contiguous subarray. Return the answer modulo 10⁹ + 7.
+
+`arr = [3, 1, 2, 4]`. Subarrays ending at index 1 with minimum 1: `[1]`, `[3,1]`, `[1,2]` — three of them. Brute force over all O(n²) subarrays and scan each minimum is O(n³) — n up to 3×10⁴ kills that.
+
+Reframe: each element `arr[i]` is the minimum of some subarrays. Count **how many** subarrays pick `arr[i]` as their minimum, multiply by `arr[i]`, sum over i.
+
+For `arr[i]` to be the minimum, the subarray must include i, extend left until a **smaller** element stops it, extend right until a **smaller or equal** element stops it (tie-breaking prevents double counting when duplicates exist).
+
+## Monotonic stack for left and right spans
+
+**Left span `L[i]`:** number of indices to the left (including i) where `arr[i]` is the minimum. Pop stack while top ≥ `arr[i]` (strict `<` on left side); `L[i] = i - stackTop` or `i + 1` if empty.
+
+**Right span `R[i]`:** indices to the right where `arr[i]` remains minimum. Pop while top > `arr[i]` (use `>` not `≥` on right so equal values attach to the leftmost duplicate only).
+
+Contribution: `arr[i] × L[i] × R[i]`. Sum mod 10⁹ + 7.
+
+For `[3, 1, 2, 4]`, element 1 at index 1 contributes `1 × 2 × 3 = 6`.
+
+<Steps>
+<Step title="Build left[] with increasing stack">
+  Scan left to right; pop while arr[stack.top] >= arr[i].
+</Step>
+<Step title="Build right[] with decreasing tie-break">
+  Scan right to left; pop while arr[stack.top] > arr[i] — equal goes left.
+</Step>
+<Step title="Accumulate contributions">
+  Add arr[i] * left[i] * right[i] mod MOD for each i.
+</Step>
+</Steps>
+
+<Callout type="warn">
+  Using `>=` on both sides double-counts subarrays when duplicates exist — the classic off-by-one in counting problems.
+</Callout>
+
+## Solution
+
+```ts
+function sumSubarrayMins(arr: number[]): number {
+  const MOD = 1_000_000_007;
+  const n = arr.length;
+  const left = new Array<number>(n);
+  const right = new Array<number>(n);
+  const stack: number[] = [];
+
+  for (let i = 0; i < n; i++) {
+    while (stack.length && arr[stack[stack.length - 1]] >= arr[i]) stack.pop();
+    left[i] = stack.length ? i - stack[stack.length - 1] : i + 1;
+    stack.push(i);
+  }
+
+  stack.length = 0;
+  for (let i = n - 1; i >= 0; i--) {
+    while (stack.length && arr[stack[stack.length - 1]] > arr[i]) stack.pop();
+    right[i] = stack.length ? stack[stack.length - 1] - i : n - i;
+    stack.push(i);
+  }
+
+  let sum = 0;
+  for (let i = 0; i < n; i++) {
+    sum = (sum + arr[i] * left[i] * right[i]) % MOD;
+  }
+  return sum;
+}
+```
+
+Time **O(n)**. Space **O(n)**.
+
+<Tradeoff
+  forTitle="Monotonic stack counting when"
+  againstTitle="Brute force subarrays when"
+  forItems={[
+    "n up to 3×10⁴ — O(n²) subarray enumeration is too slow",
+    "Problem asks sum of a statistic over all subarrays — per-element contribution pattern",
+    "02.41 Largest Rectangle in Histogram shares the same left/right boundary stack",
+    "Duplicates require asymmetric tie-breaking — stacks handle it with >= vs >",
+    "Follow-up may ask sum of subarray maximums — flip comparison operators",
+  ]}
+  againstItems={[
+    "n ≤ 200 — double loop with inner min scan is acceptable to derive the formula",
+    "Array is strictly increasing — each element is minimum of exactly i+1 subarrays, closed form",
+    "You need the actual subarrays, not the sum — enumeration is required anyway",
+    "Online sliding window variant — different technique",
+    "Modulo not required and values tiny — brute force validates stack logic first",
+  ]}
+/>
+
+## In an interview
+
+Explain the reframe: "Instead of each subarray's min, I count subarrays where each index is the unique minimum."
+
+Draw duplicate example `[2, 2]` — show why left uses `>=` and right uses `>`.
+
+Bug: symmetric `>=` on both passes double-counts equal elements. Follow-ups: sum of subarray maximums, subarray sum equals k family.
+
+<KeyTakeaways items={[
+  "Sum of subarray minimums = Σ arr[i] × (subarrays where i is the minimum).",
+  "Monotonic stacks compute left and right span counts in O(n) per pass.",
+  "Break ties on duplicates: >= on left pass, > on right pass — each equal value owns distinct subarrays.",
+  "O(n) time, O(n) space; apply modulo on every accumulation step.",
+  "02.41 Largest Rectangle in Histogram uses the same boundary-finding stack pattern.",
+  "Brute O(n²) subarrays fails at n = 3×10⁴ — the contribution reframe is mandatory.",
+]} />

@@ -1,0 +1,127 @@
+---
+title: "Cherry Pickup"
+number: "03.40"
+summary: "Two walkers from (0,0) to (n-1,n-1) share step count — 3D DP on both positions avoids double-counting cherries on the same cell."
+status: published
+free: true
+difficulty: deep
+estMinutes: 21
+tags: [dynamic-programming, matrix]
+updated: "2026-09-15"
+---
+
+## One round trip is two simultaneous forward paths
+
+An `n × n` grid holds cherries (`1`), empty cells (`0`), or thorns (`-1`). Start `(0,0)`, end `(n-1,n-1)`, move only right or down. Collect cherries on arrival (once per cell). Return max cherries.
+
+The naive there-and-back DP doubles state. The trick: run **two walkers** from start to end **at the same time**. After `t` moves, walker 1 is at `(r1,c1)`, walker 2 at `(r2,c2)` with `r1+c1 = r2+c2 = t` — same total steps, so `c2 = r1 + c1 - r2`.
+
+State: **`dp[r1][c1][r2]`** = max cherries when walkers occupy those positions after the same number of steps. Each step both move right or down — four combinations of prior states. If both land on the same cherry cell, count it once.
+
+Thorns (`-1`) invalidate a state. Unreachable states stay at `-1`.
+
+## 3D DP transitions
+
+Initialize `dp[0][0][0] = grid[0][0]`. Iterate `r1`, then `c1`, then `r2`; derive `c2`. Skip invalid or thorn cells.
+
+Previous states (each walker moved one step from):
+- Both down: `(r1-1,c1,r2-1)`
+- Walker1 down, walker2 right: `(r1-1,c1,r2)`
+- Walker1 right, walker2 down: `(r1,c1-1,r2-1)`
+- Both right: `(r1,c1-1,r2)`
+
+Add cherries: `grid[r1][c1] + grid[r2][c2]`, minus one if same cell.
+
+<Steps>
+<Step title="Initialize dp[0][0][0] with start cherry count">
+  Both walkers begin at origin — count grid[0][0] once.
+</Step>
+<Step title="Triple loop r1, c1, r2; compute c2 = r1+c1-r2">
+  Skip out of bounds, thorns, or unreachable prior dp.
+</Step>
+<Step title="Take max of four predecessors plus cherry gain">
+  Deduplicate when r1===r2 && c1===c2.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function cherryPickup(grid: number[][]): number {
+  const n = grid.length;
+  const dp = Array.from({ length: n }, () =>
+    Array.from({ length: n }, () => Array(n).fill(-1))
+  );
+  dp[0][0][0] = grid[0][0];
+
+  for (let r1 = 0; r1 < n; r1++) {
+    for (let c1 = 0; c1 < n; c1++) {
+      for (let r2 = 0; r2 < n; r2++) {
+        const c2 = r1 + c1 - r2;
+        if (c2 < 0 || c2 >= n) continue;
+        if (grid[r1][c1] === -1 || grid[r2][c2] === -1) continue;
+        if (r1 === 0 && c1 === 0 && (r2 !== 0 || c2 !== 0)) continue;
+
+        let gain = grid[r1][c1];
+        if (r1 !== r2 || c1 !== c2) gain += grid[r2][c2];
+
+        let best = -1;
+        const relax = (pr1: number, pc1: number, pr2: number) => {
+          if (pr1 >= 0 && pc1 >= 0 && pr2 >= 0 && dp[pr1][pc1][pr2] >= 0) {
+            best = Math.max(best, dp[pr1][pc1][pr2]);
+          }
+        };
+
+        relax(r1 - 1, c1, r2 - 1);
+        relax(r1 - 1, c1, r2);
+        relax(r1, c1 - 1, r2 - 1);
+        relax(r1, c1 - 1, r2);
+
+        if (best >= 0) dp[r1][c1][r2] = best + gain;
+      }
+    }
+  }
+
+  return Math.max(0, dp[n - 1][n - 1][n - 1]);
+}
+```
+
+Time **O(n³)**. Space **O(n³)**, reducible to **O(n²)** with rolling layers over step count.
+
+<Tradeoff
+  forTitle="Two-walker 3D DP when"
+  againstTitle="Sequential there-and-back DP when"
+  forItems={[
+    "Grid is n×n up to 50 — O(n³) ≈ 125k states is comfortable",
+    "Round-trip cherry pickup is equivalent to two forward paths sharing step budget",
+    "Four predecessor moves per state map cleanly to right/down choices",
+    "Same-cell cherry dedup is explicit in the gain calculation",
+    "03.41 Dungeon Game and grid DP family share multi-dimensional state thinking",
+  ]}
+  againstItems={[
+    "Interviewer allows O(n⁴) first — simpler to explain two independent path DP then optimize",
+    "One-way max path (no return) — reduces to 2D dp[r][c] from corner to corner",
+    "n is large — need O(n²) space rolling optimization over step index",
+    "01.25 Unique Paths counts paths; this weights paths with cherry sum and thorns",
+    "Thorns everywhere except start/end — early exit if dp layer is all -1",
+  ]}
+/>
+
+## In an interview
+
+Small 3×3 with cherries and one thorn — show why return trip equals two synchronized walkers.
+
+Define `dp[r1][c1][r2]` and derive `c2` from equal step counts before loops.
+
+Follow-ups: Cherry Pickup II (any number of trips), print paths, O(n²) space. Bug: counting `grid[r1][c1]` twice when walkers share a cell.
+
+<KeyTakeaways
+  items={[
+    "Cherry Pickup models round trip as two walkers moving right/down in sync from start to end",
+    "State dp[r1][c1][r2] with c2 = r1+c1-r2 captures equal step counts without a fourth index",
+    "Merge four predecessor transitions (DD, DR, RD, RR) and add cherries once if cells coincide",
+    "Thorns mark unreachable states; initialize unreachable dp entries to -1",
+    "O(n³) time; space can roll down to O(n²) by step layer",
+    "01.25 Unique Paths counts routes; this maximizes weighted cherry collection on grid paths",
+  ]}
+/>

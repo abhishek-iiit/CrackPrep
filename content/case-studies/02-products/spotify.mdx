@@ -1,0 +1,160 @@
+---
+title: "Spotify"
+number: "02.08"
+summary: "Metadata versus audio bytes, chunked streaming with seek, and playlists that must stay consistent across devices."
+status: published
+free: true
+difficulty: deep
+estMinutes: 20
+tags: [streaming, audio, playlists, search]
+updated: "2026-09-15"
+---
+
+## Music streaming is two systems with different shapes
+
+Spotify prompts test whether you treat a song like a small video file or like a catalog row with a attached blob. It is both, and conflating them is the usual mistake: putting audio bytes behind the same API that serves search results, or storing playlist metadata in the object store because "it is all media."
+
+The listen path is read-heavy, latency-sensitive on **time-to-first-byte** (target often under 200–300 ms for playback start), and dominated by CDN egress for the same title played millions of times. The write path is sparse — playlist edits, likes, follow artist — but consistency matters: a reorder on phone must appear on laptop without duplicating tracks.
+
+Interviewers also use Spotify to probe search and recommendations lightly. You do not need a full ML stack; you need a plausible separation between offline indexing and online query.
+
+## Clarify: listen, library, search — not the label deal
+
+**Functional:**
+
+- Stream on-demand tracks and albums; pause, seek, next/previous.
+- User-created playlists; add/remove/reorder tracks.
+- Search artists, albums, tracks by name.
+- Optional: offline download (premium) — ask if in scope.
+
+**Non-functional:**
+
+- Playback start latency — ask or assume sub-second on good network.
+- Skip/next responsiveness — pre-buffer next track in a queue.
+- Concurrent devices — same account, independent sessions.
+
+**Scope boundary:**
+
+*"I'll design audio streaming, playlists, search, and play queue. Out of scope: podcast video, social feed, ad insertion logic, and royalty reporting. I'll mention recommendation as cached lists, not model training."*
+
+**Question that matters:** "Do we need offline encrypted downloads?" If yes, add a device-local cache and license/check-in path; if no, pure streaming simplifies key management.
+
+## Capacity: repeats make caching pay
+
+| Assumption | Value | Load-bearing for |
+| --- | --- | --- |
+| MAU | 600M | Scale anchor |
+| DAU | 250M | Active listen population |
+| Listen hours per DAU | 2 h/day | Stream duration |
+| Average audio bitrate | 160 kbps (AAC/OGG) | Egress math |
+| Catalog tracks | 100M | Search index size |
+| Playlists per user (avg) | 20 | Metadata writes |
+| Tracks per playlist (avg) | 50 | Row count |
+| Search queries per DAU | 3 | Search QPS |
+
+**Concurrent streams (peak evening, rough):** 250M × 30% active × 25% listening ≈ 19M concurrent × 160 kbps ≈ 3 Tbps aggregate — CDN is mandatory for audio bytes, same conclusion as video at lower per-stream bitrate but huge concurrency.
+
+**Metadata QPS:** Play events, playlist edits, search — high but KB-scale payloads. 250M DAU × 3 searches = 750M searches/day ≈ 8.7k/s average, ~25k/s peak.
+
+**Storage:** Audio masters and encoded files in object storage (100M tracks × ~5 MB average encode ≈ 500 PB catalog — note this is catalog-wide, not annual growth). Metadata in sharded SQL or document store; search index separate.
+
+## High-level design: catalog, bytes, playback, library
+
+| Component | Role |
+| --- | --- |
+| Track catalog DB | Track, album, artist metadata; rights flags; duration |
+| Object storage + CDN | Encoded audio files or chunked segments per track |
+| Streaming service | Auth, resolve track → CDN URL(s), byte-range/segment logic |
+| Playlist service | Playlist headers + ordered track list rows |
+| User library | Saved albums, liked tracks, follow graph |
+| Search service | Inverted index over catalog; autocomplete optional |
+| Playback session | Queue state, current position, device handoff |
+| Analytics pipeline (async) | Play events for charts/recommendations — off hot path |
+
+<Steps>
+  <Step title="Search/browse: metadata only">
+    Client queries search index → track ids + album art URLs. No audio yet. Art from CDN; index from search cluster.
+  </Step>
+  <Step title="Play: resolve track to stream URL">
+    Streaming service checks entitlement (region, subscription), returns signed CDN URL for encoded file or HLS-like chunk manifest. Client starts fetch; CDN serves repeat listens from edge.
+  </Step>
+  <Step title="Seek: HTTP Range or indexed chunks">
+    For MP4/AAC in a single file, `Range: bytes=` requests jump without re-downloading. For chunked packaging, manifest maps time → segment url. Target: seek lands within one round trip to CDN.
+  </Step>
+  <Step title="Queue: client buffer + server session optional">
+    Client pre-fetches next track's first seconds while current plays. Server-side session stores queue for cross-device resume if product requires; otherwise client-local queue is enough at smaller scale.
+  </Step>
+  <Step title="Playlist edit: transactional ordered list">
+    Add/remove/reorder updates playlist_tracks rows with `(playlist_id, position, track_id)`. Version or updated_at for optimistic sync across devices.
+  </Step>
+</Steps>
+
+## Deep dive: chunk delivery and playlist consistency
+
+### Audio delivery — whole file versus segments
+
+At interview scale, two defensible shapes:
+
+**Single encoded file per track (simpler):** AAC 128–320 kbps stored as one object. CDN caches whole object; client uses Range requests for seek. Popular tracks stay hot at edge — the same song played 10M times/day is almost entirely cache hit.
+
+**Segmented streaming (heavier, video-parity):** 2–10 s chunks with a tiny manifest. Wins when you need mid-stream quality switch (Spotify does use multiple qualities); costs more moving parts. Mention bitrate ladders if asked about mobile vs desktop quality.
+
+Time-to-first-byte trick: client requests the **header + first 256 KB** via Range while UI animates; full buffer fills in background. Do not wait for entire 5 MB file before audio starts.
+
+### Playlists — ordering is the hard part
+
+A playlist is not a JSON blob in S3. It is an ordered list that gets concurrent edits:
+
+```text
+playlist_tracks(playlist_id, position, track_id, added_at)
+```
+
+Reorder is `UPDATE position` for affected rows or a linked-list pattern — either way, use a transaction so two devices do not produce duplicate positions. Expose `playlist_version` to clients; stale write returns 409 and client refreshes.
+
+For **very large playlists** (10k+ tracks — rare but asked), paginate list reads; do not load entire playlist into one API response. Playback queue might only hydrate next 50 ids.
+
+### Search — inverted index, not `LIKE %query%`
+
+Catalog search is 03.02 Search Autocomplete's big sibling: inverted index on track/artist/album names, fuzzy match, popularity boost. Index build is offline/async when labels ingest metadata; online path is read-only query → ids. Keep audio bytes out of the search cluster entirely.
+
+<Callout type="gotcha">
+Logging every play synchronously on the streaming hot path adds write QPS comparable to reads during peak hours. Emit play events to a queue (01.08 Distributed Message Queue) and aggregate for charts and recommendations. The listener should not wait for analytics durability to hear the next note.
+</Callout>
+
+<Tradeoff
+  forTitle="Single-file + Range + CDN when"
+  againstTitle="Chunked ABR manifest when"
+  forItems={[
+    "Audio bitrates are fixed per quality tier and mid-track quality switching is rare or client-managed by re-fetch",
+    "Seek can be satisfied with byte-range on one object per track — simpler ops and caching",
+    "Catalog tracks are 3–8 MB — whole-file edge cache is practical",
+    "Team wants the smallest path from catalog row to signed URL",
+    "Interview time is limited and video-parity segment machinery is not the focus",
+  ]}
+  againstItems={[
+    "You must adapt quality mid-stream without restarting playback",
+    "Live or quasi-live audio (radio, crossfade gaps) needs segment boundaries",
+    "DRM requires sample-level encryption boundaries aligned to chunks",
+    "Very long-form content (podcasts, audiobooks) benefits from segment TTL and partial cache",
+    "Client network variance is extreme and ABR measurably reduces rebuffer on cellular",
+  ]}
+/>
+
+## In an interview
+
+Open: *"Spotify splits catalog metadata from audio bytes. Search and playlists hit databases and indexes; playback resolves a track id to a CDN-backed file or chunk stream with Range seek. Popular tracks are a cache problem, not an origin scale problem."*
+
+Clarify offline mode and social features — usually out. Run capacity on concurrent listens × bitrate to justify CDN in one line.
+
+Draw three columns: **metadata** (catalog, playlists, search), **bytes** (object storage + CDN), **session** (queue, progress). Interviewer follow-ups: seek implementation (Range header), playlist conflict (version column), "design search" (inverted index + popularity, no ML lecture). Volunteer play-event async before they ask you to block playback on writes.
+
+<KeyTakeaways
+  items={[
+    "Spotify interviews test separating catalog/search/playlists (metadata) from audio delivery (CDN + Range/segments)",
+    "Concurrent listen math uses bitrate × simultaneous streams — repeats make edge caching the core cost win",
+    "Playback start optimizes time-to-first-byte via partial Range fetch, not downloading whole tracks upfront",
+    "Playlists need transactional ordered rows and version checks for multi-device edits, not blob storage",
+    "Search is an inverted index over metadata, built offline; never scan 100M rows at query time",
+    "Play analytics belong on an async queue — do not synchronously write every play event on the streaming path",
+  ]}
+/>

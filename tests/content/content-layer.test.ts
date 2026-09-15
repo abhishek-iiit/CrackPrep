@@ -11,14 +11,52 @@ const COURSE = "system-design";
 const syllabus = parseSyllabus(readFileSync("SDsyllabus.md", "utf8"));
 
 describe("courses", () => {
-  it("registers system-design as the only live course", () => {
+  it("registers all four courses as live", () => {
     const live = getCourses().filter((c) => c.status === "live");
-    expect(live).toHaveLength(1);
-    expect(live[0].slug).toBe(COURSE);
+    expect(live.map((c) => c.slug).sort()).toEqual([
+      "case-studies",
+      "design-patterns",
+      "leetcode",
+      "system-design",
+    ]);
   });
 
-  it("registers three placeholder planned courses", () => {
-    expect(getCourses().filter((c) => c.status === "planned")).toHaveLength(3);
+  it("has no planned courses", () => {
+    expect(getCourses().filter((c) => c.status === "planned")).toEqual([]);
+  });
+
+  it("loads leetcode modules when live", () => {
+    const modules = getModules("leetcode");
+    expect(modules).toHaveLength(3);
+    expect(modules.reduce((n, m) => n + m.totalCount, 0)).toBe(150);
+  });
+
+  it("attaches a LeetCode problem URL to every leetcode lesson", () => {
+    const lessons = getModules("leetcode").flatMap((m) => m.lessons);
+    expect(lessons).toHaveLength(150);
+    for (const lesson of lessons) {
+      expect(lesson.problemUrl).toMatch(/^https:\/\/leetcode\.com\/problems\/[a-z0-9-]+\/$/);
+    }
+    // Syllabus slug can differ from the on-disk lesson slug.
+    const cycle = lessons.find((l) => l.number === "01.41");
+    expect(cycle?.problemUrl).toBe("https://leetcode.com/problems/linked-list-cycle/");
+  });
+
+  it("leaves problemUrl null on non-leetcode courses", () => {
+    const lesson = getModules("system-design")[0].lessons[0];
+    expect(lesson.problemUrl).toBeNull();
+  });
+
+  it("loads design-patterns modules when live", () => {
+    const modules = getModules("design-patterns");
+    expect(modules).toHaveLength(3);
+    expect(modules.reduce((n, m) => n + m.totalCount, 0)).toBe(23);
+  });
+
+  it("loads case-studies modules when live", () => {
+    const modules = getModules("case-studies");
+    expect(modules).toHaveLength(3);
+    expect(modules.reduce((n, m) => n + m.totalCount, 0)).toBe(24);
   });
 
   it("gives every course a distinct colour key", () => {
@@ -264,8 +302,16 @@ describe("sample lessons are written", () => {
     expect(lesson!.body).not.toContain('forItems={["", ""]}');
   });
 
-  it("chains the three published lessons in course order", () => {
+  it("indexes every published lesson in course order", () => {
     const index = getSearchIndex("system-design");
-    expect(index.map((d) => d.number)).toEqual(["01.01", "04.13", "07.09"]);
+    expect(index.length).toBeGreaterThan(3);
+    expect(index.every((d) => /^\d{2}\.\d{2}$/.test(d.number))).toBe(true);
+    // Course order: numbers are non-decreasing across the whole curriculum.
+    const numbers = index.map((d) => d.number);
+    expect([...numbers].sort()).toEqual(numbers);
+    expect(numbers[0]).toBe("01.01");
+    expect(numbers).toContain("04.13");
+    expect(numbers).toContain("07.09");
+    expect(numbers).toContain("07.19");
   });
 });

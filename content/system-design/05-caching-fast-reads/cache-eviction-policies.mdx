@@ -1,32 +1,93 @@
 ---
 title: "Cache Eviction Policies"
 number: "05.03"
-summary: "Cache Eviction Policies — notes in progress."
-status: draft
+summary: "When the cache is full, something has to leave — the eviction policy is the rule that picks the victim, and the wrong rule quietly tanks your hit rate."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [caching, eviction, lru, capacity]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The cache will fill up; the only question is who leaves
 
-What breaks without this, and the situation that forces the decision.
+A cache with unbounded memory is not a cache — it is an unbounded copy of your data, and eventually the process dies or the host OOMs. Every real cache has a size bound: max bytes, max keys, or both. When an insert would cross that bound, the cache must remove something else first. That choice is the eviction policy.
 
-## How it works
+Eviction is not the same as expiration. A TTL says "this entry may no longer be trusted after time T" — 05.04 TTL Expiration And Cache Reapers. Eviction says "we need the space now, regardless of whether this entry is still fresh." An entry can be evicted while still within its TTL; an entry can expire while the cache still has spare room. Confusing the two is how designs end up with "we set a long TTL so nothing important gets evicted" — TTL does not reserve space, and a full cache under LRU will still throw out a hot key's neighbor to make room for a one-time miss that just allocated.
 
-The mechanism, step by step.
+The policy you pick decides which misses you create under pressure. Under pressure is when it matters: a traffic spike, a working-set growth past RAM, a bad deploy that bloated value sizes. Hit rate in a half-empty cache looks fine under any policy.
 
-## Tradeoffs
+## The policies that actually show up
+
+### LRU — least recently used
+
+Track recency; when space is needed, drop the entry that has gone longest without a read or write. The bet is temporal locality: what was used recently will be used again soon. For product pages, sessions, and API responses with a skewed popularity curve, that bet is usually right.
+
+The implementation cost is the bookkeeping. A hash map plus a doubly linked list (or an approximated clock/CAR variant) updates on every hit. At extreme QPS the list manipulation is real CPU; some stores approximate LRU with sampling (Redis's approximate LRU) rather than perfect ordering, which is good enough for hit rate and cheaper under load.
+
+LRU's failure mode is a scan. A one-time pass over a large key range — a migration job, a report, a crawler — touches every key once, pushes the real working set toward the cold end of the list, and then evicts the keys you actually needed. The cache did exactly what LRU promised; the access pattern lied about locality.
+
+### LFU — least frequently used
+
+Track how often an entry is touched; evict the least frequent. Protects long-lived hot keys against a burst of one-hit wonders better than LRU does. Needs counters (and usually aging, or old keys that were hot last month never leave). More state per entry, and a cold key that suddenly becomes hot takes longer to climb out of the eviction zone than under LRU.
+
+### FIFO and random
+
+FIFO evicts the oldest inserted entry, ignoring hits entirely — simple, hostile to any key that was loaded early and stays hot. Random eviction picks a victim uniformly; surprisingly competitive in some workloads, trivial to implement, and used as a baseline. Neither is the default for a general-purpose application cache, but random shows up inside approximations and as a way to avoid pathological list locking.
+
+### Size-aware and cost-aware variants
+
+Not every value costs the same to store or to recompute. Evicting a 2 MB blob frees more than evicting a 200-byte counter; evicting a key that takes 50 ms to recompute hurts more than one that takes 1 ms. TinyLFU, LRU-K, and adaptive policies (Redis's LFU mode, Caffeine's Window TinyLFU) try to blend frequency, recency, and sometimes cost. In an interview you rarely implement them from scratch — you name that perfect LRU is not the only option once value sizes or recompute costs vary by orders of magnitude.
+
+| Policy | Protects | Vulnerable to | Bookkeeping |
+| --- | --- | --- | --- |
+| LRU | Recently hot keys | Scans and one-pass jobs that pollute recency | Per-hit list or approx sampling |
+| LFU | Steadily popular keys | New hot keys that need time to accumulate counts | Counters + aging |
+| FIFO | Nothing in particular | Any long-lived hot key inserted early | Insert order only |
+| Random | Pathological corner cases somewhat evenly | Unlucky eviction of the hottest key | Almost none |
+| TinyLFU / adaptive | Mixed recency + frequency workloads | Mis-tuned windows; harder to reason about cold | Sketch + window structures |
+
+## Capacity is a product decision wearing an ops badge
+
+Eviction policy cannot fix undersizing. If the working set is 80 GB and the cache is 16 GB, even an oracle policy that always keeps the next-needed keys will still miss constantly — there is nowhere to put the working set. Measure the working set (unique keys in a window × average value size), pick a hit-rate target, and provision RAM with headroom for fragmentation, RSS overhead, and growth. Order-of-magnitude: many teams aim for enough RAM to hold the hot set that produces a 90%+ hit rate on the keys that matter, not 100% of all historical keys.
+
+Watch the right signals: hit rate, eviction rate, and memory fragmentation. A hit rate that was 95% all week and is 70% this afternoon, with eviction rate climbing, is not a mystery — the working set outgrew the box, or a new access pattern is polluting the policy. It does not present as an error. It presents as database CPU that mysteriously rose while the cache cluster still looks "up."
+
+<Callout type="tip">
+When you describe a cache in a design, say the bound and the policy in one breath: "16 GB Redis, approximate LRU, TTL as a freshness cap not as the capacity plan." Leaving eviction unnamed is how interviewers assume you think the cache stays empty forever.
+</Callout>
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Prefer LRU (or approx LRU) when"
+  againstTitle="Prefer frequency-aware or other policies when"
+  forItems={[
+    "Access shows temporal locality — the same product pages, sessions, and profiles recur within minutes",
+    "You want a default that operators and interviewers both understand without a research paper",
+    "Per-hit bookkeeping cost is acceptable, or your store already offers sampled LRU",
+    "Value sizes are roughly similar, so freeing one entry is about as good as freeing another",
+    "Scans are rare or can be isolated to a separate connection that bypasses the main cache",
+  ]}
+  againstItems={[
+    "A small set of keys stays hot for hours while a large churn of one-touch keys would wash them out under pure LRU",
+    "Values differ hugely in size or recompute cost, and evicting by recency alone frees the wrong thing",
+    "You can prove the workload is scan-heavy and LRU consistently loses the real working set",
+    "The store's built-in adaptive policy (TinyLFU-style) is available and you will measure hit rate rather than theorize",
+    "You need the simplest possible implementation and random or FIFO is enough for a tiny bounded set",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+State that the cache is bounded, name the eviction policy, and separate it from TTL. "I'd use Redis with approximate LRU for the working set, and TTLs measured in minutes for freshness — eviction handles memory pressure; TTL handles staleness." Expect the scan follow-up: say what happens to LRU under a full-table warmer, and that the fix is not "switch to LFU immediately" but recognizing pollution and isolating bulk reads. If asked how big the cache should be, reason from working-set size and target hit rate, not from a round number that sounds large.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Eviction frees space under a memory bound; TTL bounds freshness — they solve different problems and neither replaces the other",
+    "LRU keeps recently touched keys and is the usual default; it fails when scans pollute recency and push out the real working set",
+    "LFU and adaptive policies protect steady hot keys and mixed workloads at the cost of more state and harder intuition",
+    "No policy fixes a cache smaller than the hot working set — provision from measured key cardinality and value size",
+    "Eviction shows up as rising database load and falling hit rate, not as a clean cache error",
+    "Name the bound and the policy when you draw the cache, or the design silently assumes infinite RAM",
+  ]}
+/>

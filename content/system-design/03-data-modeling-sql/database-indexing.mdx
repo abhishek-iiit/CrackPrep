@@ -1,32 +1,83 @@
 ---
 title: "Database Indexing"
 number: "03.03"
-summary: "Database Indexing — notes in progress."
-status: draft
+summary: "An index trades write cost and storage for read speed, and it only pays off when the predicate it serves is actually selective."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [sql, indexing, b-tree, performance]
+updated: "2026-09-15"
 ---
 
-## The problem
+## A full table scan doesn't care how good your WHERE clause is
 
-What breaks without this, and the situation that forces the decision.
+Without an index, `WHERE user_id = 4821` and `WHERE user_id > 0` cost the same: every row in the table gets read and evaluated against the predicate, because there is no other way to find the matching ones. On a table with a hundred rows that's free. On a table with ten million rows it's ten million comparisons, every time, no matter how selective the condition looks to a human reading the query.
 
-## How it works
+An index is a second structure, built and maintained alongside the table, that maps a column's values to the rows that hold them — so the engine can find matching rows without visiting every one. That's the entire idea. Everything else about indexing is the fine print: which structure, how it's kept in sync, and when the fine print means it doesn't actually help.
 
-The mechanism, step by step.
+## The mechanism is almost always a B-tree
 
-## Tradeoffs
+Most general-purpose indexes — the default in Postgres, MySQL's InnoDB, SQL Server — are B-trees (03.04): a balanced, sorted, disk-oriented tree with a fan-out in the hundreds per node, so even a table with a billion rows is reachable in three or four page reads. An index entry pairs an indexed value with a pointer back to the row.
+
+What that pointer actually is depends on the engine, and the difference matters. In InnoDB, the table itself *is* a B-tree clustered on the primary key — rows live in primary-key order inside the same structure the primary key indexes. A secondary index there doesn't point at a physical row location; it stores the primary key value, so a secondary-index lookup is two B-tree descents: one through the secondary index to find the primary key, one through the clustered table to fetch the row. Postgres instead stores rows in an unordered heap and every index — primary or secondary — points at a physical row location (a `ctid`), so a primary-key lookup and a secondary-index lookup cost the same shape of work. Neither is more "correct"; they're different answers to the same layout question, and the practical effect is that a table with many secondary indexes on InnoDB pays for every one of them a second time relative to the clustering index.
+
+A composite index — one built over more than one column, like `(last_name, first_name)` — is sorted by the leading column first, then the next, like a phone book sorted by last name and then first name within each last name. That gives it the **leftmost-prefix rule**: the index serves queries filtering on `last_name` alone, and on `last_name AND first_name` together, but it cannot serve a query filtering on `first_name` alone, because the index isn't sorted by first name at the top level — finding all the "Alices" would mean scanning every last name to check.
+
+A **covering index** carries every column a query needs, not just the ones it filters on. If `SELECT balance FROM accounts WHERE user_id = $1` has an index on `(user_id) INCLUDE (balance)`, the engine answers the query entirely from the index and never touches the underlying table row at all — an index-only scan, which skips exactly the second lookup a secondary index normally requires.
+
+## What each operation actually costs
+
+| | No index | With an index |
+| --- | --- | --- |
+| Equality lookup on a selective column | Full scan: every row read | One B-tree descent (03.04), typically 3-4 page reads |
+| Range scan | Full scan | B-tree descent to the start, then a sequential walk across linked leaves |
+| Insert / update / delete | One row write | One row write, plus one write per index the change touches |
+| Storage | Table size only | Table size plus roughly one B-tree per index, often comparable in size to the column data it covers |
+| Low-selectivity predicate (e.g. a boolean flag) | Full scan | Often a full scan anyway — see below |
+
+The write row is the one people forget. Every index on a table is a second (or third, or tenth) structure that has to be kept correct on every insert, update, and delete — not just the ones that touch the indexed column. A table with six indexes pays for six B-tree updates on every single row write, which is why "just add an index" is not a free action on a write-heavy table.
+
+## Selectivity is what makes an index worth using
+
+An index only wins when the predicate rules out most of the rows. If a query matches 1% of a table, a targeted lookup beats reading everything by roughly two orders of magnitude. If a query matches 40% of a table, the index has to do a targeted lookup for each of those matching rows individually — and if the pointers aren't stored in the same physical order as the table, that's 40% of the table's rows fetched via scattered, effectively random reads instead of one sequential pass over all of them. Past some fraction of the table — commonly cited around 5-10%, though the real number depends on how the data is laid out and how cheap sequential I/O is on the device — a sequential scan becomes cheaper than the index, purely because sequential reads beat random ones. This is exactly the calculation the query planner (03.05 Query Planning) makes for you, and exactly why it sometimes ignores an index that exists.
+
+An index on a low-cardinality column — a boolean, a status enum with three values — is often close to useless on its own for the same reason: no value it holds is selective, since each one still matches a large fraction of the table.
+
+<Callout type="tip">
+An index doesn't have to cover a whole query to be worth having. A composite or partial index built for the single most common, most expensive query pattern usually pays for itself even if ad-hoc queries against the same table get no benefit from it. Index the workload you actually see, not every column that could theoretically appear in a WHERE clause.
+</Callout>
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Add an index when"
+  againstTitle="Don't add one (yet) when"
+  forItems={[
+    "The column, or the leading columns of a composite, appears in WHERE, JOIN, or ORDER BY on a large, frequently queried table",
+    "The predicate is genuinely selective — expected to rule out the large majority of rows",
+    "Reads on this table outnumber writes by a wide margin, so the write-side cost is amortized across many more reads",
+    "A covering index would let a hot query skip the table entirely via an index-only scan",
+    "EXPLAIN / EXPLAIN ANALYZE (03.05 Query Planning) shows a sequential scan on a query that should be selective",
+  ]}
+  againstItems={[
+    "The table is small enough, or the predicate unselective enough, that a sequential scan is genuinely cheaper",
+    "The table is write-heavy and every additional index adds a B-tree update to every insert, update, and delete",
+    "Storage is tight and the index would add meaningfully to what the table already occupies",
+    "The indexed column changes on nearly every write (a counter, a last-seen timestamp), so the index churns as fast as the data and buys little",
+    "Nobody queries by this column yet — a speculative index is pure cost with no measured benefit; add it later without downtime via 03.11 Online Indexing once a real query pattern proves it out",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Justify an index by the query it serves, with the selectivity spelled out: "this filters to under 1% of rows, so an index turns a full scan into a handful of page reads." Expect the immediate follow-up about write cost, and answer it in the same terms — how many indexes does this table already have, and does this workload skew read-heavy enough to afford one more. If asked why an index sometimes isn't used, selectivity and the leftmost-prefix rule are the two answers that cover almost every case, and naming EXPLAIN as the tool that would confirm it shows you'd verify rather than assume.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Without an index, a predicate's selectivity is irrelevant — every row gets read and checked regardless",
+    "Most general-purpose indexes are B-trees (03.04), giving a lookup a cost of a few page reads independent of table size",
+    "A composite index only serves queries on its leading columns, in order — the leftmost-prefix rule",
+    "A covering index lets a query skip the table row entirely via an index-only scan",
+    "Every index adds a write cost to every insert, update, and delete on that table, not just ones touching the indexed column",
+    "An index only wins when the predicate is selective enough that random targeted reads beat one sequential scan — past roughly 5-10% of the table, that stops being true",
+  ]}
+/>

@@ -1,0 +1,117 @@
+---
+title: "Swim in Rising Water"
+number: "03.13"
+summary: "You can swim when the water level covers your entire path — binary search the level or Dijkstra on the grid with max-edge cost."
+status: published
+free: true
+difficulty: deep
+estMinutes: 17
+tags: [binary-search, heap, grid]
+updated: "2026-09-15"
+---
+
+## The ocean rises — your path must stay underwater together
+
+An `n × n` grid gives elevation at each cell. You start at `(0,0)` and want `(n-1, n-1)`. At time `t`, water level is `t`; you can swim through cells with elevation `≤ t`. Find the **minimum** `t` when a path exists.
+
+Grid `[[0,2],[1,3]]`: at `t = 3` you can go `(0,0) → (1,0) → (1,1)` because max elevation on that path is 3. At `t = 2` the destination cell is still dry. Answer: **3**.
+
+Naive BFS on time layers — simulate water rising one unit at a time — can revisit the grid many times. The insight is monotonicity: if you can swim at level `T`, you can swim at any `T' > T`. That invites **binary search on the answer** with a reachability check, or a single **Dijkstra** where edge cost is the max elevation you must tolerate along the path.
+
+## Minimax path on a grid
+
+Two equivalent views:
+
+1. **Binary search `t`** from `0` to `n² - 1` (or max grid value). For each mid, BFS/DFS flood from `(0,0)` through cells `≤ mid`; succeed if `(n-1, n-1)` is reached.
+
+2. **Dijkstra with priority = path max elevation**. Start with `(0,0)` at cost `grid[0][0]`. Pop smallest cost cell; relax 4-neighbors with `newCost = max(currentCost, grid[neighbor])`. First time you pop `(n-1, n-1)` is the answer.
+
+The invariant: the optimal path's bottleneck cell determines the minimum feasible water level — same as "widest path" or minimax shortest path.
+
+<Steps>
+<Step title="Binary search bounds">
+`lo = grid[0][0]`, `hi = max cell value` (or n² − 1). Answer lies in `[lo, hi]`.
+</Step>
+<Step title="Feasibility check">
+`canSwim(t)`: BFS from start, only visit cells with `grid[r][c] <= t`, 4-directional.
+</Step>
+<Step title="Shrink search space">
+If feasible at `mid`, try `hi = mid`; else `lo = mid + 1`. Return `lo`.
+</Step>
+</Steps>
+
+## Solution
+
+```ts
+function swimInWater(grid: number[][]): number {
+  const n = grid.length;
+  const dirs = [0, 1, 0, -1, 0];
+
+  function canSwim(t: number): boolean {
+    if (grid[0][0] > t || grid[n - 1][n - 1] > t) return false;
+    const seen = Array.from({ length: n }, () => new Array(n).fill(false));
+    const q: [number, number][] = [[0, 0]];
+    seen[0][0] = true;
+
+    while (q.length) {
+      const [r, c] = q.shift()!;
+      if (r === n - 1 && c === n - 1) return true;
+      for (let d = 0; d < 4; d++) {
+        const nr = r + dirs[d], nc = c + dirs[d + 1];
+        if (nr < 0 || nr >= n || nc < 0 || nc >= n || seen[nr][nc]) continue;
+        if (grid[nr][nc] > t) continue;
+        seen[nr][nc] = true;
+        q.push([nr, nc]);
+      }
+    }
+    return false;
+  }
+
+  let lo = Math.max(grid[0][0], grid[n - 1][n - 1]);
+  let hi = n * n - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (canSwim(mid)) hi = mid;
+    else lo = mid + 1;
+  }
+  return lo;
+}
+```
+
+Time **O(n² log n²)** — binary search over at most `n²` levels, each BFS **O(n²)**. Space **O(n²)** for the visited grid per check. Dijkstra with a binary heap achieves **O(n² log n)** in one pass — worth mentioning if the interviewer prefers a single traversal.
+
+<Tradeoff
+  forTitle="Binary search + BFS when"
+  againstTitle="Dijkstra (min-heap) when"
+  forItems={[
+    "The feasibility predicate is obvious: flood fill at water level t",
+    "You already used binary search on answer in 02.44 Koko Eating Bananas",
+    "n ≤ 50–100 and O(n² log n) BFS checks are comfortable",
+    "Separating search from graph check makes each piece easy to test verbally",
+    "Follow-up asks only yes/no at a fixed t — you reuse canSwim directly"
+  ]}
+  againstItems={[
+    "You want one pass instead of log(n²) BFS runs — heap Dijkstra with max-edge cost",
+    "Grid is large and constant factors matter — single O(n² log n) beats repeated flood fills",
+    "Edge weights vary more finely than integer levels — Dijkstra generalizes to float thresholds",
+    "You need the actual path, not just min t — Dijkstra parent pointers come for free",
+    "03.24 Path With Minimum Effort is the same template — Dijkstra transfers directly"
+  ]}
+/>
+
+## In an interview
+
+Restate: square grid, start top-left, end bottom-right, uniform water rise, find earliest time you can arrive. Confirm 4-directional movement and that you may wait on dry land (does not change the minimax level).
+
+Say monotonicity first — binary search the water level, check reachability — or Dijkstra where path cost is the maximum cell elevation along the route. Both are correct; pick the one you can code cleanly.
+
+Expect: Union-Find variant (sort cells by elevation, merge neighbors — Kruskal-style), comparison to 03.24 Path With Minimum Effort (effort = max absolute height diff). Bug to name first: forgetting that start and end must both be `≤ t` — checking only interior cells.
+
+<KeyTakeaways items={[
+  "Swim in Rising Water is minimax pathfinding: the answer is the minimum possible maximum elevation on any start-to-end path.",
+  "Binary search on water level t works because reachability is monotone in t; each check is BFS/DFS flood fill.",
+  "Dijkstra with priority = max(grid on path) solves it in one O(n² log n) pass — same idea as Path With Minimum Effort.",
+  "Start and end cells must be included in the threshold; lo should be at least max(grid[0][0], grid[n-1][n-1]).",
+  "Union-Find by increasing elevation is a third valid approach — connect cells as water covers them until start and end merge.",
+  "Time O(n² log n) for either binary search + BFS or heap Dijkstra; space O(n²)."
+]} />

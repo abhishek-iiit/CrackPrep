@@ -1,32 +1,90 @@
 ---
 title: "Metadata Service And Node Discovery"
 number: "06.12"
-summary: "Metadata Service And Node Discovery — notes in progress."
-status: draft
+summary: "Discovery answers where to send work; a metadata service is the strongly consistent map of cluster shape — wrong answers here misroute every request that follows."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [metadata, discovery, service-discovery, control-plane]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Finding the node that owns the key
 
-What breaks without this, and the situation that forces the decision.
+Before a client can read `user:42`, something has to answer "which machine, which port, which epoch." That answer is **discovery**. When the answer is not just addresses but the authoritative map of shards, replicas, schema versions, and leaders, the component holding it is a **metadata service** — HDFS NameNode, Kafka's controller-managed metadata, Chubby/etcd-backed assignment maps, the DynamoDB partition metadata path, object-store namespace services (07.17 Metadata DB For Object Storage).
 
-## How it works
+Get the data path wrong and one request fails. Get metadata wrong and a whole region double-writes, or every client pounds a dead primary, or a rebalance deletes the wrong replica. Metadata volume is tiny compared to user data; its correctness requirement is not. That asymmetry — small, hot, must be right — is why metadata so often sits on consensus (06.06 Consensus) while the bytes live on cheaper replication (06.03 Replication).
 
-The mechanism, step by step.
+## Discovery mechanisms, from soft to hard
 
-## Tradeoffs
+**DNS and load balancers.** Clients resolve a name; the LB fans out to healthy backends. Fine for stateless services where any instance will do. Terrible as the only story for "who owns shard 17," because DNS TTLs and LB health checks lag leadership changes and cannot fence stale writers.
+
+**Client-side service discovery.** A library watches a registry (Consul, etcd, Eureka-style) and picks an instance locally. Faster failovers than DNS TTL when watches are prompt; still only as correct as the registry's guarantees.
+
+**Gossip membership (06.11 Gossip Protocol).** Decentralized view of who is alive and which tokens they advertise. Excellent hinting layer for large clusters; not the system of record for assignments that must not fork.
+
+**Strongly consistent metadata service.** Membership, leader, and partition map are stored in a Raft/Zab/Paxos group (or a single Active NameNode with a journal). Clients read the map (often cached with a version), and writes that change topology go through the metadata leaders. This is the pattern when misrouting corrupts data.
+
+| Layer | Typical guarantee | Stale answer cost | Role |
+| --- | --- | --- | --- |
+| DNS / LB | Best-effort health | Retry another instance | Stateless service entry |
+| Registry watch | Depends on store | Brief misroute | Service discovery |
+| Gossip view | Eventual | Dual views under partition | Large-cluster hints |
+| Consensus metadata | Linearizable updates | High if clients skip versioning | Shard map, leaders, ACLs |
+
+## What the metadata plane must provide
+
+A useful metadata service is more than a phone book:
+
+- **Assignments** — which nodes replicate which partitions, and who is primary (06.07 Leader Election).
+- **Versions / generations** — so clients and data nodes can reject stale maps; fencing tokens belong here or in the same epoch space.
+- **Leases and sessions** — so a dead node's assignments can be revoked without waiting for an operator.
+- **Change notification** — watches or push so caches invalidate in seconds, not after a 60s TTL.
+- **Bootstrap** — seeds for new nodes (often a static list pointing at the metadata quorum itself).
+
+Caching is mandatory for performance — every data request should not round-trip etcd — and dangerous without versions. The safe pattern: cache the map with a metadata epoch; on redirect or fencing rejection, invalidate and refetch. Treating a cached primary address as eternal is how split brains get traffic after failover.
+
+<Callout type="warn">
+Putting the metadata service in the same failure domain as a single data node — one disk, one rack, one AZ — means a routine hardware failure takes down addressing for the whole cluster. Metadata quorums are small; place them for independence, and practice minority loss (what happens when two of five etcd members die).
+</Callout>
+
+## Control plane versus data plane
+
+Keep the paths separate in the design conversation. Clients discover via metadata, then speak to data nodes on a different path. Bulk data does not flow through etcd. Rebalances update metadata first (or in a coordinated dance with data copy), then clients learn the new owner. When people say "the NameNode is the bottleneck," they usually mean either CPU on the metadata leader under too many tiny ops, or an architecture that required metadata on every read — both are design smells, not reasons to make metadata eventually consistent without a plan for conflict.
+
+Stateless microservices can often stop at DNS + registry. Stateful systems almost always grow a real metadata plane the moment they shard.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Invest in a strongly consistent metadata service when"
+  againstTitle="Rely on softer discovery when"
+  forItems={[
+    "Routing mistakes cause divergent writes or data loss — shard maps, primary identity, exclusive locks",
+    "The cluster is stateful and partitioned; 'any healthy pod' is the wrong answer for a given key",
+    "You need coordinated rebalance, membership change, and fencing under one epoch space",
+    "Operators require a single inspectable source of truth for 'who owns what' during incidents",
+    "Client caches must be invalidateable by version rather than by guessing TTLs",
+  ]}
+  againstItems={[
+    "Services are stateless and interchangeable behind a load balancer — DNS/LB health is enough",
+    "Eventual membership via gossip already matches the data model's conflict story",
+    "The team cannot yet run a quorum control plane, and a managed discovery product covers the need",
+    "Topology changes are rare and human-gated, so a static config or DNS update is acceptable lag",
+    "Adding a metadata hop on the data path would blow the latency budget and caching cannot be made safe",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Split the board: "control plane metadata versus data plane." Say the shard map lives in etcd/Raft (or equivalent), clients cache it by version, and data RPCs carry an epoch so stale owners get rejected. Discovery for stateless frontends can stay DNS. Expect "what if metadata is down?": the honest answer is that many stateful clusters degrade or freeze topology changes — which is why the metadata quorum is sized and placed like a critical dependency, not like a best-effort cache. Cross-link gossip as the hint layer and consensus as the authority when both appear in the design.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Discovery tells clients where to connect; a metadata service holds the authoritative cluster map — shard owners, leaders, generations.",
+    "Metadata is small but correctness-critical, so it usually sits on consensus while user data uses cheaper replication.",
+    "DNS and LBs fit stateless services; stateful shard routing needs versioned maps and fencing, not TTLs alone.",
+    "Client-side caches of metadata are required for speed and must invalidate on epoch/fencing rejection.",
+    "Place metadata quorums outside a single data node's failure domain — if metadata dies with one disk, the cluster cannot address itself.",
+    "Gossip and registries are fine as hints or for interchangeable instances; they are not a substitute for linearizable assignment when misrouting corrupts data.",
+  ]}
+/>

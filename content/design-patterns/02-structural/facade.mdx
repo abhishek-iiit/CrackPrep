@@ -1,0 +1,93 @@
+---
+title: "Facade"
+number: "02.05"
+summary: "Hide a cluster of cooperating subsystems behind one entry point so callers stop orchestrating five objects themselves."
+status: published
+free: true
+difficulty: intro
+estMinutes: 9
+tags: [structural, simplification, api]
+updated: "2026-09-15"
+---
+
+## Five subsystems to turn on the home theater
+
+Amplifier, tuner, streaming box, projector, lights — each has its own remote, its own power sequence, its own input selection. "Watch a movie" in the raw API is: power on amp, set amp input to HDMI-2, power on projector, set source, dim lights to 20%, start stream. Miss one step and you get picture with no sound, or sound with the projector still on the laptop input. Every caller that wants "movie mode" copies that sequence, and when someone swaps the amp for a new model, every copy breaks.
+
+Facade is one class — `HomeTheaterFacade.watchMovie()` — that knows the sequence and talks to the subsystems internally. Callers get one method; the complexity stays behind the facade. The subsystems remain usable directly for power users who need fine control; the facade is optional sugar for the common path.
+
+This is the thinnest structural pattern and the one you have probably already written without naming it: a service layer that wraps repository + cache + queue, a SDK entry point that hides HTTP retries and auth refresh.
+
+## Facade does not delete the subsystems
+
+Important distinction: Facade **does not** wrap a foreign incompatible interface (that is 02.01 Adapter) and **does not** add optional behavior layers (that is 02.04 Decorator). It **coordinates** existing components you own, presenting a narrower, task-oriented surface. The subsystems still exist; the facade just saves callers from being the orchestrator.
+
+Roles:
+
+- **Facade** — `HomeTheaterFacade`, `OrderService`.
+- **Subsystem classes** — `Amplifier`, `Projector`, `Lights`; each does its own job, unaware of the facade.
+- **Client** — calls the facade for the 80% path; may call subsystems directly for the 20% edge case.
+
+<Steps>
+<Step title="Client invokes one facade method">
+`theater.watchMovie(title)` — one line at the call site.
+</Step>
+<Step title="Facade runs the orchestration">
+Power on in the right order, set inputs, dim lights, call `stream.play(title)`.
+</Step>
+<Step title="Subsystems do their own work">
+Each subsystem class exposes low-level methods; the facade sequences them.
+</Step>
+<Step title="Facade may translate outcomes">
+If the projector fails to signal ready within five seconds, the facade powers everything down and throws one coherent error instead of leaving half the stack on.
+</Step>
+</Steps>
+
+```typescript
+class HomeTheaterFacade {
+  watchMovie(title: string) {
+    this.lights.dim(20);
+    this.amp.on(); this.amp.setInput("HDMI-2");
+    this.projector.on(); this.projector.setInput(this.amp);
+    this.stream.play(title);
+  }
+}
+```
+
+Facades accumulate logic if you are not careful. Validation, pricing, and authorization belong in domain services; the facade sequences, it does not become a god object. When `watchMovie` grows to 200 lines of business rules, you have outgrown a facade and need a real workflow layer.
+
+<Tradeoff
+  forTitle="Reach for Facade when"
+  againstTitle="Skip Facade when"
+  forItems={[
+    "Callers repeat the same multi-step orchestration across three or more subsystems",
+    "You want a stable, task-level API ('place order', 'start transcode') while subsystems churn internally",
+    "Onboarding cost is high because newcomers must learn five classes before one user story works",
+    "Subsystem startup order or error rollback is easy to get wrong and should live in one place",
+    "You are exposing a library and need one obvious entry point for the common case",
+  ]}
+  againstItems={[
+    "There is one subsystem and one method — a wrapper class adds a file and nothing else",
+    "Callers genuinely need fine-grained control every time; a facade hides the knobs they use",
+    "The real problem is incompatible interfaces between third parties — that is Adapter, not simplification of your own stack",
+    "You need lazy loading or access control on a single object — that is 02.07 Proxy",
+    "The facade becomes the only path and subsystems atrophy untested — keep direct subsystem access for tests and edge cases",
+  ]}
+/>
+
+## In an interview
+
+Introduce by the user story: "Watching a movie touches four devices — I'd expose `watchMovie()` on a facade so the UI does not sequence power and inputs." One box labeled Facade, arrows to subsystem boxes. Follow-up: "Facade vs Adapter?" Adapter translates mismatched interfaces; Facade simplifies a complex but already-compatible cluster you control. "vs Mediator?" 03.04 Mediator makes subsystems talk *through* it with bidirectional coordination; Facade is usually unidirectional — client to facade to subsystems. "Can subsystems talk to each other?" They can; the facade does not forbid it, it just offers a shortcut.
+
+Failure mode: the facade becomes the only dependency in the codebase, every test mocks the facade instead of subsystems, and when the facade breaks nobody knows which subsystem failed.
+
+<KeyTakeaways
+  items={[
+    "Facade provides one task-oriented entry point over a cluster of subsystems so callers stop copying orchestration sequences",
+    "Subsystems stay independent and directly usable; the facade is optional convenience for the common path",
+    "Facade simplifies complexity you own; Adapter translates incompatibility you inherited; Decorator adds behavior on one interface",
+    "Keep business rules out of the facade — it sequences and translates errors, it does not replace domain logic",
+    "When the same orchestration appears in three places, that repetition is the signal to extract a facade",
+    "Avoid letting the facade become an untested god object — subsystem tests still matter",
+  ]}
+/>

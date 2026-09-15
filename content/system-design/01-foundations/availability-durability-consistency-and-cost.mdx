@@ -1,32 +1,78 @@
 ---
 title: "Availability Durability Consistency And Cost"
 number: "01.05"
-summary: "Availability Durability Consistency And Cost — notes in progress."
-status: draft
+summary: "Why availability, durability, and consistency are separate axes, each priced on its own curve, and every extra nine costs more than the last."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 16
+tags: [availability, durability, consistency, cost]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Every extra nine costs more than the one before it
 
-What breaks without this, and the situation that forces the decision.
+Availability, durability, and consistency get used as if they were one dial labeled "reliability." They are three separate promises, and a system can satisfy any one of them while badly failing the other two. A system can be available and wrong — it answers every request instantly, with data that is stale or incorrect. A system can be consistent and down — it refuses to answer at all rather than risk giving two callers different values for the same fact. A system can be durable and unreachable — the data is intact on disk somewhere, and nobody can currently read it. None of the three implies any of the others, and each one is bought on its own curve, in its own currency, which is why "just make it more reliable" is not an instruction anyone can act on.
 
-## How it works
+**Availability** is the fraction of requests that get an answer within an acceptable window, usually quoted as a percentage over a month or a year — "the nines." **Durability** is the probability that data, once acknowledged as written, is never lost, measured over years rather than per request. **Consistency** is whether two concurrent reads of the same data can disagree, and for how long — a spectrum, not a yes/no, running from "never" at the strict end to "eventually, on some unspecified timeline" at the loose end; 06.02 Consistency Models covers that full spectrum in detail. This lesson only needs the shape: three axes, independently priced, plus a fourth underneath all of them that decides how much of each you can actually afford.
 
-The mechanism, step by step.
+## What a nine actually buys
 
-## Tradeoffs
+<Formula label="Allowed downtime per year">downtime = (1 − availability) × 525,600 minutes</Formula>
+
+| Availability | Downtime per year | Downtime per month |
+| --- | --- | --- |
+| 99% | ~3.65 days | ~7.3 hours |
+| 99.9% | ~8.76 hours | ~43.8 minutes |
+| 99.99% | ~52.6 minutes | ~4.4 minutes |
+| 99.999% | ~5.26 minutes | ~26 seconds |
+
+Each row down the table is roughly an order of magnitude harder to hold than the one above it, and the engineering it takes tends to scale the same way — redundant instances get you from 99% to 99.9%; redundant availability zones and automated failover get you toward 99.99%; a fifth nine generally means redundant regions, a deploy pipeline audited for how much of that 5.26-minute budget it eats on its own, and an on-call rotation mature enough to detect and mitigate an incident inside single-digit minutes, every time, including at 3am. The value of the next nine, meanwhile, flattens well before the cost does — an internal admin dashboard does not need 99.999%, and a payments authorization path might need every one of them, and those can be two systems inside the same company with two deliberately different targets.
+
+<Callout type="gotcha">
+"Five nines" gets stated as an aspiration far more often than it gets priced. Five nines is 5.26 minutes of downtime a year, total — that budget has to cover deploys, DNS propagation, and the gap between an alert firing and a human acknowledging it. Most teams that ask for it have never checked whether their deploy process alone fits inside that number, and most products do not need it: three or four nines, chosen deliberately and matched to what an outage actually costs the business, is the right target for the overwhelming majority of systems, and it is dramatically cheaper to actually hold.
+</Callout>
+
+## Durability is priced in copies, not in nines
+
+Durability follows a different curve. Where availability is mostly about redundant compute answering requests, durability is mostly about how many independent copies of the data exist and how correlated their failure is — 06.03 Replication covers the mechanics. A second copy on a different disk defends against a disk failure. A second copy in a different rack defends against a power event taking out the first. A copy in a different region defends against the first region disappearing entirely. Each additional copy costs storage and network close to linearly, but the decision of how many copies to hold is a step function around a specific failure you have decided to survive, not a smooth curve you can nudge.
+
+Durability failures also fail differently from availability failures, which is worth saying plainly because it changes how you'd design around them. An availability failure is loud — it shows up as an alert within seconds. A durability failure is silent: it does not page anyone at 2am, because nothing observable happens at the moment the data is lost. It surfaces months later, when a customer asks for a record from last spring and the record is gone, and by then there is no fix, only an apology and, if you're lucky, a backup governed by 14.07 Database Backups And Restore that predates the loss.
+
+## Consistency trades against both of the others
+
+Strict consistency — every read sees the latest acknowledged write, guaranteed — usually requires either routing every read and write through a single source of truth or coordinating between replicas before answering, and both of those cost latency on the happy path. Under an actual network partition, the same requirement forces a choice: answer anyway, possibly with a stale or conflicting value, or refuse to answer until the partition heals. The first favors availability, the second favors consistency, and you cannot have both at once during the partition — that boundary, and its softer everyday form, is the subject of 06.04 CAP And PACELC.
+
+The size of that cost depends entirely on what disagreement would actually mean. A "like" count that briefly disagrees between two page loads is a real eventual-consistency artifact and it costs nothing that matters. A bank balance that briefly disagrees is not acceptable at any traffic volume, at any latency savings. The two are allowed — expected — to sit at different points on the same spectrum inside the same product, which is exactly the kind of split 01.04 System Design Tradeoffs argues for instead of picking one global answer.
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Pay for a stronger guarantee when"
+  againstTitle="Accept a weaker one when"
+  forItems={[
+    "An outage or a lost write has a directly measurable cost — lost revenue, a safety issue, a contractual SLA with a real penalty attached",
+    "The next unit of the guarantee is cheap at your current scale — one more replica is a small line item next to the business it protects",
+    "A customer would discover the failure before your own monitoring would, which is a reputational cost on top of the operational one",
+    "The guarantee is genuinely load-bearing for a decision downstream — a payments system cannot defer the durability question the way a comment counter can",
+  ]}
+  againstItems={[
+    "The data tolerates staleness or a short gap with no real cost — social counts, non-critical analytics, most caches",
+    "The cost of the next nine is dominated by infrastructure the product does not otherwise need, like a second region for a single-region customer base",
+    "A slower but consistent answer would be just as acceptable as a fast one, so paying for availability under a partition buys nothing anyone asked for",
+    "The team's on-call maturity cannot yet support the operational bar the guarantee implies — buying the target on paper without the practice to hold it is theater, not reliability",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Say which of the three axes you're optimizing for before you draw anything, and attach a number to it, not an adjective: "I want 99.95% here because an outage on the checkout path costs on the order of thousands of dollars a minute in abandoned orders" is a design decision. "It should be highly available" is not — it doesn't say which of the three curves you're willing to spend money on, or how much. If your design clearly favors one axis under a partition, say so before being asked which side of CAP you landed on; naming the failure mode you accepted is worth more than getting to skip the question.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Availability, durability, and consistency are independent axes — a system can satisfy any one of them while failing the other two, so 'more reliable' is not an instruction anyone can act on",
+    "Each additional nine of availability costs roughly an order of magnitude more engineering than the one before it, while the value it delivers flattens well before the cost does",
+    "Durability is priced in independent copies of data, and the decision of how many is a step function around a specific failure you've chosen to survive, not a smooth dial",
+    "A durability failure is silent — it surfaces months later as missing data, not as a page at 2am the way an availability failure does",
+    "Strict consistency costs latency on the happy path and forces a choice under a network partition between answering wrong and not answering at all",
+    "The right target for each axis depends on what disagreement, staleness, or downtime would actually cost — the same product can and should hold different targets for its ledger and its like counter",
+  ]}
+/>

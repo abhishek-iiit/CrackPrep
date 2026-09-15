@@ -1,32 +1,85 @@
 ---
 title: "Load Shedding"
 number: "02.13"
-summary: "Load Shedding — notes in progress."
-status: draft
+summary: "Why admitting more work than a system can finish makes it do less useful work overall, and how to decide fast, cheaply, who gets turned away."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [load-shedding, admission-control, overload]
+updated: "2026-09-15"
 ---
 
-## The problem
+## The problem: a system that cannot say no eventually says no to everyone
 
-What breaks without this, and the situation that forces the decision.
+Past a certain point, admitting more work does not make a system do more work — it makes it do less. Every additional in-flight request competes for the same CPU, memory, and connections as the ones already running, so response times climb, more requests time out before finishing, clients retry the ones that timed out, and the retries add still more load on top of a system that was already over capacity. This is congestion collapse: a system pushed hard enough can end up spending most of its CPU context-switching between requests that will time out before they finish, doing strictly less useful work at 100% utilization than it would at 60%.
 
-## How it works
+The fix looks counterintuitive from inside a single request handler: reject some work on purpose, before it starts, so the work you do accept can actually finish. Load shedding is admission control applied at the point where a system decides, cheaply and quickly, whether to accept a unit of work at all — as distinct from 02.11 Backpressure, which asks a cooperating upstream to slow down. Shedding is for the boundary where the sender cannot be asked to slow down, will not, or should not be trusted to: an external client, a public API, a browser hammering retry.
 
-The mechanism, step by step.
+## Deciding when to shed
 
-## Tradeoffs
+The simplest and most defensible signal is concurrency — how many requests are in flight at once — because it connects directly to a real capacity number through Little's Law.
+
+<Formula label="Little's Law">L = λ · W</Formula>
+
+`L` is the average number of requests in the system at once, `λ` the arrival rate, and `W` the average time each spends being handled. Turn it around and it gives a concurrency limit from numbers you already have: if a service must hold p99 latency near 100 ms while sustaining 2,000 requests/second, the system should not be carrying much more than roughly 200 requests in flight at once — `L ≈ λ · W = 2000 × 0.1`. Push concurrency past that and the same law says latency has to rise to compensate, since throughput is what it is; shedding at the concurrency limit is what keeps the requests you do accept inside the latency budget instead of degrading all of them together. This is a planning-level estimate, not an exact operating threshold — real systems calibrate the limit against measurement rather than deriving it once and leaving it fixed, since `W` itself moves under load.
+
+## Shedding cheaply and in priority order
+
+<Steps>
+  <Step title="Check the gate before doing real work">
+    Compare current concurrency (or queue depth, or a CPU/error-rate signal) against the limit as the very first step in the request path — before authentication, before parsing, before touching the database. A shed decision made after the expensive parts of the request have already run has already paid most of the cost it was trying to avoid.
+  </Step>
+  <Step title="If under the limit, admit">
+    No different from the normal path.
+  </Step>
+  <Step title="If over the limit, classify before dropping">
+    Not all rejected work is equally costly to reject. A background sync job can be shed with no user-visible effect; an interactive checkout request cannot. Priority tiers, or an explicit cost estimate per request type, decide the shedding order rather than dropping whatever happens to be next.
+  </Step>
+  <Step title="Reject fast and cheap">
+    Return a `503` or `429` immediately, with as little work as possible spent producing it — no different, structurally, from the normal response, but committing to none of the expensive parts of the handler.
+  </Step>
+</Steps>
+
+| Strategy | How it decides | Cost |
+| --- | --- | --- |
+| Random drop | Shed a request at random once over the limit | Simple, but sheds equally important and unimportant work alike |
+| Priority/tier-based | Shed lowest-priority classes first (batch before interactive) | Requires every request to be classifiable up front |
+| Cost-based | Shed the most expensive requests first, e.g. an uncached search versus a cache hit | Needs a real cost estimate available before doing the work — often approximate |
+| Adaptive concurrency limit (AIMD-style) | Limit adjusts itself up when latency is healthy and down sharply when it degrades, similar in spirit to TCP congestion control | No fixed number to tune, but the limit lags real changes in capacity by design |
+
+<Callout type="gotcha">
+A load shedder placed after the expensive part of a request has already run defeats its own purpose — it still pays for the database round trip or the auth check before deciding the request was never going to be accepted. The gate has to sit as early in the path as the information it needs is available, even if that means shedding on a rougher signal than the ideal one.
+</Callout>
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Shed load when"
+  againstTitle="Rely on backpressure or queueing instead when"
+  forItems={[
+    "Callers are external or uncooperative, so there is no upstream to signal a slowdown to",
+    "The cost of finishing a request late is close to zero — a client that gets a fast, explicit rejection can retry with backoff, where a request queued for minutes just times out anyway",
+    "A concurrency or queue-depth limit derived from Little's Law shows the system is past the point where more admitted work produces more finished work",
+    "Different request classes have genuinely different importance, so shedding the low-priority ones preserves the ones that matter",
+  ]}
+  againstItems={[
+    "The producer is internal and cooperating, and can actually be slowed rather than rejected — 02.11 Backpressure is the better fit there",
+    "The overload is a brief burst that a bounded queue can absorb without breaching the latency budget",
+    "Every request is equally important and there is no defensible way to prioritize which ones to reject",
+    "Rejecting work outright is unacceptable for correctness reasons — the caller has no retry path and a dropped request is a permanent loss, not an inconvenience",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Introduce load shedding as a decision to protect throughput, not a punishment for excess traffic: "Past this concurrency limit, admitting more requests makes the system finish fewer of them, so I want to reject the excess fast and cheap rather than let everything degrade together." Be ready to say where the limit comes from — Little's Law gives a defensible starting number from a target latency and throughput — and to name the priority scheme before being asked: which requests get shed first, and why that ordering protects what actually matters. If asked about the failure mode this prevents, name congestion collapse directly: a system doing less useful work at full utilization than it would at a lower one, because most of its capacity is spent on work that will time out before finishing anyway.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "Past capacity, admitting more work does not increase throughput — it decreases it, as retries and timeouts compound into congestion collapse",
+    "Load shedding is admission control for uncooperative or external callers; backpressure is the equivalent for internal producers that can actually be slowed down",
+    "Little's Law, L = λ · W, turns a target throughput and latency into a defensible concurrency limit to shed against, though it is a planning estimate rather than a fixed threshold",
+    "The shedding check has to run before the expensive parts of a request — a rejection that happens after the database call already paid most of the cost it was meant to avoid",
+    "Not all rejected work costs the same to reject; priority or cost-based shedding preserves the traffic that matters instead of dropping at random",
+    "A fast, explicit rejection is more useful to a caller than a request queued so long it times out anyway, because the caller can retry a rejection immediately",
+  ]}
+/>

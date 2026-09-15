@@ -1,0 +1,151 @@
+---
+title: "News Feed"
+number: "02.03"
+summary: "Fan-out on write versus read, hybrid celebrity sharding, and the freshness-latency trade for the news-feed interview prompt."
+status: published
+free: true
+difficulty: deep
+estMinutes: 20
+tags: [feed, fan-out, timeline]
+updated: "2026-09-15"
+---
+
+## "Design a news feed" is a fan-out problem with a celebrity exception
+
+Every social product has one: a ordered list of posts from people you follow, refreshed when you open the app. The prompt tests whether you know that generating that list is a **fan-out** problem — one write (a new post) must reach N followers — and that N is not constant. A user with 50 followers and a user with 50 million followers are different engineering problems. Interviewers listen for whether you pick fan-out on write or fan-out on read, whether you know why pure fan-out-on-write breaks for celebrities, and what latency target makes the choice for you.
+
+## Clarify: pull, push, and how fresh "fresh" is
+
+> "I'll design the home feed: posts from followed users, reverse-chronological, paginated. Out of scope: ads insertion, 'people you may know', and ranking beyond recency. One post type — text plus optional media URL."
+
+**Functional requirements:**
+
+- Create a post (text, optional image URL)
+- Follow / unfollow a user
+- Get home feed — paginated, most recent first
+- Get a single user's profile timeline (their own posts)
+
+**Non-functional requirements — ask these:**
+
+- Feed load latency? **300 ms p99** is the usual interview answer; it pushes precomputation.
+- Feed freshness? "Within a few seconds of a followee posting" — not millisecond-real-time.
+- Consistency? Eventual is fine; stale-by-seconds beats slow.
+- Scale anchors? See capacity below.
+
+**Actors:**
+
+- **Poster** — writes infrequently (most users), occasionally goes viral
+- **Reader** — opens app 5–10×/day, scrolls feed
+- **Celebrity** — small count, enormous follower count, breaks naive fan-out
+
+## Capacity: the fan-out number is the whole design
+
+| Assumption | Value |
+|---|---|
+| DAU | 300M |
+| Average follows per user | 200 |
+| Posts per DAU per day | 0.5 (half the users post daily) |
+| Feed reads per DAU per day | 20 (open app, scroll) |
+| Celebrity count | 1k users with >1M followers |
+| Max followers (top celebrity) | 50M |
+
+**Write rate:** 300M × 0.5 posts/day ≈ **150M posts/day** ≈ **1,700 posts/s average**, ×3 peak ≈ **5k posts/s**.
+
+**Read rate:** 300M × 20 feed reads/day ≈ **6B reads/day** ≈ **70k reads/s average**, ×3 peak ≈ **200k feed reads/s**. Read-heavy — 40:1 read-to-write ratio.
+
+**Naive fan-out-on-write cost:** average post fans out to 200 followers → 5k posts/s × 200 ≈ **1M feed-row writes/s**. Doable with a distributed store, but one celebrity post at 5k posts/s × 50M followers = **250B writes** for a single tweet — that is the slide that ends fan-out-on-write as a universal strategy.
+
+**Storage for precomputed feeds:** 300M users × 200 cached post IDs × 8 bytes ≈ **480 GB** for hot feed caches if you store only IDs — manageable in a cluster of 01.03 Distributed Cache nodes. Full post payloads are not duplicated per follower; only pointers.
+
+## High-level design
+
+<Steps>
+<Step title="Create post">
+`POST /posts` → write post to posts store (sharded by `author_id`), return `post_id`. Enqueue fan-out job on 01.08 Distributed Message Queue with `{post_id, author_id, timestamp}`.
+</Step>
+<Step title="Fan-out worker — normal users">
+Worker loads author's follower list. If follower count < **10k threshold**, for each follower push `post_id` onto their feed cache (Redis sorted set, score = timestamp). This is fan-out on write.
+</Step>
+<Step title="Fan-out worker — celebrities">
+If follower count ≥ threshold, **skip fan-out**. Post lands only in the celebrity's profile timeline store. Followers will merge it at read time.
+</Step>
+<Step title="Read home feed">
+`GET /feed?cursor=`. Fetch precomputed feed list from cache (post IDs, sorted by time). Hydrate posts in batch from posts store. For followed celebrities, merge in recent celebrity posts not already in cache (fan-out on read for the hybrid path). Return merged, paginated page.
+</Step>
+<Step title="Follow / unfollow">
+Write edge to social graph store. On follow, optionally backfill last N posts from that user into follower's feed cache. On unfollow, remove their post IDs from cache.
+</Step>
+</Steps>
+
+| Store | Contents | Shard key |
+|---|---|---|
+| Posts | `{post_id, author_id, body, media_url, ts}` | `author_id` |
+| Social graph | follower / followee edges | `followee_id` for fan-out reads |
+| Feed cache | sorted set of `post_id` per user | `user_id` |
+| Profile timeline | all posts by one user | `author_id` |
+
+## Deep dive: hybrid fan-out and the celebrity threshold
+
+### Fan-out on write (push model)
+
+When user B posts, the worker immediately writes B's `post_id` into every follower's feed cache. **Read is O(1)** — just read your cache. **Write is O(followers)** — expensive for celebrities, cheap for normal users.
+
+Works when: median follower count is low (200), feed latency target is aggressive (300 ms), and you can bound cache size (keep last 500 post IDs per user, trim older).
+
+### Fan-out on read (pull model)
+
+On feed read, query posts from all followees, merge, sort, paginate. **Write is O(1).** **Read is O(followees)** — 200 parallel lookups or one `WHERE author_id IN (...)` with a merge. At 200 followees and 300 ms budget, this is tight but viable without precomputation — which is why latency target matters.
+
+Works when: follower counts are uniformly large, or posts are rare and reads are rare, or you have a strong ranking layer that must run at read time anyway.
+
+### Hybrid — what production systems actually do
+
+Pick a threshold (1k–10k followers, state your number). Below: fan-out on write. Above: fan-out on read at merge time. A normal user's post reaches 200 caches in milliseconds. A celebrity post reaches zero caches at write time; each reader merges the last few celebrity posts when they open the feed.
+
+The merge at read time: fetch your precomputed feed (499 normal posts), fetch celebrity posts from the last 24 hours for celebrities you follow (maybe 5 posts × 3 celebrities = 15 posts), merge-sort by timestamp, dedupe, return top 20.
+
+### Cache sizing and eviction
+
+Store post IDs, not full posts — hydrate in one batch query. Cap feed cache at 500–1000 entries; evict oldest. A user who has not opened the app in a month gets a partial backfill on next open (fetch recent posts from each followee) — mention as edge case, not full re-fan-out.
+
+<Callout type="warn">
+Fan-out-on-write for a celebrity does not just slow down — it creates a write storm that can take down the feed cache cluster and starve normal users' writes. The hybrid model exists specifically because the follower distribution is a power law, not a normal distribution.
+</Callout>
+
+<Tradeoff
+  forTitle="Fan-out on write when"
+  againstTitle="Fan-out on read when"
+  forItems={[
+    "Feed load p99 is under 300 ms — precomputed cache read is one round trip",
+    "Median follower count is hundreds, not millions — write amplification is bounded",
+    "Hybrid threshold catches celebrities before they generate billions of cache writes",
+    "Posts store is sharded by author; feed cache is sharded by reader — clean separation",
+    "Read volume dwarfs write volume (40:1 here) — optimize the hot path",
+  ]}
+  againstItems={[
+    "Feed ranking is complex and personal — must run at read time anyway, so precompute buys little",
+    "Followee counts are large and uniform (interest-graph product, not social graph)",
+    "Write rate is low and read rate is low — a SQL merge query is fast enough",
+    "Storage for per-user feed caches is too costly at your scale — though ID-only caches are usually cheap",
+    "Strong consistency on 'see my own post immediately' is easier with read-time assembly from posts store",
+  ]}
+/>
+
+## In an interview
+
+Open: "This is a fan-out problem. I'll use fan-out on write for normal users with a 10k follower threshold, fan-out on read for celebrities, and store only post IDs in the feed cache." Draw three boxes — posts store, social graph, feed cache — before any API detail.
+
+Follow-ups: "How do you handle a user following 5k people?" (still under threshold — fan-out on write for their posts; their read merges 5k IDs from cache, fast). "What about deletes?" (tombstone post_id in posts store; lazy removal from feed caches on read or async purge job). "How do you rank?" (say you start reverse-chron; ranking is a second pass or a separate service that re-sorts the candidate set).
+
+Volunteer the celebrity failure mode before asked: a celebrity just below threshold crosses it overnight — have a background job reclassify users and stop fan-out-on-write for them. Also: **hot key on a viral normal user** — someone jumps from 500 to 500k followers in a day; rate-limit fan-out or promote them to the celebrity path dynamically.
+
+<KeyTakeaways
+  items={[
+    "News feed generation is fan-out: one post must reach N followers, and N follows a power law",
+    "Pure fan-out-on-write breaks for celebrities — 50M followers × one post is 50M cache writes, not one",
+    "Hybrid model: fan-out on write below a follower threshold (~10k), fan-out on read above it",
+    "Feed cache stores post IDs in a sorted set, not full posts — hydrate in one batch read at serve time",
+    "At 200k feed reads/s peak and 5k posts/s, the read path dominates — precompute normal users' feeds",
+    "Monitor follower-count growth to promote users across the threshold before a write storm hits",
+  ]}
+/>

@@ -1,32 +1,93 @@
 ---
 title: "Query Understanding Pipeline"
 number: "09.07"
-summary: "Query Understanding Pipeline — notes in progress."
-status: draft
+summary: "The stages a raw query string passes through — tokenize, normalize, correct, expand, classify intent — before it can be matched against an index."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 13
+tags: [search, query-processing, tokenization, nlp]
+updated: "2026-09-15"
 ---
 
-## The problem
+## "nikee running shoez" should return something
 
-What breaks without this, and the situation that forces the decision.
+A user does not type index keys. They type whatever they type — misspelled, oddly capitalized, missing words, padded with filler, sometimes mixing languages inside one query. The inverted index underneath (09.02 Inverted Index And Posting Lists) was built by tokenizing and normalizing a corpus of documents into a fixed vocabulary of terms. Hand that index the query string exactly as typed and it only matches when the user's spelling and casing happen to already line up with the vocabulary the index was built from. Most of the time they don't, and a query any human would recognize as an obvious request for running shoes returns nothing.
 
-## How it works
+So a query is never really "looked up." It is first rewritten into something built from the same vocabulary as the index, and that rewritten form is what actually gets looked up. The gap between what the user typed and what the index can match is the entire reason a query understanding pipeline exists — every stage in it earns its place by closing part of that gap.
 
-The mechanism, step by step.
+This is also the one part of a search system that runs on every single request, on the critical path, before any ranking work even starts. A stage that adds 20 ms here is 20 ms on every query the system will ever serve, which makes latency budget as central a design constraint as accuracy.
 
-## Tradeoffs
+## The stages, in the order they actually run
+
+<Steps>
+  <Step title="Tokenize">
+    Split the raw string into discrete terms. This sounds trivial until the input isn't English: Chinese and Japanese have no whitespace between words at all, and even in English, apostrophes and hyphens are ambiguous — "state-of-the-art" and "don't" each need a rule for whether the punctuation splits the token or belongs to it. Whatever rule the indexer used on documents, the query tokenizer has to use the identical rule, or the two sides are speaking different vocabularies from the first step.
+  </Step>
+  <Step title="Normalize">
+    Case-fold, strip accents, apply Unicode normalization so visually identical characters compare equal, and reduce words toward a common root — stemming or lemmatization — so "running" and "runs" collapse toward "run" and can match a document that only contains one of those forms. 09.06 Stop Words And Champion Lists covers the companion step of dropping terms too common to carry ranking signal.
+  </Step>
+  <Step title="Correct">
+    Catch "nikee" and rewrite it to "nike" before retrieval ever runs, rather than retrieving on the misspelling and returning nothing. 09.15 Did You Mean And Spell Correction covers the mechanism — edit distance against the vocabulary, phonetic matching, or a model trained on query logs. This stage's job here is only to place correction where it belongs in the sequence: after tokenization, before expansion.
+  </Step>
+  <Step title="Expand">
+    Add terms the user didn't type but plausibly meant: synonyms ("sneakers" alongside "shoes"), variants a stemmer didn't already collapse, sometimes terms drawn from the user's own past queries. Expansion trades precision for recall — every added term is a chance to pull in a document that matches the expansion but not the original intent, which is why production systems weight expanded terms lower than the literal ones rather than treating them as equivalent.
+  </Step>
+  <Step title="Classify intent and extract entities">
+    Decide what kind of request this is — navigational ("facebook login," one right answer, rank it first and stop), informational ("how tall is the eiffel tower," where ranking many candidates matters), or transactional/local ("pizza near me," which needs a location entity pulled out of the string and routed to a specialized retrieval path rather than plain text ranking). This is also where structured entities get extracted — a brand name, a price range, a date — fields that can filter or boost rather than being scored as free text.
+  </Step>
+  <Step title="Hand off">
+    The pipeline's output isn't an answer, it's a query plan: a cleaned, weighted, possibly-expanded term list plus any extracted entities and the classified intent, handed to retrieval and ranking (09.04 TF-IDF Relevance Scoring, 09.05 BM25 Production Ranking, or a vector path per 09.13 Vector Search And Hybrid Retrieval).
+  </Step>
+</Steps>
+
+Stemming and lemmatization are worth distinguishing, because "reduce to a root" hides two different techniques with different costs:
+
+| Technique | What it does | Example | Cost |
+| --- | --- | --- | --- |
+| Stemming | Rule-based suffix stripping, no dictionary | "studies" → "studi", "running" → "run" | Cheap, sometimes produces a non-word or the wrong root |
+| Lemmatization | Dictionary- or model-based, aware of part of speech | "studies" → "study", "better" → "good" | More accurate, needs a language resource, costs more CPU per query |
+
+Most production systems use stemming for its speed and accept the occasional odd root, reserving lemmatization for languages or fields where the extra accuracy is worth the extra latency.
+
+<Callout type="gotcha">
+The sharpest failure mode here isn't any single stage — it's the two sides disagreeing. The index was built by running documents through some tokenizer, stemmer, and synonym list at index time. If the query-time pipeline changes independently — a new stemming library, an updated synonym list, a stopword added — without the index being rebuilt to match, the two vocabularies drift apart. This does not throw an error anywhere. It presents as "search got worse" for some slice of queries that used to work, because a term the query now normalizes to no longer matches what's actually in the postings. The fix is to treat the analyzer as part of the index's schema: version it, and reindex whenever it changes, the same discipline as a schema migration.
+</Callout>
+
+<Callout type="tip">
+Query traffic is heavily Zipfian — a small number of head queries account for a disproportionate share of volume, and the same normalized, expanded, classified query plan gets recomputed over and over for identical input. In a typical consumer search product, the top few hundred distinct queries by frequency can account for a double-digit percentage of total volume — an order-of-magnitude figure, not a measurement, but enough to justify caching the pipeline's output keyed on the raw query string, which absorbs most of that traffic for the cost of a hash lookup.
+</Callout>
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Add a pipeline stage when"
+  againstTitle="Keep the pipeline minimal when"
+  forItems={[
+    "Query volume is dominated by long-tail natural language rather than a handful of structured fields, so literal string matching alone misses real intent",
+    "The cost of a wrong match is a mediocre result the user scrolls past, not a wrong transaction — expansion and correction can afford to be probabilistic",
+    "You can measure a stage's effect against judged relevance (09.09 Search Evaluation Metrics) or click data (09.08 Search Feedback And Relevance Signals) and only keep what measurably helps",
+    "Each added stage's latency is small next to the retrieval and ranking work behind it, so it doesn't threaten the p99 budget (02.12 Tail Latency)",
+    "Intent classification lets you route a meaningful share of queries to a cheaper or more precise specialized path instead of general text ranking",
+  ]}
+  againstItems={[
+    "Queries already arrive structured — a filtered product search with dropdowns, an internal admin search over exact ids — where tokenization and normalization already solve the whole problem",
+    "The corpus and query vocabulary are small enough that literal or fuzzy matching already gets acceptable recall without expansion",
+    "Every added stage is one more place a query-time and index-time vocabulary mismatch can silently break matches, and there's no evaluation harness in place to catch the regression",
+    "The request path is latency-sensitive and synchronous, and a spell-correction or expansion call to another service isn't affordable in that budget",
+    "There's no way yet to validate a stage against real judged relevance, and shipping an expansion rule on intuition risks doing net harm rather than good",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Introduce this by naming the mismatch, not the stage list: "the box the user types into and the vocabulary the index was built from have to agree, and getting them to agree is a pipeline, not a single lookup." Expect to be asked what happens when correction or expansion goes wrong — the honest answer is that both trade precision for recall, and production systems weight expanded or corrected terms lower than literal ones rather than treating a guess as equal to what the user actually typed. If asked how you'd know a new synonym rule is helping, the answer is a held-out relevance set or an online experiment, not intuition. And name the index-time/query-time drift failure before you're asked about it — it's the one that actually breaks production silently.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "A raw query string cannot be matched against an index directly — it first has to be reduced to the same vocabulary the index was built from",
+    "Tokenization and normalization must be identical, rule for rule, between index time and query time, or terms stop matching with no visible error",
+    "Spelling correction and synonym expansion both trade precision for recall, which is why expanded or corrected terms are usually weighted lower than the literal ones",
+    "Intent classification and entity extraction let a query route to a specialized path — location, brand, price — instead of falling through to plain text ranking",
+    "This pipeline runs on every request before retrieval starts, so its latency budget is as much a design constraint as its accuracy",
+    "An analyzer or synonym list change is a schema change: version it and reindex, or the query-time and index-time vocabularies quietly drift apart",
+  ]}
+/>

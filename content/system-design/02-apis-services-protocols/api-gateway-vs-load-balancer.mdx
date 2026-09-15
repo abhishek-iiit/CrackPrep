@@ -1,32 +1,69 @@
 ---
 title: "API Gateway vs Load Balancer"
 number: "02.05"
-summary: "API Gateway vs Load Balancer — notes in progress."
-status: draft
+summary: "A load balancer answers 'which replica'; an API gateway answers 'which service, and are you even allowed to ask' — different questions, often one box."
+status: published
 free: true
 difficulty: core
-estMinutes: 12
+estMinutes: 11
+tags: [api-gateway, load-balancer, routing, edge]
+updated: "2026-09-15"
 ---
 
-## The problem
+## Two different questions, easy to answer with one box
 
-What breaks without this, and the situation that forces the decision.
+Once a service has more than one replica, something has to decide which replica answers a given request — that's a load balancer's entire job, and it's a narrow one. Once a system has more than one service, a different set of questions shows up at the edge: which service does this request even belong to, is the caller allowed to make it at all, and does the request need to be reshaped before anything downstream can understand it. That's an API gateway's job, and it's a broader one. At small scale it's tempting, and often fine, to answer both with the same box. The confusion starts when the system outgrows that and "load balancer" and "API gateway" keep getting used interchangeably for a component that's actually doing gateway work.
 
-## How it works
+## What a load balancer alone does
 
-The mechanism, step by step.
+A load balancer distributes traffic across a pool of replicas that all serve the *same* logical service — it doesn't know or care what the request means, only whether a given backend is healthy and which algorithm should pick it. 02.06 Load Balancers covers the algorithms and health-check mechanics; what matters here is the scope: one balancer, one backend pool, one routing question — which instance.
 
-## Tradeoffs
+Some load balancers work at L4 (TCP/UDP), forwarding packets by IP and port without ever parsing the request inside them; others work at L7, parsing HTTP far enough to route on a path or a header. L7 routing by path can look like gateway behavior, and the line genuinely blurs here — but a load balancer routing `/orders` and `/users` to different pools is still only choosing among servers based on what it read, not enforcing who's allowed to read it, reshaping the payload, or rate-limiting by caller identity.
+
+## What an API gateway adds
+
+A gateway sits in front of many services, not one pool, and takes on the concerns that don't belong to any single service's replicas:
+
+- **Authentication and authorization**, enforced once at the edge instead of reimplemented in every service behind it.
+- **Rate limiting per client**, so one caller can't starve every other caller of a shared backend — 14.13 Rate Limiter Placement And Keys and 14.14 Sliding Window Rate Limiter cover the mechanism.
+- **Routing by path or host to entirely different backend services**, not just replicas of one service.
+- **Request and response transformation** — reshaping a payload, aggregating a client's request across several backend calls into one round trip, or translating protocols, such as terminating a public REST call and issuing an internal gRPC call.
+- **TLS termination and centralized logging**, so every request crossing the edge is observable in one place instead of scattered across every service's own logs.
+
+A request in a system with both usually crosses the gateway first — authenticate, rate-limit, decide which service this is for — and only then reaches that service's own load balancer, which picks the specific healthy replica. "Which service" and "which instance" are different decisions, made by different components, and collapsing them into one box is a simplification that works until the number of services or the need for per-caller policy outgrows it.
+
+<Callout type="warn">
+A gateway that sits in front of every service becomes a single point of failure for the entire system, not just one service — an outage there takes down everything behind it, unlike a load balancer outage, which only takes down the one pool it fronts. Treat it with the redundancy of critical shared infrastructure: multiple instances behind its own load balancing, and a health story that gets tested, not assumed.
+</Callout>
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Add a dedicated API gateway when"
+  againstTitle="A load balancer alone is enough when"
+  forItems={[
+    "You have more than a handful of independently deployed services and don't want auth and rate limiting reimplemented in each one",
+    "External or third-party clients need a stable, documented edge surface that's decoupled from internal service boundaries",
+    "You need to aggregate several backend calls into one client-facing response, or translate between a public and an internal protocol",
+    "Per-client policy — rate limits, API keys, request quotas — needs to be enforced in one place rather than trusted to each service",
+  ]}
+  againstItems={[
+    "There's one service, or a small number of services with no shared cross-cutting policy to centralize",
+    "All clients are internal and already trusted, with no need for a distinct public contract",
+    "The added hop and operational surface of a gateway isn't worth it yet at the current service count",
+    "Auth and rate limiting are already handled by a shared library or sidecar per service, so a dedicated edge component would duplicate that work",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Name the split explicitly rather than drawing one box labeled "LB/gateway": "the gateway decides which service and whether the caller's allowed to ask; the load balancer behind it decides which healthy replica of that service answers." If asked when you'd introduce a gateway, tie it to 01.09 Monolith Vs Microservices — a gateway earns its place at roughly the same point splitting into services does, because it's the component that keeps cross-cutting concerns from being reimplemented once per service. Say out loud that it becomes a single point of failure the moment it sits in front of everything, so it needs its own redundancy story, not just the services behind it.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "A load balancer answers 'which replica' for one backend pool; an API gateway answers 'which service, and is this caller allowed to reach it' across many",
+    "L7 path-based routing on a load balancer can look like gateway behavior, but it stops short of auth, rate limiting, and payload transformation",
+    "A gateway centralizes authentication, per-client rate limiting, routing across services, and protocol translation so no individual service reimplements them",
+    "In a system with both, a request typically crosses the gateway first and its target service's own load balancer second — different questions, different components",
+    "A gateway in front of every service is a single point of failure for the whole system and needs redundancy proportional to that blast radius",
+    "Introducing a dedicated gateway tracks the same inflection point as splitting a monolith into services — it earns its place once cross-cutting concerns can no longer live in one codebase",
+  ]}
+/>

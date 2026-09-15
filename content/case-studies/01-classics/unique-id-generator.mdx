@@ -1,0 +1,168 @@
+---
+title: "Unique ID Generator"
+number: "01.05"
+summary: "A coordination-free numbering scheme where sortability, bit layout, and clock drift are the decisions interviewers actually score."
+status: published
+free: true
+difficulty: deep
+estMinutes: 20
+tags: [snowflake, ids, distributed-systems]
+updated: "2026-09-15"
+---
+
+## Why interviewers ask for a unique ID generator
+
+Auto-increment in a single database stops being a design the moment you shard writes or need IDs before the write commits. The prompt is small but dense: 64 bits of identity that must be unique across thousands of machines, generated at high rate, often roughly time-ordered for index locality — without a central bottleneck. It tests bit arithmetic, clock assumptions, and the difference between "unique" and "sortable" and "unguessable."
+
+## Clarify: uniqueness scope and ordering needs
+
+**Functional:**
+
+- ID format — numeric 64-bit, string, UUID?
+- Must IDs be globally unique across all services or only within one entity type?
+- Sortable by creation time — required, nice-to-have, or irrelevant?
+- Unguessable / non-enumerable — security requirement or internal only?
+- Batch generation — one at a time or allocate ranges?
+
+**Non-functional:**
+
+- Generation rate — IDs per second cluster-wide?
+- Latency per ID — microseconds vs milliseconds?
+- Availability — can the service refuse IDs if a dependency is down?
+- Clock sync — can we assume NTP-synchronized machines?
+
+**Out of scope:** embedding business metadata in the ID (tenant, region codes beyond what's needed for sharding), ID recycling.
+
+Spoken script:
+
+> "64-bit time-sortable IDs, unique across the cluster, ~10k IDs/s per machine, no central DB — I'll use a Snowflake-style layout with timestamp, datacenter, machine, and sequence bits."
+
+## Capacity: how many IDs and how fast
+
+Assumptions.
+
+| Assumption | Value |
+| --- | --- |
+| Machines generating IDs | 1,000 |
+| Peak IDs per machine per second | 10,000 |
+| Cluster peak | **10 million IDs/s** |
+| ID lifetime | 41-bit timestamp ms → ~69 years from epoch |
+| Sequence bits per ms | 12 bits → 4,096 IDs/ms per machine |
+
+**Per-machine ceiling:** 4,096/ms × 1000 ms = **4.1M IDs/s** per machine if clock ticks every ms — far above the 10k/s assumption. Headroom is intentional; sequence overflow within one millisecond is the real local limit.
+
+**Storage if persisted:** Usually IDs are not stored in the generator — they're consumed by other services. Generator state is ~8 bytes per machine (last timestamp + sequence).
+
+**Index benefit:** Time-sortable IDs keep B-tree inserts append-like on the leading edge — reduces page splits vs random UUIDs.
+
+## High-level design: Snowflake layout
+
+64-bit ID structure (classic Snowflake):
+
+| Bits | Field | Purpose |
+| --- | --- | --- |
+| 1 | Sign | Always 0 |
+| 41 | Timestamp | Milliseconds since custom epoch |
+| 5 | Datacenter ID | Up to 32 DCs |
+| 5 | Machine ID | Up to 32 machines per DC (extend if needed) |
+| 12 | Sequence | Counter per ms on this machine |
+
+**Custom epoch** (e.g. 2020-01-01) extends usable years without changing layout.
+
+| Component | Role |
+| --- | --- |
+| ID generator library (embedded) | Runs on each app server; no network hop per ID |
+| Config / provisioning | Assigns unique (datacenter_id, machine_id) per instance |
+| ZooKeeper / k8s lease (optional) | Hands out machine IDs; detects duplicate assignment |
+| Monitoring | Alerts on clock backward jump, sequence exhaustion |
+
+<Steps>
+<Step title="Generate ID (local, no I/O)">
+
+Read current timestamp in ms. If same ms as last call, increment sequence; if sequence overflows 12 bits, spin until next ms. If new ms, reset sequence to 0. If clock moved backward, refuse or wait (see deep dive). Pack bits: `(timestamp << 22) | (dc << 17) | (machine << 12) | sequence`. Return 64-bit integer.
+
+</Step>
+<Step title="Provision machine ID">
+
+On startup, worker claims an unused machine_id via coordination service lease, or receives it from config in small deployments. Duplicate machine_id with same timestamp → collision — provisioning is safety-critical.
+
+</Step>
+<Step title="Consumer uses ID">
+
+Downstream service uses ID as primary key or correlation id. No round trip to ID service — generation is embedded.
+
+</Step>
+</Steps>
+
+## Deep dive: clock drift, alternatives, and collisions
+
+### Clock backward jump
+
+NTP adjustment can move clock backward. If you blindly use the new timestamp, you might repeat (timestamp, sequence) pairs. Standard fix:
+
+- If `now < last_timestamp`, wait until `last_timestamp` (small stall) or throw / degrade
+- Some implementations use a "logical clock" bump: use `last_timestamp` and increment sequence even though wall clock moved back — bounded by sequence bits
+
+Say which you pick. Interviewers want to hear that clock sync matters.
+
+### UUID v4 vs Snowflake vs DB sequence
+
+| Approach | Sortable | Coordination | Size | Notes |
+| --- | --- | --- | --- | --- |
+| DB auto-increment | Yes | Central bottleneck | 8 B | Fine single-node |
+| UUID v4 random | No | None | 16 B | Index fragmentation |
+| UUID v7 (time-ordered) | Yes | None | 16 B | Newer standard; 128 bits |
+| Snowflake | Yes | Per-machine ID only | 8 B | Classic interview answer |
+| Range allocator | Yes | Batch lease from DB | 8 B | 1000 IDs per DB round trip |
+
+Snowflake wins the classic prompt on sortability + no per-ID network. UUID v7 is a credible modern alternative if the interviewer accepts 128 bits.
+
+### Multi-datacenter
+
+Datacenter bits prevent collision across regions without coordination at generation time — as long as (dc_id, machine_id) pairs are globally unique. Machine ID allocation must be centralized or partitioned by DC (each DC assigns 0–31 locally with disjoint dc_id).
+
+### What "unique" does not guarantee
+
+Snowflake IDs are guessable if you know the layout and approximate time — do not use them as session tokens. For public-facing opaque IDs, add random suffix or use UUID.
+
+<Callout type="tip">
+If generation rate per machine exceeds 4096/ms sustained, add sequence bits or shard into multiple generator instances per host — but 10k/s average is only ~10/ms, nowhere near the ceiling.
+</Callout>
+
+## Tradeoffs
+
+<Tradeoff
+  forTitle="Snowflake (time-sortable, embedded) when"
+  againstTitle="UUID v4 / central DB sequence when"
+  forItems={[
+    "Primary keys should be roughly time-ordered for B-tree insert performance",
+    "Millions of IDs per second across many machines with no single coordinator per ID",
+    "64-bit integer fits existing schema and JSON number safety",
+    "Datacenter and machine bits give traceability in logs",
+    "Embedded library — sub-microsecond generation, no network",
+  ]}
+  againstItems={[
+    "Opaque, unguessable public identifiers — random UUID is safer",
+    "Strict global monotonicity required — clocks drift; use central sequencer or Spanner TrueTime",
+    "Small deployment, single DB writer — auto-increment is simpler and strong",
+    "128-bit space needed to avoid any birthday collision anxiety at trillion scale",
+    "You cannot operate NTP discipline — time-based IDs become a liability",
+  ]}
+/>
+
+## In an interview
+
+Introduce by the failure of auto-increment: "Sharding the write path breaks a single DB sequence — I need local generation with global uniqueness." Draw the 64-bit layout on one line before the boxes diagram.
+
+Follow-ups: duplicate machine IDs (coordination service), leap seconds and ms vs us timestamp, converting to string for URLs (base62), and comparison to Twitter's Snowflake / Sonyflake variants. Volunteer: "The production incident is clock skew backward — IDs collide or the generator throws; I'd metric clock delta and refuse to generate until safe."
+
+<KeyTakeaways
+  items={[
+    "Clarify sortable vs opaque vs 64-bit vs 128-bit before choosing Snowflake, UUID v7, or DB sequences",
+    "Snowflake packs timestamp, datacenter, machine, and sequence into 64 bits — ~4096 IDs/ms per machine with 12 sequence bits",
+    "Generation is local and allocation-free; only machine ID provisioning needs coordination",
+    "Clock backward movement is the real failure mode — wait, bump logical clock, or refuse",
+    "Time-sortable IDs improve B-tree locality; random UUIDs fragment indexes — name the tradeoff",
+    "Cluster at 1000 machines × 10k IDs/s is 10M/s — still below per-machine sequence ceiling if ms granularity holds",
+  ]}
+/>

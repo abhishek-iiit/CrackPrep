@@ -1,32 +1,73 @@
 ---
 title: "NoSQL Decision Boundaries"
 number: "04.01"
-summary: "NoSQL Decision Boundaries — notes in progress."
-status: draft
+summary: "NoSQL is not one alternative to SQL — it is five different data models, and picking the wrong one costs more than staying relational would have."
+status: published
 free: true
-difficulty: core
-estMinutes: 12
+difficulty: intro
+estMinutes: 9
+tags: [nosql, data-modeling, decision-framework]
+updated: "2026-09-15"
 ---
 
-## The problem
+## "NoSQL" names what you rejected, not what you picked
 
-What breaks without this, and the situation that forces the decision.
+"NoSQL" is a negative definition — everything that isn't a relational database sharing one query language and one consistency model. That's not a design decision, it's the absence of one. Key-value stores, document stores, wide-column stores, and graph databases have almost nothing in common with each other beyond declining to be a relational table. Reach for "NoSQL" as an answer and you haven't answered anything; you still have to pick, from four or five families with incompatible strengths, the one whose access pattern actually matches your workload.
 
-## How it works
+Getting that pick wrong is not "a bit slower" — it's often "the query I need doesn't exist." Store a social graph in a document store and multi-hop traversal is slow, because the engine was never built to walk relationships. Store a write-heavy event stream in a database designed around multi-row transactions and joins, and every insert fights the database for guarantees nobody asked for. Getting the category wrong on day one usually means a rewrite rather than a tuning pass, because the data ends up laid out on disk for a query that isn't the one you're actually asking.
 
-The mechanism, step by step.
+## The question that comes before the family
 
-## Tradeoffs
+Before picking among key-value, document, wide-column, and graph, ask whether you need to leave relational at all. A relational database (03.01 Relational Database Design) scales further than its reputation suggests (03.10 Relational Database Scaling) and gives you ad hoc queries, joins, and multi-row transactions for free — every NoSQL family charges extra for at least one of those, or drops it. The honest reasons to leave are specific: the access pattern is fixed and known well enough to denormalize around, the write volume or dataset size has outgrown what a single primary and its read replicas can hold, the data itself doesn't fit rows well — deeply nested, sparse, or graph-shaped — or you need to trade consistency for availability at a scale where CAP (06.04 CAP And PACELC) actually bites.
+
+## Match the shape of the query to the shape of the store
+
+Each family is fast at one query shape and slow at almost everything else. That's not a limitation to work around — it's the entire reason the family exists.
+
+| Family | Strongest at | Weak at | Canonical system |
+| --- | --- | --- | --- |
+| Key-value | Single-key get/put at very high throughput and low latency | Anything that isn't "give me the value for this exact key" | Redis, DynamoDB used as KV |
+| Document | Nested, variable-shape records fetched mostly whole, with secondary indexes | Multi-document transactions, deep cross-document joins | MongoDB, Couchbase |
+| Wide-column | Sustained high-volume writes with a known row-key access pattern and sparse, wide rows | Ad hoc queries on non-key columns, cross-row aggregation | Cassandra, Bigtable, HBase |
+| Graph | Multi-hop traversal — friend-of-friend, fraud rings, permission inheritance | Full-dataset scans and aggregation | Neo4j |
+| Columnar (analytical) | Aggregating a few columns across billions of rows | Point lookups and row-level updates | Redshift, ClickHouse, BigQuery |
+
+04.02 Document Stores vs Key-Value Stores, 04.03 Columnar Stores vs Wide-Column Stores, and 04.04 Graph Database Decision Boundary each take one of these boundaries apart in more detail — this lesson is the map, those are the close-ups.
+
+<Callout type="note">
+Most production systems don't pick one NoSQL family and use it everywhere. A typical stack keeps the system of record relational, caches hot reads in a key-value store, and indexes a search-specific view separately — one store per access pattern, not one store for the whole system. The decision this lesson describes gets made once per access pattern, not once per company.
+</Callout>
 
 <Tradeoff
-  forTitle="Reach for it when"
-  againstTitle="Avoid it when"
-  forItems={["", ""]}
-  againstItems={["", ""]}
+  forTitle="Reach for a NoSQL family when"
+  againstTitle="Stay relational when"
+  forItems={[
+    "The access pattern is fixed and known well enough to denormalize the data around it instead of normalizing it and joining at read time",
+    "Write volume or dataset size has already outgrown what a well-indexed relational primary plus read replicas can hold",
+    "The data itself doesn't fit rows well — deeply nested documents, sparse wide rows, or a graph of relationships more than one or two hops deep",
+    "You can tolerate eventual consistency on at least some reads in exchange for availability during a partition",
+    "The team is willing to enforce data integrity in application code instead of getting it from foreign keys and constraints",
+  ]}
+  againstItems={[
+    "Ad hoc queries are common and you cannot predict every access pattern up front",
+    "Multi-row or multi-table transactions with real ACID guarantees are a hard requirement, not a nice-to-have",
+    "The dataset comfortably fits on a well-provisioned primary with room to add read replicas",
+    "Joins are cheap to express as-is and you'd otherwise be reimplementing them by hand in application code",
+    "The team's operational experience is relational, and the switch cost isn't paid back by a real bottleneck yet",
+  ]}
 />
 
 ## In an interview
 
-How to introduce this, and the follow-up questions it invites.
+Name the access pattern before the store. Saying "I'll use DynamoDB" before you've said what you're querying by is a guess dressed up as a decision. Say instead: "most of the traffic is a get-by-id at very high QPS, so I want a key-value store" — that's reasoning an interviewer can follow. Expect the follow-up "why not just use Postgres for this," and have a concrete answer ready: usually scale, shape, or availability, stated with a number or a query pattern attached, not "NoSQL is more scalable" as a slogan. Be ready, too, to say which consistency guarantee you're giving up and where — every one of these families gets its performance from relaxing something a relational database gives you by default.
 
-<KeyTakeaways items={["", "", ""]} />
+<KeyTakeaways
+  items={[
+    "NoSQL is a rejection of the relational model, not a single alternative to it — you still choose among key-value, document, wide-column, graph, and columnar-analytical stores, each suited to a different query shape.",
+    "Leave relational only for a specific reason: a fixed access pattern to denormalize around, scale beyond what sharded Postgres or MySQL can hold, data that doesn't fit rows, or availability under partition that CAP forces you to trade for.",
+    "Key-value stores are fastest at exactly one operation — get or put by exact key — and slower than the alternatives at everything else.",
+    "Wide-column and columnar stores share a name fragment and almost nothing else: one is an LSM-backed sparse row store built for high-throughput writes, the other is a column-oriented analytical format built for scanning few columns across many rows.",
+    "Production systems usually run several of these side by side, one store per access pattern, rather than replacing a relational database wholesale.",
+    "Picking the wrong family is expensive precisely because the data gets laid out on disk for a query pattern that isn't the one you end up needing.",
+  ]}
+/>
