@@ -53,7 +53,8 @@ export function SearchPalette({ publishedCount }: { publishedCount: number }) {
     fetchAttempted.current = true;
     let cancelled = false;
     setLoadError(false);
-    fetch("/search-index.json")
+    const base = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
+    fetch(`${base}/search-index.json`)
       .then((res) => {
         if (!res.ok) throw new Error(`search index ${res.status}`);
         return res.json();

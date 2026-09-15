@@ -7,7 +7,7 @@
     "predev": "npm run content:index",
     "prebuild": "npm run content:index",
     "build": "next build",
-    "start": "next start",
+    "start": "npx --yes serve@14 out -l 3000",
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",

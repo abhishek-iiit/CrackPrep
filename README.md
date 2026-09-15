@@ -34,10 +34,14 @@ See `.env.example`. Both are optional in development:
 - `NEXT_PUBLIC_SITE_URL` — absolute origin used to build the sitemap,
   `robots.txt`, and JSON-LD. Defaults to `http://localhost:3000` in
   development and test, but a **production build with it unset fails at
-  module load** (`lib/site.ts`) rather than shipping 197 sitemap entries
+  module load** (`lib/site.ts`) rather than shipping sitemap entries
   pointing at localhost. So `npm run build`, `npm run verify` and
   `npm run verify:all` need it set; `npm run dev` and `npm test` do not.
   (`npm run test:e2e` supplies it itself — see `playwright.config.ts`.)
+  For this repo on GitHub Pages:
+  `https://abhishek-iiit.github.io/CrackPrep`.
+- `NEXT_PUBLIC_BASE_PATH` — path prefix when the site is not at the domain
+  root. Leave empty for local/dev. CI sets `/CrackPrep` for Pages.
 - `NEXT_PUBLIC_SUBSCRIBE_ENDPOINT` — where the landing page's email-capture
   form posts. If unset, the form does not fake a success state; it renders an
   honest "signup is not configured yet" message instead
@@ -48,9 +52,9 @@ See `.env.example`. Both are optional in development:
 | Script | What it does |
 |---|---|
 | `npm run dev` | Next.js dev server. |
-| `npm run build` | Production build. `prebuild` (below) runs first automatically. |
+| `npm run build` | Static export to `out/`. `prebuild` (below) runs first automatically. |
 | `npm run prebuild` / `npm run predev` | Regenerates `public/search-index.json` from published lessons. Runs automatically before `build` and `dev`. |
-| `npm start` | Serves the production build from `.next/`. Run `build` first. |
+| `npm start` | Serves `out/` on port 3000 (static). Run `build` first. |
 | `npm run lint` | ESLint, zero errors and zero warnings required. |
 | `npm run typecheck` | `tsc --noEmit`. |
 | `npm test` | Vitest unit/component/content-layer suite (single run). |
@@ -223,6 +227,32 @@ deliberately — the lesson sidebar's payload weight, a latent heading-slug
 divergence, some duplication, and dead code. Each entry names a line and says
 what would turn it into a real bug. Read it before starting work in any of
 those areas.
+
+## Deploy to GitHub Pages
+
+Hosted from [`abhishek-iiit/CrackPrep`](https://github.com/abhishek-iiit/CrackPrep).
+The site is a static export (`output: "export"` in `next.config.ts`). Pushing
+to `main` runs `.github/workflows/deploy-pages.yml`, which builds with:
+
+- `NEXT_PUBLIC_SITE_URL=https://abhishek-iiit.github.io/CrackPrep`
+- `NEXT_PUBLIC_BASE_PATH=/CrackPrep`
+
+and publishes `out/` to **https://abhishek-iiit.github.io/CrackPrep**.
+
+One-time repo setup:
+
+1. **Settings → Pages → Build and deployment → Source:** GitHub Actions.
+2. Workflow already requests `pages: write` and `id-token: write`.
+
+Local preview of a Pages-shaped build:
+
+```bash
+NEXT_PUBLIC_SITE_URL=https://abhishek-iiit.github.io/CrackPrep \
+NEXT_PUBLIC_BASE_PATH=/CrackPrep \
+npm run build && npm start
+```
+
+Then open `http://localhost:3000/CrackPrep/`.
 
 ## Project structure
 
