@@ -163,7 +163,7 @@ Reconciliation is read-heavy and batch — run off the primary hot path. Finance
 
 ### Status API and webhooks
 
-Merchants poll `GET /payments/{id}` or receive webhooks. Webhooks are **at-least-once** — merchant must dedupe by event id. Your outbox pattern: commit ledger, then enqueue webhook delivery with retry; signing payloads so merchants trust origin.
+Merchants poll `GET /payments/\{id\}` or receive webhooks. Webhooks are **at-least-once** — merchant must dedupe by event id. Your outbox pattern: commit ledger, then enqueue webhook delivery with retry; signing payloads so merchants trust origin.
 
 <Tradeoff
   forTitle="Synchronous ledger commit + PSP call when"

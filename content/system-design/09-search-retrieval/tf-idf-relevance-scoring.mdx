@@ -42,7 +42,7 @@ A term in every document has `df ≈ N` and IDF near 0 — it barely moves the s
 
 **Document score** for query `Q` is usually the sum over query terms (sometimes normalized by document length or turned into cosine similarity between query and document vectors):
 
-<Formula label="Query–document score">score(Q, d) = Σ_{t ∈ Q} tf(t, d) · idf(t)</Formula>
+<Formula label="Query–document score">score(Q, d) = Σ_&#123;t ∈ Q&#125; tf(t, d) · idf(t)</Formula>
 
 Cosine similarity treats documents and queries as vectors in term space and scores by the angle between them — which adds document-length normalization automatically. Sum-of-TF-IDF without length normalization tends to prefer longer documents that simply have more chances to accumulate term occurrences; that bias is one of the reasons BM25 exists.
 

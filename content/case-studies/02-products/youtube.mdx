@@ -71,7 +71,7 @@ Workers pull jobs, read raw file, encode each rendition with FFmpeg-style pipeli
 A packaging step writes an HLS (`.m3u8`) or DASH (`.mpd`) manifest listing segment URLs per rendition. The master manifest points to rendition-specific media playlists. Store manifests alongside segments in the CDN origin bucket.
 </Step>
 <Step title="Playback">
-Viewer hits `GET /watch?v={id}`. API returns metadata plus manifest URL. Video player fetches master manifest from CDN, picks initial rendition based on estimated bandwidth, downloads segments sequentially. Player switches renditions mid-stream when buffer health changes — that is ABR.
+Viewer hits `GET /watch?v=\{id\}`. API returns metadata plus manifest URL. Video player fetches master manifest from CDN, picks initial rendition based on estimated bandwidth, downloads segments sequentially. Player switches renditions mid-stream when buffer health changes — that is ABR.
 </Step>
 </Steps>
 
@@ -111,7 +111,7 @@ The player estimates throughput from segment download times and steps up or down
 
 ### CDN placement
 
-Segments are immutable (named by hash or `{video_id}/{rendition}/{seq}.ts`). Immutable content gets aggressive CDN caching — `Cache-Control: max-age=31536000`. Manifests for unpublished videos are private; published manifests cache with shorter TTL if you allow mid-flight re-transcode (usually you do not — publish is immutable).
+Segments are immutable (named by hash or `\{video_id\}/\{rendition\}/\{seq\}.ts`). Immutable content gets aggressive CDN caching — `Cache-Control: max-age=31536000`. Manifests for unpublished videos are private; published manifests cache with shorter TTL if you allow mid-flight re-transcode (usually you do not — publish is immutable).
 
 Origin shield: one CDN node per region pulls from origin on miss, so origin sees one request per segment per region, not one per edge POP.
 

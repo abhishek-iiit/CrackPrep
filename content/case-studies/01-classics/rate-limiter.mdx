@@ -80,7 +80,7 @@ Assumptions — label them.
 <Steps>
 <Step title="Request arrives at gateway">
 
-Extract API key from header. Look up tier limits from local cache (refreshed every 30 s from config). Build Redis key: `rl:{rule_id}:{api_key}`.
+Extract API key from header. Look up tier limits from local cache (refreshed every 30 s from config). Build Redis key: `rl:\{rule_id\}:\{api_key\}`.
 
 </Step>
 <Step title="Token bucket check (Redis Lua)">

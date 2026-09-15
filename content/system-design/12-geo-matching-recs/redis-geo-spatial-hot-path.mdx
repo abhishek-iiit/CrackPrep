@@ -38,7 +38,7 @@ Limits that shape the design:
 
 <Steps>
   <Step title="Client or ingest service writes location">
-    Authenticated device sends `(lat, lon, timestamp)`. Ingest validates, rate-limits, and decides the Redis key — typically `geo:drivers:{city}` or a consistent-hash shard — then `GEOADD`s the member. Optionally set a per-member heartbeat key with TTL for liveness.
+    Authenticated device sends `(lat, lon, timestamp)`. Ingest validates, rate-limits, and decides the Redis key — typically `geo:drivers:\{city\}` or a consistent-hash shard — then `GEOADD`s the member. Optionally set a per-member heartbeat key with TTL for liveness.
   </Step>
   <Step title="Serve nearby from Redis">
     Dispatch or consumer APIs call `GEOSEARCH` with radius and `COUNT`. Apply business filters in the app layer (vehicle type, capacity) using a side hash or a parallel cache of attributes. Do not stuff large JSON blobs into the geo member name.

@@ -90,10 +90,10 @@ State these as assumptions — round numbers, order-of-magnitude.
     If author has fewer than ~100k followers (threshold you pick and defend), enqueue a job that appends post id to each follower's timeline inbox. If above threshold, skip mass push — followers merge this author's recent posts at read time. Same split as 02.03 News Feed.
   </Step>
   <Step title="Feed read: one inbox range + small celebrity merge">
-    Load `timeline:{userId}` for the newest page of post ids. Fetch recent posts from the handful of high-degree accounts the viewer follows (cached author-recent lists). Merge-sort by time or rank score, hydrate post bodies and media URLs in one batch, return page.
+    Load `timeline:\{userId\}` for the newest page of post ids. Fetch recent posts from the handful of high-degree accounts the viewer follows (cached author-recent lists). Merge-sort by time or rank score, hydrate post bodies and media URLs in one batch, return page.
   </Step>
   <Step title="Photo view: CDN URL, not origin on every scroll">
-    Client requests `https://cdn.example/photos/{id}_feed.jpg`. CDN hits origin on miss; thereafter serves from edge. Upload path writes once; read path scales with egress, not app servers.
+    Client requests `https://cdn.example/photos/\{id\}_feed.jpg`. CDN hits origin on miss; thereafter serves from edge. Upload path writes once; read path scales with egress, not app servers.
   </Step>
 </Steps>
 
@@ -118,7 +118,7 @@ A phone photo is multi-megabyte; your feed card wants a 1080px JPEG and a 150px 
 
 1. Client asks post service for upload credentials.
 2. Client PUTs directly to object storage (or through a media ingress that streams to storage).
-3. Worker reads original, writes `{id}_thumb`, `{id}_feed`, `{id}_full` back to object storage.
+3. Worker reads original, writes `\{id\}_thumb`, `\{id\}_feed`, `\{id\}_full` back to object storage.
 4. Post metadata stores variant URLs; CDN sits in front.
 
 Do not serve originals on scroll — egress cost and latency both explode. Do not run image processing on the publish request thread — a spike of uploads becomes a spike of CPU-bound API latency.

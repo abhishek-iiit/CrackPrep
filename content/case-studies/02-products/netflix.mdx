@@ -107,7 +107,7 @@ When a new episode drops, millions of clients request the same first segments si
 
 Layers that survive it:
 
-- **Edge cache** — segments are immutable (content-addressed by `{title_id}/{bitrate}/{seq}`); long TTL is safe.
+- **Edge cache** — segments are immutable (content-addressed by `\{title_id\}/\{bitrate\}/\{seq\}`); long TTL is safe.
 - **Origin shield / mid-tier** — one POP per region collapses misses before they hit the central origin bucket.
 - **Signed URLs** — playback API returns time-limited URLs so the CDN cannot serve anonymous hotlinking; auth stays off the byte path where possible.
 

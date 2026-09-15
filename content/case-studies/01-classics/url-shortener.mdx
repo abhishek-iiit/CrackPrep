@@ -81,7 +81,7 @@ Redirect and create have different consistency needs. A follower hitting a link 
 
 | Component | Role |
 | --- | --- |
-| API / redirect servers | Stateless; handle POST /urls and GET /{code} |
+| API / redirect servers | Stateless; handle POST /urls and GET /&#123;code&#125; |
 | ID service | Generates unique short codes (or encodes a counter) |
 | SQL primary | Durable mapping: short_code → long_url, created_at, expiry |
 | Redis cache | Hot path: code → long_url; ~99%+ hit rate at steady state |
@@ -94,7 +94,7 @@ Redirect and create have different consistency needs. A follower hitting a link 
 Client sends `{ "long_url": "https://..." }`. API validates URL (length, scheme, blocklist). ID service returns a unique code — base62 encoding of a 64-bit ID or a random 7-char string with collision retry. Insert row in SQL primary. Optionally warm Redis with the new mapping. Return `{ "short_url": "https://short.ly/abc1234" }`. Target p99 under 200 ms; this path is not cache-critical.
 
 </Step>
-<Step title="Redirect — GET /{code}">
+<Step title="Redirect — GET /\{code\}">
 
 Request hits CDN first. On miss, redirect server checks Redis. On hit, issue 301 with `Location` header — sub-millisecond inside the datacenter. On miss, read SQL (or read replica), populate Redis with TTL, redirect. Never block redirect on analytics — emit an async event to the queue after responding.
 
@@ -120,7 +120,7 @@ Pick one and say why. For a classic interview, counter + base62 is the cleanest 
 
 ### Cache key design and invalidation
 
-Key: `url:{code}` → long URL string. TTL: match link expiry or a cap (e.g. 24 h) so deleted links fall out. On delete/block: delete Redis key synchronously before acknowledging ops — stale cache here means serving a banned URL. CDN 301 caching is harder to purge; use shorter CDN TTL (minutes) for links ops might block, or 302 if instant revocation matters more than edge performance.
+Key: `url:\{code\}` → long URL string. TTL: match link expiry or a cap (e.g. 24 h) so deleted links fall out. On delete/block: delete Redis key synchronously before acknowledging ops — stale cache here means serving a banned URL. CDN 301 caching is harder to purge; use shorter CDN TTL (minutes) for links ops might block, or 302 if instant revocation matters more than edge performance.
 
 ### Database schema and indexing
 

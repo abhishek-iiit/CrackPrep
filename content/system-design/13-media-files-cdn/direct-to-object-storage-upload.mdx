@@ -22,7 +22,7 @@ Direct upload is not "give the world a public bucket". The control plane stays y
 
 - **Authenticate the user** and authorise that they may create an object of this type/size.
 - **Mint a short-lived credential** — a pre-signed URL (PUT/POST), a post policy, or a temporary STS token scoped to one key prefix.
-- **Choose the object key** — never trust the client to pick a final public path; use opaque ids (`uploads/{userId}/{uuid}`).
+- **Choose the object key** — never trust the client to pick a final public path; use opaque ids (`uploads/\{userId\}/\{uuid\}`).
 - **Enforce constraints** in the signature where the store allows: max size, `Content-Type` prefix, expiry (minutes, not days).
 - **Register metadata** in your database: upload id, owner, status=`pending`, intended purpose.
 - **Confirm completion** via client callback, S3 event notification, or head-object check — then mark `ready` and kick processing (virus scan, image variants, transcoding).
@@ -42,7 +42,7 @@ Skip any one of those and you get either an open write hole or orphaned bytes yo
     Retries are cheap and resumable at the HTTP layer. App servers see no body traffic.
   </Step>
   <Step title="Completion signal">
-    Client calls `POST /uploads/{id}/complete`, and/or the bucket emits an `ObjectCreated` event your worker consumes. Prefer verifying with `HeadObject` (size, etag) rather than trusting the client alone.
+    Client calls `POST /uploads/\{id\}/complete`, and/or the bucket emits an `ObjectCreated` event your worker consumes. Prefer verifying with `HeadObject` (size, etag) rather than trusting the client alone.
   </Step>
   <Step title="Promote and process">
     Mark ready, enqueue image pipeline (13.02) or video transcoder (13.05), move/copy from an untrusted `incoming/` prefix to a `clean/` prefix after scanning if that is your threat model.

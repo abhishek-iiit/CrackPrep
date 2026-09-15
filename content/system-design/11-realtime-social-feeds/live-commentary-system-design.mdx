@@ -43,7 +43,7 @@ On the read/fan-out side, 500k clients receiving each comment is 500k × 170 ≈
     Each realtime server holds a subset of sockets, subscribed by room. Pub/sub delivers once per server (or per shard), then locally to sockets — not once per global viewer from the writer. Scale gateways horizontally; shard rooms across pub/sub partitions if one channel's throughput saturates a node.
   </Step>
   <Step title="Catch-up uses a recent buffer, not a full table scan">
-    On join or reconnect, clients fetch `ZRANGE room:{id}:recent` by id/time (last N comments or last T minutes), then attach to the live stream and dedupe by id. Deep history ("load earlier") goes to cold storage with keyset pagination (04.12 Keyset Pagination), not to the hot path.
+    On join or reconnect, clients fetch `ZRANGE room:\{id\}:recent` by id/time (last N comments or last T minutes), then attach to the live stream and dedupe by id. Deep history ("load earlier") goes to cold storage with keyset pagination (04.12 Keyset Pagination), not to the hot path.
   </Step>
 </Steps>
 

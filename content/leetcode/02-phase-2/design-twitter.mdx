@@ -25,7 +25,7 @@ Store:
 
 `postTweet` appends to the user's list — O(1). `follow` / `unfollow` mutate a set.
 
-`getNewsFeed` merges timelines from `{userId} ∪ followees` like 01.43 Merge K Sorted Lists: each list is sorted by tweetId ascending (older first). Use a max-heap keyed by tweetId (negate for min-heap simulation) — pop 10 times, each time advancing that user's pointer.
+`getNewsFeed` merges timelines from `\{userId\} ∪ followees` like 01.43 Merge K Sorted Lists: each list is sorted by tweetId ascending (older first). Use a max-heap keyed by tweetId (negate for min-heap simulation) — pop 10 times, each time advancing that user's pointer.
 
 With at most ~500 followees and k = 10 output, heap merge is O(500 log 500) worst case per feed — acceptable at 10⁴ ops. A simpler interview variant collects all heads and sorts — fine when follow count is small.
 

@@ -44,7 +44,7 @@ Who reacted lists ("Liked by …") are queries on this edge table (or a cached s
 
 ## Counts are denormalized on purpose
 
-A `posts.like_count` column, a Redis counter keyed by `post:{id}:likes`, or per-type counters (`love_count`, …) exist so feed hydration does not `COUNT(*)` the edges for every post in a timeline page. Feed generation in 11.07 Feed Generation Push Pull Hybrid already hydrates dozens of posts per open — each hydration paying a COUNT is how the reactions table becomes the site's busiest read.
+A `posts.like_count` column, a Redis counter keyed by `post:\{id\}:likes`, or per-type counters (`love_count`, …) exist so feed hydration does not `COUNT(*)` the edges for every post in a timeline page. Feed generation in 11.07 Feed Generation Push Pull Hybrid already hydrates dozens of posts per open — each hydration paying a COUNT is how the reactions table becomes the site's busiest read.
 
 <Steps>
   <Step title="Write the edge first, with the uniqueness guarantee">

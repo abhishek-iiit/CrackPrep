@@ -57,7 +57,7 @@ Ask: "One SKU or a few?" "Payment now or authorize-later?" Payment timing determ
 <Steps>
 <Step title="Virtual waiting room absorbs the burst">
 
-At T-0, **CDN-served sale page** enables the Buy button. Clicks hit an **API Gateway** with **01.02 Rate Limiter** — per-IP and per-user token bucket (e.g. 5 attempts/min) to cut bot noise. Gateway forwards to **Queue Service** which assigns a **position token** (Redis INCR on `sale:{sku}:queue`) and returns `{ status: queued, position: 8421 }` or `{ status: admitted, checkout_token }` if under an **admission cap** (e.g. 2,000 concurrent checkouts — 4× inventory to absorb payment failures).
+At T-0, **CDN-served sale page** enables the Buy button. Clicks hit an **API Gateway** with **01.02 Rate Limiter** — per-IP and per-user token bucket (e.g. 5 attempts/min) to cut bot noise. Gateway forwards to **Queue Service** which assigns a **position token** (Redis INCR on `sale:\{sku\}:queue`) and returns `{ status: queued, position: 8421 }` or `{ status: admitted, checkout_token }` if under an **admission cap** (e.g. 2,000 concurrent checkouts — 4× inventory to absorb payment failures).
 
 </Step>
 
@@ -69,7 +69,7 @@ Client polls or receives WebSocket push when admitted. `POST /v1/checkout { sku,
 
 <Step title="Atomic decrement in Redis">
 
-Inventory Service holds **available count** in Redis: `DECR sale:{sku}:stock` (initialized to 500 before sale). Redis **DECR is atomic**. Result ≥ 0 → **success**, create order row async, return 200. Result &lt; 0 → **INCR back** (undo), return 409 sold-out. This is **O(1)** regardless of contention — the interviewer's preferred hot-path.
+Inventory Service holds **available count** in Redis: `DECR sale:\{sku\}:stock` (initialized to 500 before sale). Redis **DECR is atomic**. Result ≥ 0 → **success**, create order row async, return 200. Result &lt; 0 → **INCR back** (undo), return 409 sold-out. This is **O(1)** regardless of contention — the interviewer's preferred hot-path.
 
 </Step>
 

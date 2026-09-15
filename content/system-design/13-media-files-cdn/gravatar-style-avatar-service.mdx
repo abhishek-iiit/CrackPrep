@@ -12,7 +12,7 @@ updated: "2026-09-15"
 
 ## Avatars are a caching problem wearing a face
 
-Almost every product needs a small square image for a user. The naive path — `/api/users/{id}/avatar` hitting an app server on every comment render — turns profile photos into a latency and auth burden on the hottest HTML and JSON paths. Gravatar's enduring idea is simpler: **an avatar is a URL derived from an identity hash**, served as a static object from a CDN, with a deterministic default when nothing was uploaded.
+Almost every product needs a small square image for a user. The naive path — `/api/users/\{id\}/avatar` hitting an app server on every comment render — turns profile photos into a latency and auth burden on the hottest HTML and JSON paths. Gravatar's enduring idea is simpler: **an avatar is a URL derived from an identity hash**, served as a static object from a CDN, with a deterministic default when nothing was uploaded.
 
 You do not have to outsource to Gravatar to steal the shape. Many systems build an internal twin: hash email or user id → object key → CDN.
 
@@ -40,10 +40,10 @@ The browser and CDN treat this like any other immutable-ish static file. Comment
     Eager-generate square crops at the allowlisted sizes (and maybe WebP+JPEG). Avatars are hot and few-variant — a good eager case from 13.02.
   </Step>
   <Step title="Publish under the hash key">
-    Write to `avatar/{hash}/80.webp` etc., or one master plus CDN presets. Update `avatar_version` if you use versioned URLs.
+    Write to `avatar/\{hash\}/80.webp` etc., or one master plus CDN presets. Update `avatar_version` if you use versioned URLs.
   </Step>
   <Step title="Invalidate or version">
-    Either `?v={version}` on the URL your API returns, or short TTL plus purge. Version query params are the reliable option.
+    Either `?v=\{version\}` on the URL your API returns, or short TTL plus purge. Version query params are the reliable option.
   </Step>
 </Steps>
 

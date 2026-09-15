@@ -62,7 +62,7 @@ Assumptions.
 
 | Component | Role |
 | --- | --- |
-| API servers | POST /pastes, GET /pastes/{id} |
+| API servers | POST /pastes, GET /pastes/&#123;id&#125; |
 | SQL DB | paste_id, created_at, expiry_at, size, storage_key, content_type |
 | Object store (S3) | Blob keyed by paste_id or storage_key |
 | Redis (optional) | Cache hot paste bodies or metadata |
@@ -71,10 +71,10 @@ Assumptions.
 <Steps>
 <Step title="Create — POST /pastes">
 
-Validate size ≤ 10 MB. Generate paste_id (01.05-style short base62 or UUID). Upload body to object store `pastes/{id}`. Insert metadata row with expiry. Return URL `pastebin.com/{id}`. If object upload succeeds but DB insert fails, delete orphan object (or reconcile job).
+Validate size ≤ 10 MB. Generate paste_id (01.05-style short base62 or UUID). Upload body to object store `pastes/\{id\}`. Insert metadata row with expiry. Return URL `pastebin.com/\{id\}`. If object upload succeeds but DB insert fails, delete orphan object (or reconcile job).
 
 </Step>
-<Step title="Read — GET /pastes/{id}">
+<Step title="Read — GET /pastes/\{id\}">
 
 Load metadata from SQL (or cache). If expired, 404. Fetch object from store; stream to client with `Content-Type: text/plain`. Cache small pastes (&lt; 64 KB) in Redis with TTL = min(time-to-expiry, 1 h).
 

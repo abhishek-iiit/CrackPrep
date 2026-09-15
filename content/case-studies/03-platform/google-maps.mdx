@@ -70,7 +70,7 @@ Merge, **rank by distance × text relevance × popularity**, return top 20. Hot 
 
 <Step title="Map tile path">
 
-Client computes visible tile coordinates at zoom level z and requests `GET /tiles/v3/{z}/{x}/{y}.pbf`. Request goes to **CDN** — cache hit returns protobuf vector tile directly. Miss hits **Tile Origin** which reads pre-rendered tiles from **object storage** (S3/GCS). Tiles are **built offline** by a map pipeline from OpenStreetMap-style source data; version in the URL path enables instant CDN invalidation on deploy.
+Client computes visible tile coordinates at zoom level z and requests `GET /tiles/v3/\{z\}/\{x\}/\{y\}.pbf`. Request goes to **CDN** — cache hit returns protobuf vector tile directly. Miss hits **Tile Origin** which reads pre-rendered tiles from **object storage** (S3/GCS). Tiles are **built offline** by a map pipeline from OpenStreetMap-style source data; version in the URL path enables instant CDN invalidation on deploy.
 
 </Step>
 

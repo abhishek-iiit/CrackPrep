@@ -44,7 +44,7 @@ On publish, look up the author's follower list and append the post id (plus enou
     Batch inserts where the store allows it. Cap concurrency per celebrity so one author cannot monopolize the cluster. 08.09 Fanout Patterns covers the queue and worker shape; the feed-specific constraint is ordering and truncation of each inbox.
   </Step>
   <Step title="Home timeline read is a range on one key">
-    `GET timeline:{userId}` for the newest page, then hydrate post bodies in a batch. Latency is dominated by one list read plus a multi-get — not by the follow graph.
+    `GET timeline:\{userId\}` for the newest page, then hydrate post bodies in a batch. Latency is dominated by one list read plus a multi-get — not by the follow graph.
   </Step>
 </Steps>
 

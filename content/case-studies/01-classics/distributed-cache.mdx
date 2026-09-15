@@ -80,7 +80,7 @@ Assumptions.
 <Steps>
 <Step title="Read — cache-aside">
 
-App computes key `entity:{type}:{id}`. GET from Redis shard. On hit, deserialize and return. On miss, query DB (replica OK if staleness allowed), populate cache with SET + EX TTL, return. Use singleflight or request coalescing on hot misses so one DB query serves a thousand concurrent misses for the same key.
+App computes key `entity:\{type\}:\{id\}`. GET from Redis shard. On hit, deserialize and return. On miss, query DB (replica OK if staleness allowed), populate cache with SET + EX TTL, return. Use singleflight or request coalescing on hot misses so one DB query serves a thousand concurrent misses for the same key.
 
 </Step>
 <Step title="Write — invalidate, don't update">
@@ -107,7 +107,7 @@ A hot key expires; 10,000 requests miss simultaneously and hammer the DB. Mitiga
 
 - **Jitter on TTL** — expire keys at random offset within ±10% so they don't all die at once
 - **Probabilistic early refresh** — before expiry, one request in N refreshes in background
-- **Lock on miss** — first miss acquires `SETNX lock:{key}`; others wait or serve slightly stale
+- **Lock on miss** — first miss acquires `SETNX lock:\{key\}`; others wait or serve slightly stale
 
 Name one in the interview; jitter is the easiest to explain in thirty seconds.
 

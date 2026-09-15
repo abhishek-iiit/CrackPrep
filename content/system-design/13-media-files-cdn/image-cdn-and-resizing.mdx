@@ -20,9 +20,9 @@ An **image CDN** (or image-aware origin shield) sits in the middle: store one or
 
 Common patterns:
 
-- **Path-based:** `/img/{id}/w400/h300/fit-cover.webp`
-- **Query-based:** `/img/{id}?w=400&h=300&fit=cover&fm=webp`
-- **Preset-based:** `/img/{id}/thumb` where `thumb` is a server-defined recipe (safest against parameter abuse)
+- **Path-based:** `/img/\{id\}/w400/h300/fit-cover.webp`
+- **Query-based:** `/img/\{id\}?w=400&h=300&fit=cover&fm=webp`
+- **Preset-based:** `/img/\{id\}/thumb` where `thumb` is a server-defined recipe (safest against parameter abuse)
 
 Presets are the usual production preference for user-generated content: clients cannot ask for `w=8000` and turn your CPU into a free render farm. Open parameter spaces need hard caps, allowlists, and signed URLs.
 

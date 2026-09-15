@@ -40,9 +40,9 @@ Judgments are usually graded (0 irrelevant … 3 perfect) or binary. Metrics dif
 
 **DCG** sums `gain(rel_i) / log2(i+1)` over positions `i` in the result list — lower ranks contribute less. **nDCG** divides by the DCG of the ideal ordering of the same judgments, so scores sit in [0, 1] and can be compared across queries with different amounts of relevant material.
 
-<Formula label="Discounted cumulative gain">DCG@k = Σ_{i=1..k} (2^{rel_i} − 1) / log2(i + 1)</Formula>
+<Formula label="Discounted cumulative gain">DCG@k = Σ_&#123;i=1..k&#125; (2^&#123;rel_i&#125; − 1) / log2(i + 1)</Formula>
 
-(The `2^{rel} − 1` gain is a common graded formulation; some setups use `rel_i` directly. State which you use.)
+(The `2^\{rel\} − 1` gain is a common graded formulation; some setups use `rel_i` directly. State which you use.)
 
 **nDCG@k** = DCG@k / IDCG@k. Report at the depth users actually see — nDCG@10 for a ten-blue-link page, nDCG@3 for a mobile product grid. Quoting nDCG@1000 when the UI shows three cards optimizes a fantasy product.
 

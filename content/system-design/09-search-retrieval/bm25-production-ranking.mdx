@@ -24,7 +24,7 @@ BM25 (Best Match 25) is the family of ranking functions that fixes both with two
 
 For query `Q` and document `d`, BM25 sums a contribution per query term `t`:
 
-<Formula label="BM25">score(Q, d) = Σ_{t ∈ Q} idf(t) · (f(t,d) · (k1 + 1)) / (f(t,d) + k1 · (1 − b + b · |d|/avgdl))</Formula>
+<Formula label="BM25">score(Q, d) = Σ_&#123;t ∈ Q&#125; idf(t) · (f(t,d) · (k1 + 1)) / (f(t,d) + k1 · (1 − b + b · |d|/avgdl))</Formula>
 
 Where:
 

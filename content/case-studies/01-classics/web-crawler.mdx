@@ -139,7 +139,7 @@ Crawling without per-host limits is how you get blocked and how you DDoS small s
 
 ## In an interview
 
-Open with politeness: "I'll cap each domain at one request per second and partition the frontier by hostname." Draw seeds → frontier → scheduler → fetcher → {storage, link extractor → frontier}.
+Open with politeness: "I'll cap each domain at one request per second and partition the frontier by hostname." Draw seeds → frontier → scheduler → fetcher → &#123;storage, link extractor → frontier&#125;.
 
 Follow-ups: detect infinite URL spaces (calendar pagination — max depth or URL pattern denylist), DNS failures (cache negative), and distributed Bloom filter (partition by hash of URL, or one big filter per datacenter with duplicate fetch cost). Volunteer: "Bloom false positive means we skip a unseen URL — tune bits per URL or confirm positives in DB; the failure mode is incomplete crawl, not crash."
 

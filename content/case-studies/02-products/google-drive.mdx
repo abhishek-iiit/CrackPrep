@@ -83,13 +83,13 @@ Client calls `POST /files` with name, parent folder, size, content hash if known
 Client uploads chunks in parallel to object storage (S3-style). Each chunk gets an ETag. On failure, retry that chunk only — not the whole file. Client tracks completed part numbers locally for resume.
 </Step>
 <Step title="Upload complete — commit">
-Client calls `POST /files/{id}/complete` with the list of part ETags. Metadata service verifies all parts exist, assembles the manifest, flips status to `ready`, increments version, publishes a change event to the sync bus (01.08 Distributed Message Queue).
+Client calls `POST /files/\{id\}/complete` with the list of part ETags. Metadata service verifies all parts exist, assembles the manifest, flips status to `ready`, increments version, publishes a change event to the sync bus (01.08 Distributed Message Queue).
 </Step>
 <Step title="Download">
-Client requests `GET /files/{id}`. Metadata service checks ACL, returns a short-lived signed download URL pointing at the blob (or CDN URL for popular/shared files). Bytes stream from edge or origin — not from the metadata DB.
+Client requests `GET /files/\{id\}`. Metadata service checks ACL, returns a short-lived signed download URL pointing at the blob (or CDN URL for popular/shared files). Bytes stream from edge or origin — not from the metadata DB.
 </Step>
 <Step title="Sync">
-Client sends `GET /changes?cursor={token}` periodically or receives a push via WebSocket. Server returns a delta list: created, modified, deleted, moved files since cursor. Client applies locally, fetches missing blobs. Client pushes its offline queue the same way.
+Client sends `GET /changes?cursor=\{token\}` periodically or receives a push via WebSocket. Server returns a delta list: created, modified, deleted, moved files since cursor. Client applies locally, fetches missing blobs. Client pushes its offline queue the same way.
 </Step>
 </Steps>
 
@@ -107,7 +107,7 @@ Client sends `GET /changes?cursor={token}` periodically or receives a push via W
 
 ### Resumable multipart upload
 
-Split a 5 GB file into ~625 chunks of 8 MB. The client uploads chunks 1–400, loses Wi-Fi, reconnects, asks the server which parts are already committed (`GET /files/{id}/status`), uploads 401–625, then completes. The metadata service never holds the file in memory.
+Split a 5 GB file into ~625 chunks of 8 MB. The client uploads chunks 1–400, loses Wi-Fi, reconnects, asks the server which parts are already committed (`GET /files/\{id\}/status`), uploads 401–625, then completes. The metadata service never holds the file in memory.
 
 Content-defined chunking (rolling hash boundaries) enables **block-level dedup**: if chunk 47 already exists in the store, skip uploading it. Mention it as an optimization; do not design the whole interview around it unless asked.
 
