@@ -19,7 +19,7 @@ export function Header() {
     <header className="sticky top-0 z-40 border-b-2 border-structural bg-paper/90 backdrop-blur">
       <div className="mx-auto flex max-w-[1200px] items-center gap-4 px-4 py-3">
         <Link href="/" className="flex items-center gap-2">
-          <span className="font-pixel text-lg">cineshek</span>
+          <span className="font-pixel text-lg">crackprep</span>
           <span className="rounded-card border-2 border-structural px-1.5 font-mono text-[10px] uppercase">
             beta
           </span>

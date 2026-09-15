@@ -1,4 +1,4 @@
-# Cineshek System Design Site — Implementation Plan
+# CrackPrep — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -8,7 +8,7 @@
 
 **Tech Stack:** Next.js 16.3.4, React 19.2.8, TypeScript 5, Tailwind CSS 4.3.3 (CSS-first `@theme`, no config file), `@mdx-js/mdx@3` (`evaluate`), Zod 4, Vitest 5, Playwright 1.63, `next-themes` 0.4, `lucide-react` 1.42.
 
-**Spec:** `docs/superpowers/specs/2026-09-08-cineshek-system-design-site-design.md`
+**Spec:** `docs/superpowers/specs/2026-09-08-crackprep-system-design-site-design.md`
 
 ---
 
@@ -146,15 +146,15 @@ Files that change together live together: each component owns its markup and sty
 The repo root already contains `SDsyllabus.md` and `docs/`, so scaffold into a temp directory and move the files in. The directory name must not begin with a dot — `create-next-app` validates it as an npm package name and rejects leading dots. Run from the repo root:
 
 ```bash
-npx --yes create-next-app@latest cineshek-scaffold-tmp \
+npx --yes create-next-app@latest crackprep-scaffold-tmp \
   --typescript --tailwind --app --no-src-dir --no-import-alias \
   --use-npm --skip-install --disable-git --yes
-cp -R cineshek-scaffold-tmp/app cineshek-scaffold-tmp/public .
-cp cineshek-scaffold-tmp/package.json cineshek-scaffold-tmp/next.config.ts \
-   cineshek-scaffold-tmp/postcss.config.mjs cineshek-scaffold-tmp/tsconfig.json \
-   cineshek-scaffold-tmp/eslint.config.mjs cineshek-scaffold-tmp/next-env.d.ts \
-   cineshek-scaffold-tmp/.gitignore .
-rm -rf cineshek-scaffold-tmp
+cp -R crackprep-scaffold-tmp/app crackprep-scaffold-tmp/public .
+cp crackprep-scaffold-tmp/package.json crackprep-scaffold-tmp/next.config.ts \
+   crackprep-scaffold-tmp/postcss.config.mjs crackprep-scaffold-tmp/tsconfig.json \
+   crackprep-scaffold-tmp/eslint.config.mjs crackprep-scaffold-tmp/next-env.d.ts \
+   crackprep-scaffold-tmp/.gitignore .
+rm -rf crackprep-scaffold-tmp
 ```
 
 - [ ] **Step 2: Install dependencies**
@@ -182,7 +182,7 @@ Replace the `"name"` and `"scripts"` blocks:
 
 ```json
 {
-  "name": "cineshek",
+  "name": "crackprep",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -866,8 +866,8 @@ export async function generateMetadata(): Promise<Metadata> {
   const stats = getCourseStats(courseSlug);
   return {
     title: {
-      default: "Cineshek — System design, in depth",
-      template: "%s · Cineshek",
+      default: "CrackPrep — System design, in depth",
+      template: "%s · CrackPrep",
     },
     description: `A sequenced system design curriculum: ${stats.moduleCount} modules, ${stats.topicCount} topics, from requirements clarification to storage engines.`,
   };
@@ -2748,7 +2748,7 @@ export function Header() {
     <header className="sticky top-0 z-40 border-b-2 border-structural bg-paper/90 backdrop-blur">
       <div className="mx-auto flex max-w-[1200px] items-center gap-4 px-4 py-3">
         <Link href="/" className="flex items-center gap-2">
-          <span className="font-pixel text-lg">cineshek</span>
+          <span className="font-pixel text-lg">crackprep</span>
           <span className="rounded-card border-2 border-structural px-1.5 font-mono text-[10px] uppercase">
             beta
           </span>
@@ -2800,7 +2800,7 @@ export function Footer() {
     <footer className="mt-24 border-t-2 border-structural">
       <div className="mx-auto flex max-w-[1200px] flex-col gap-4 px-4 py-10 sm:flex-row sm:items-center">
         <div>
-          <p className="font-pixel text-base">cineshek</p>
+          <p className="font-pixel text-base">crackprep</p>
           <p className="mt-1 font-mono text-xs text-ink-muted">
             {stats.moduleCount} modules · {stats.topicCount} topics
           </p>
@@ -4403,7 +4403,7 @@ Expected: FAIL — unresolved imports.
 An external store rather than component state, so `useSyncExternalStore` can give React a server snapshot and avoid a hydration mismatch.
 
 ```ts
-const STORAGE_KEY = "cineshek:progress:v1";
+const STORAGE_KEY = "crackprep:progress:v1";
 const EMPTY_SNAPSHOT = "[]";
 
 type Listener = () => void;
@@ -5604,7 +5604,7 @@ import { getCourses } from "@/lib/content";
 
 export const metadata: Metadata = {
   title: "Paths",
-  description: "Learning paths on Cineshek. System design is live; more are planned.",
+  description: "Learning paths on CrackPrep. System design is live; more are planned.",
 };
 
 export default function CoursesPage() {

@@ -1,7 +1,13 @@
 import { ArrowRight } from "lucide-react";
 import { Button } from "@/components/ui/Button";
 
-export function Hero({ topicCount, moduleCount }: { topicCount: number; moduleCount: number }) {
+export function Hero({
+  pathCount,
+  topicCount,
+}: {
+  pathCount: number;
+  topicCount: number;
+}) {
   return (
     <section className="relative mx-auto max-w-[1200px] px-4 pt-16 pb-12 text-center">
       {/* Decorative tilted cards. Hidden below md and from assistive tech. */}
@@ -18,17 +24,17 @@ export function Hero({ topicCount, moduleCount }: { topicCount: number; moduleCo
         </h1>
 
         <p className="mx-auto mt-6 max-w-xl text-lg text-ink-muted">
-          A sequenced system design curriculum — {moduleCount} modules,{" "}
-          {topicCount} topics, each one resting on the last.
+          Interview prep across {pathCount} paths — system design, LeetCode, design
+          patterns, and Design X case studies. {topicCount} lessons, sequenced.
         </p>
 
         <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
-          <Button href="/system-design" size="lg">
-            Start learning free
+          <Button href="/courses" size="lg">
+            Choose a path
             <ArrowRight aria-hidden className="size-4" />
           </Button>
-          <Button href="/syllabus" variant="secondary" size="lg">
-            Browse syllabus
+          <Button href="/system-design" variant="secondary" size="lg">
+            Start system design
           </Button>
         </div>
       </div>

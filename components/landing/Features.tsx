@@ -4,7 +4,7 @@ const FEATURES = [
   {
     icon: ListOrdered,
     title: "Sequenced, not searched",
-    body: "Topics are ordered so each one rests on the last. You can read straight through.",
+    body: "Paths are ordered so each lesson rests on the last. You can read straight through.",
   },
   {
     icon: GitCompare,
@@ -13,8 +13,8 @@ const FEATURES = [
   },
   {
     icon: Ruler,
-    title: "Numbers, not vibes",
-    body: "Capacity estimates, latency budgets, and amplification factors, worked out.",
+    title: "Interview-ready depth",
+    body: "Capacity estimates, algorithms, patterns, and Design X scripts — what to say out loud.",
   },
 ];
 

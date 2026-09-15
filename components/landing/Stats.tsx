@@ -1,13 +1,15 @@
 export function Stats({
-  moduleCount, topicCount, publishedCount,
+  pathCount,
+  topicCount,
+  publishedCount,
 }: {
-  moduleCount: number;
+  pathCount: number;
   topicCount: number;
   publishedCount: number;
 }) {
   const items = [
-    { value: String(moduleCount), label: "Modules" },
-    { value: String(topicCount), label: "Topics" },
+    { value: String(pathCount), label: "Paths" },
+    { value: String(topicCount), label: "Lessons" },
     ...(publishedCount > 0
       ? [{ value: String(publishedCount), label: "Written" }]
       : []),

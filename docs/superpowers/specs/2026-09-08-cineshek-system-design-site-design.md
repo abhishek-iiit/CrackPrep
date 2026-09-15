@@ -1,4 +1,4 @@
-# Cineshek — System Design Learning Site
+# CrackPrep — Interview prep site
 
 **Date:** 2026-09-08
 **Status:** Approved design, pending implementation plan

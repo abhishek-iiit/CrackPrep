@@ -1,4 +1,5 @@
 const FOR = [
+  "Complete beginners who want one ordered path into interviews",
   "Engineers preparing for senior and staff system design interviews",
   "Candidates rehearsing Design X prompts — Drive, YouTube, WhatsApp, and the rest",
   "Candidates working a curated LeetCode roadmap instead of a random grind",
@@ -6,7 +7,6 @@ const FOR = [
 ];
 
 const NOT_FOR = [
-  "Complete beginners — this assumes you have written and shipped software",
   "Anyone looking for memorisable answers rather than tradeoffs",
 ];
 

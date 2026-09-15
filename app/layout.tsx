@@ -35,10 +35,10 @@ export async function generateMetadata(): Promise<Metadata> {
   const stats = getCourseStats(courseSlug);
   return {
     title: {
-      default: "Cineshek — System design, in depth",
-      template: "%s · Cineshek",
+      default: "CrackPrep — Interview prep, mapped",
+      template: "%s · CrackPrep",
     },
-    description: `A sequenced system design curriculum: ${stats.moduleCount} modules, ${stats.topicCount} topics, from requirements clarification to storage engines.`,
+    description: `Interview prep across system design, LeetCode, design patterns, and Design X case studies — including ${stats.moduleCount} system design modules and ${stats.topicCount} topics in order.`,
   };
 }
 

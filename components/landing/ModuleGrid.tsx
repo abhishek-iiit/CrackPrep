@@ -9,10 +9,10 @@ export function ModuleGrid({ modules }: { modules: readonly Module[] }) {
       {/* Derived, not spelled out: a hardcoded count is stale the moment a
           module is added, and nobody re-audits headline prose. */}
       <h2 className="text-2xl font-semibold tracking-tight">
-        The {modules.length} modules
+        System design — {modules.length} modules
       </h2>
       <p className="mt-2 max-w-prose text-ink-muted">
-        In order. Each one assumes the ones before it.
+        The deep engineering path, in order. Each module assumes the ones before it.
       </p>
 
       <ul className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">

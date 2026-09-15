@@ -63,8 +63,8 @@ describe("SITE_URL", () => {
   it("uses the configured origin when there is one", async () => {
     vi.resetModules();
     vi.stubEnv("NODE_ENV", "production");
-    vi.stubEnv("NEXT_PUBLIC_SITE_URL", "https://cineshek.example");
+    vi.stubEnv("NEXT_PUBLIC_SITE_URL", "https://crackprep.example");
     const { SITE_URL } = await import("@/lib/site");
-    expect(SITE_URL).toBe("https://cineshek.example");
+    expect(SITE_URL).toBe("https://crackprep.example");
   });
 });

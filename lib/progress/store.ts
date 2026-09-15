@@ -1,4 +1,4 @@
-const STORAGE_KEY = "cineshek:progress:v1";
+const STORAGE_KEY = "crackprep:progress:v1";
 const EMPTY_SNAPSHOT = "[]";
 
 type Listener = () => void;

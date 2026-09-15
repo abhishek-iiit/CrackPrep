@@ -5,7 +5,7 @@ import { getCourses } from "@/lib/content";
 export const metadata: Metadata = {
   title: "Paths",
   description:
-    "Learning paths on Cineshek — system design, LeetCode, design patterns, and Design X case studies.",
+    "Learning paths on CrackPrep — system design, LeetCode, design patterns, and Design X case studies.",
 };
 
 export default function CoursesPage() {

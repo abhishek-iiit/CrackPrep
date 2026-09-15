@@ -1,25 +1,31 @@
 import Link from "next/link";
-import { courseSlug, getCourseStats } from "@/lib/content";
+import { getCourses, getTotalPublishedCount } from "@/lib/content";
 
 export function Footer() {
-  // courseSlug, not a literal: this was the only hardcoded slug outside lib/,
-  // and getCourseStats returns zeros for an unknown course — so renaming the
-  // course would have left the footer quietly claiming "0 modules · 0 topics".
-  const stats = getCourseStats(courseSlug);
+  const live = getCourses().filter((c) => c.status === "live");
+  const topicCount = live.reduce((n, c) => n + c.topicCount, 0);
+  const publishedCount = getTotalPublishedCount();
 
   return (
     <footer className="mt-24 border-t-2 border-structural">
       <div className="mx-auto flex max-w-[1200px] flex-col gap-4 px-4 py-10 sm:flex-row sm:items-center">
         <div>
-          <p className="font-pixel text-base">cineshek</p>
+          <p className="font-pixel text-base">crackprep</p>
           <p className="mt-1 font-mono text-xs text-ink-muted">
-            {stats.moduleCount} modules · {stats.topicCount} topics
+            {live.length} paths · {topicCount} lessons
+            {publishedCount > 0 && ` · ${publishedCount} written`}
           </p>
         </div>
         <nav aria-label="Footer" className="flex flex-wrap gap-4 sm:ml-auto">
-          <Link href="/system-design" className="text-sm text-link underline">Course</Link>
-          <Link href="/syllabus" className="text-sm text-link underline">Syllabus</Link>
-          <Link href="/courses" className="text-sm text-link underline">Paths</Link>
+          <Link href="/courses" className="text-sm text-link underline">
+            Paths
+          </Link>
+          <Link href="/system-design" className="text-sm text-link underline">
+            System design
+          </Link>
+          <Link href="/syllabus" className="text-sm text-link underline">
+            Syllabus
+          </Link>
         </nav>
       </div>
     </footer>

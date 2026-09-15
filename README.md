@@ -1,17 +1,16 @@
-# Cineshek — System Design learning site
+# CrackPrep — Interview prep, mapped
 
-A static Next.js site that teaches system design as a sequence of short,
-linked lessons. The curriculum — 14 modules, 179 topics — is generated from
-`SDsyllabus.md` into MDX files under `content/system-design/`, then rendered
-by a small set of routes: a landing page, `/courses`, `/syllabus`, a
-per-module overview, and a three-column lesson page with sidebar navigation,
-a table of contents, and per-browser progress tracking. Search is a `⌘K`
-command palette backed by a build-time JSON index. Everything ships
-statically — there is no server, no database, and no accounts; the only
-optional runtime configuration is where the email-capture form posts to.
+A static Next.js site for interview prep: system design, LeetCode, design
+patterns, and Design X case studies. Lessons are short and sequenced. Routes
+cover a landing page, `/courses`, syllabi, per-module overviews, and
+three-column lesson pages with sidebar navigation, a table of contents, and
+per-browser progress tracking. Search is a `⌘K` command palette backed by a
+build-time JSON index. Everything ships statically — there is no server, no
+database, and no accounts; the only optional runtime configuration is where
+the email-capture form posts to.
 
-Three courses are live today: `system-design`, `leetcode`, and
-`design-patterns`. Additional courses can be added as a content directory plus
+Four courses are live today: `system-design`, `leetcode`, `design-patterns`,
+and `case-studies`. Additional courses can be added as a content directory plus
 registry entry in `content/courses.ts` and routes under `app/<slug>/`.
 
 Full design rationale: `docs/superpowers/specs/2026-09-08-cineshek-system-design-site-design.md`.
